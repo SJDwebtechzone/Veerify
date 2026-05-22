@@ -1,0 +1,55 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    font-family: 'Inter', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body {
+    @apply text-slate-700 dark:text-slate-200;
+  }
+
+  /* Scrollbar styling */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-slate-300 dark:bg-slate-700 rounded-full;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-slate-400 dark:bg-slate-600;
+  }
+}
+
+@layer components {
+  .glass {
+    @apply backdrop-blur-xl bg-white/70 dark:bg-slate-900/60 border border-white/40 dark:border-white/5;
+  }
+
+  .card {
+    @apply bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/60 dark:border-slate-800 shadow-soft;
+  }
+
+  .card-hover {
+    @apply transition-all duration-200 hover:shadow-glow hover:-translate-y-0.5;
+  }
+
+  .gradient-bg {
+    background:
+      radial-gradient(ellipse 80% 60% at 50% -20%, rgb(99 102 241 / 0.15), transparent),
+      radial-gradient(ellipse 60% 40% at 100% 0%, rgb(244 114 182 / 0.08), transparent);
+  }
+
+  .dark .gradient-bg {
+    background:
+      radial-gradient(ellipse 80% 60% at 50% -20%, rgb(99 102 241 / 0.2), transparent),
+      radial-gradient(ellipse 60% 40% at 100% 0%, rgb(244 114 182 / 0.1), transparent);
+  }
+}

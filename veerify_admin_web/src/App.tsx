@@ -1,0 +1,102 @@
+import { Routes, Route } from 'react-router-dom';
+import {
+  GraduationCap,
+  UserCog,
+  BookOpen,
+  CalendarRange,
+  Wallet,
+  Bell,
+  Star,
+  Settings,
+} from 'lucide-react';
+import { AppLayout } from './components/layout/AppLayout';
+import { ProtectedRoute } from './components/ProtectedRoute';
+import { Dashboard } from './pages/Dashboard';
+import { Login } from './pages/Login';
+import { PlaceholderPage } from './pages/PlaceholderPage';
+import { Banners } from './pages/cms/Banners';
+import { Categories } from './pages/cms/Categories';
+import { Videos } from './pages/cms/Videos';
+import { Events } from './pages/cms/Events';
+import { InstitutionsPending } from './pages/institutions/InstitutionsPending';
+import { InstitutionDetail } from './pages/institutions/InstitutionDetail';
+import { InstitutionsList } from './pages/institutions/InstitutionsList';
+
+export default function App() {
+  return (
+    <Routes>
+      {/* Public */}
+      <Route path="/login" element={<Login />} />
+
+      {/* Protected app shell */}
+      <Route
+        element={
+          <ProtectedRoute>
+            <AppLayout />
+          </ProtectedRoute>
+        }
+      >
+        <Route index element={<Dashboard />} />
+
+        {/* Institutions */}
+
+        <Route path="/institutions" element={<InstitutionsList />} />
+        <Route path="/institutions/active" element={<InstitutionsList presetFilter="active" pageTitle="Active Institutions" pageSubtitle="Academies currently live on Veerify." />} />
+        <Route path="/institutions/expired" element={<InstitutionsList presetFilter="expired" pageTitle="Expired Plans" pageSubtitle="Subscriptions past their end date." />} />
+        <Route path="/institutions/pending" element={<InstitutionsPending />} />
+        <Route path="/institutions/:id" element={<InstitutionDetail />} />
+
+
+        {/* Students */}
+        <Route path="/students" element={<PlaceholderPage title="All Students" icon={GraduationCap} />} />
+        <Route path="/students/attendance" element={<PlaceholderPage title="Attendance" icon={GraduationCap} />} />
+        <Route path="/students/enrollments" element={<PlaceholderPage title="Enrollments" icon={GraduationCap} />} />
+
+        {/* Trainers */}
+        <Route path="/trainers" element={<PlaceholderPage title="Trainers List" icon={UserCog} />} />
+        <Route path="/trainers/skills" element={<PlaceholderPage title="Skills" icon={UserCog} />} />
+        <Route path="/trainers/availability" element={<PlaceholderPage title="Availability" icon={UserCog} />} />
+
+        {/* Courses */}
+        <Route path="/courses" element={<PlaceholderPage title="Courses" icon={BookOpen} />} />
+        <Route path="/courses/videos" element={<PlaceholderPage title="Videos" icon={BookOpen} />} />
+        <Route path="/courses/syllabus" element={<PlaceholderPage title="Syllabus" icon={BookOpen} />} />
+
+        {/* Mobile App CMS */}
+        <Route path="/mobile/banners" element={<Banners />} />
+        <Route path="/mobile/categories" element={<Categories />} />
+        <Route path="/mobile/videos" element={<Videos />} />
+        <Route path="/mobile/events" element={<Events />} />
+
+        {/* Batches */}
+        <Route path="/batches" element={<PlaceholderPage title="Active Batches" icon={CalendarRange} />} />
+        <Route path="/batches/assign" element={<PlaceholderPage title="Assign Trainers" icon={CalendarRange} />} />
+        <Route path="/batches/capacity" element={<PlaceholderPage title="Capacity" icon={CalendarRange} />} />
+
+        {/* Payments */}
+        <Route path="/payments" element={<PlaceholderPage title="Revenue Analytics" icon={Wallet} />} />
+        <Route path="/payments/subscriptions" element={<PlaceholderPage title="Subscription Payments" icon={Wallet} />} />
+        <Route path="/payments/pending" element={<PlaceholderPage title="Pending Payments" icon={Wallet} />} />
+
+        {/* Notifications */}
+        <Route path="/notifications" element={<PlaceholderPage title="Announcements" icon={Bell} />} />
+        <Route path="/notifications/push" element={<PlaceholderPage title="Push Notifications" icon={Bell} />} />
+        <Route path="/notifications/emails" element={<PlaceholderPage title="Email Templates" icon={Bell} />} />
+
+        {/* Ratings */}
+        <Route path="/ratings" element={<PlaceholderPage title="Reviews" icon={Star} />} />
+        <Route path="/ratings/trainers" element={<PlaceholderPage title="Trainer Ratings" icon={Star} />} />
+
+        {/* Settings */}
+        <Route path="/settings" element={<PlaceholderPage title="General Settings" icon={Settings} />} />
+        <Route path="/settings/plans" element={<PlaceholderPage title="Subscription Plans" icon={Settings} />} />
+        <Route path="/settings/roles" element={<PlaceholderPage title="Roles & Permissions" icon={Settings} />} />
+
+        {/* Fallback */}
+        <Route path="*" element={<PlaceholderPage title="Page not found" description="The page you're looking for doesn't exist." />} />
+
+        
+      </Route>
+    </Routes>
+  );
+}
