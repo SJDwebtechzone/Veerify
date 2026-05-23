@@ -212,7 +212,16 @@ export default function HomeTabScreen({ navigation }) {
           title="Featured Programs"
           subtitle={selectedInstitution?.name}
           actionLabel="See all"
-          onAction={() => navigation.navigate('Programs')}
+          onAction={() => {
+            // jumpTo is the bottom-tab navigator's dedicated tab-switch API.
+            // navigation.navigate() can be ambiguous when both stack and tab
+            // navigators exist in the tree; jumpTo always lands on the tab.
+            if (typeof navigation.jumpTo === 'function') {
+              navigation.jumpTo('Programs');
+            } else {
+              navigation.navigate('Programs');
+            }
+          }}
         >
           {featuredPrograms.length === 0 ? (
             <EmptyInline icon={GraduationCap} text="No programs yet" />

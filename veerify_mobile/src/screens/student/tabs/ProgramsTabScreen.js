@@ -17,8 +17,10 @@ import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, RefreshControl,
   TextInput, ActivityIndicator, StyleSheet, Image, FlatList, Alert,
+  StatusBar, Platform,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   Search, ChevronDown, ChevronRight, PlayCircle, Clock, Sparkles,
   GraduationCap, Building2, User,
@@ -46,6 +48,8 @@ const cycleAccent = (i) => ACCENTS[i % ACCENTS.length];
 export default function ProgramsTabScreen({ navigation }) {
   const { user } = useAuth();
   const { selectedInstitution, loading: instLoading } = useInstitution();
+  // Push the header below the Android status bar / iOS notch.
+  const insets = useSafeAreaInsets();
 
   const [programs, setPrograms] = useState([]);
   const [categories, setCategories] = useState([]);
@@ -159,8 +163,21 @@ export default function ProgramsTabScreen({ navigation }) {
 
   return (
     <View style={styles.screen}>
-      {/* Header */}
-      <View style={styles.header}>
+      {/* Header — paddingTop is dynamic so the institution name doesn't get
+          clipped behind the Android status bar or iOS notch. We use the
+          safe-area inset if it's reported, falling back to the StatusBar
+          height on Android in case the SafeAreaProvider context isn't in
+          scope yet. */}
+      <View style={[
+        styles.header,
+        {
+          paddingTop:
+            Math.max(
+              insets.top,
+              Platform.OS === 'android' ? (StatusBar.currentHeight || 0) : 0,
+            ) + spacing.md,
+        },
+      ]}>
         <View style={{ flex: 1 }}>
           <Text style={styles.eyebrow}>Programs at</Text>
           <TouchableOpacity
