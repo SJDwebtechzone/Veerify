@@ -18,4 +18,9 @@ router.get('/pending-requests', verifyToken, requireRole('student'), parentContr
 router.patch('/approve/:linkId', verifyToken, requireRole('student'), parentController.approveParent);
 router.patch('/reject/:linkId', verifyToken, requireRole('student'), parentController.rejectParent);
 
+// Admin routes — institution-managed parent-child links
+router.post('/admin-link',     verifyToken, requireRole('admin'), parentController.adminLink);
+router.get('/admin-links',     verifyToken, requireRole('admin'), parentController.adminListLinks);
+router.delete('/admin-links/:id', verifyToken, requireRole('admin'), parentController.adminUnlink);
+
 module.exports = router;

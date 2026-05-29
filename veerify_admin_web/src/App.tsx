@@ -21,6 +21,7 @@ import { Events } from './pages/cms/Events';
 import { InstitutionsPending } from './pages/institutions/InstitutionsPending';
 import { InstitutionDetail } from './pages/institutions/InstitutionDetail';
 import { InstitutionsList } from './pages/institutions/InstitutionsList';
+import { Plans } from './pages/settings/Plans';
 
 export default function App() {
   return (
@@ -89,7 +90,7 @@ export default function App() {
 
         {/* Settings */}
         <Route path="/settings" element={<PlaceholderPage title="General Settings" icon={Settings} />} />
-        <Route path="/settings/plans" element={<PlaceholderPage title="Subscription Plans" icon={Settings} />} />
+        <Route path="/settings/plans" element={<Plans />} />
         <Route path="/settings/roles" element={<PlaceholderPage title="Roles & Permissions" icon={Settings} />} />
 
         {/* Fallback */}

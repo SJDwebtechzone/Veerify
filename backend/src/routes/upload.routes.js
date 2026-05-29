@@ -28,9 +28,13 @@ const genericStorage = multer.diskStorage({
   },
 });
 const genericFileFilter = (_req, file, cb) => {
-  const allowed = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif'];
+  // Accept common images plus PDFs (accreditation certificates etc.).
+  const allowed = [
+    'image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif',
+    'application/pdf',
+  ];
   if (allowed.includes(file.mimetype)) cb(null, true);
-  else cb(new Error('Only JPG, PNG, WebP and GIF images are allowed'), false);
+  else cb(new Error('Only JPG, PNG, WebP, GIF or PDF files are allowed'), false);
 };
 const genericUpload = multer({
   storage: genericStorage,

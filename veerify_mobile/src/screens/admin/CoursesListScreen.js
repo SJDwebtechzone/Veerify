@@ -64,7 +64,9 @@ export default function CoursesListScreen({ navigation }) {
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   const onView = (course) => {
-    navigation.navigate('CourseDetail', { courseId: course.id });
+    // Admin gets the operational detail screen (batches, students, revenue),
+    // not the student-facing CourseDetail.
+    navigation.navigate('AdminCourseDetail', { courseId: course.id });
   };
   const onEdit = (course) => {
     navigation.navigate('CreateCourse', { courseId: course.id, course });

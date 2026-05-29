@@ -31,6 +31,7 @@ import { ChartCard } from '../components/ui/ChartCard';
 import { DataTable, type Column } from '../components/ui/DataTable';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
+import { useNotifications } from '../lib/notifications';
 import {
   revenueData,
   growthData,
@@ -46,6 +47,12 @@ import {
 import { formatCurrency, formatNumber, formatDate } from '../lib/utils';
 
 export function Dashboard() {
+  // Live counts from /api/onboarding/counts (polled every 30s by
+  // NotificationsProvider). Active = institutions that completed payment and
+  // are currently subscribed; pending_approval = academies waiting for super
+  // admin review; total = every institution row that isn't soft-deleted.
+  const { counts } = useNotifications();
+
   return (
     <div className="space-y-6 animate-fade-in">
       {/* Header */}
@@ -73,14 +80,14 @@ export function Dashboard() {
 
       {/* Stats grid */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-  <StatsCard label="Total Institutions" value="0" delta={0} icon={Building2} accent="brand" />
-  <StatsCard label="Active Subscriptions" value="0" delta={0} icon={CheckCircle2} accent="emerald" />
-  <StatsCard label="Total Students" value="0" delta={0} icon={GraduationCap} accent="sky" />
-  <StatsCard label="Total Trainers" value="0" delta={0} icon={UserCog} accent="brand" />
-  <StatsCard label="Monthly Revenue" value="₹0" delta={0} icon={Wallet} accent="emerald" />
-  <StatsCard label="Pending Payments" value="₹0" delta={0} icon={AlertTriangle} accent="rose" />
-  <StatsCard label="Active Batches" value="0" delta={0} icon={CalendarRange} accent="amber" />
-  <StatsCard label="Course Completion" value="0%" delta={0} icon={TrendingUp} accent="sky" />
+  <StatsCard label="Total Institutions"   value={formatNumber(counts.total)}            delta={0} icon={Building2}     accent="brand" />
+  <StatsCard label="Active Subscriptions" value={formatNumber(counts.active)}           delta={0} icon={CheckCircle2}  accent="emerald" />
+  <StatsCard label="Pending Approvals"    value={formatNumber(counts.pending_approval)} delta={0} icon={AlertTriangle} accent="amber" />
+  <StatsCard label="Total Students"       value="0"  delta={0} icon={GraduationCap} accent="sky" />
+  <StatsCard label="Total Trainers"       value="0"  delta={0} icon={UserCog}       accent="brand" />
+  <StatsCard label="Monthly Revenue"      value="₹0" delta={0} icon={Wallet}        accent="emerald" />
+  <StatsCard label="Active Batches"       value="0"  delta={0} icon={CalendarRange} accent="amber" />
+  <StatsCard label="Course Completion"    value="0%" delta={0} icon={TrendingUp}    accent="sky" />
 </div>
 
       {/* Charts row 1 */}

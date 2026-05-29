@@ -4,7 +4,10 @@ const trainerController = require('../controllers/trainer.controller');
 const { verifyToken } = require('../middleware/auth.middleware');
 const { requireRole } = require('../middleware/role.middleware');
 
-// All trainer routes are admin-only
+// Trainer's own profile (must come before /:id so it's not captured as an id).
+router.get('/me', verifyToken, requireRole('trainer'), trainerController.getMe);
+
+// All other trainer routes are admin-only
 router.post('/', verifyToken, requireRole('admin'), trainerController.createTrainer);
 router.get('/', verifyToken, requireRole('admin'), trainerController.getMyTrainers);
 router.get('/:id', verifyToken, requireRole('admin'), trainerController.getTrainerById);

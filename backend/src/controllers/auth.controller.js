@@ -176,6 +176,40 @@ const result = await pool.query(
   }
 };
 
+// POST /api/auth/change-password — verify current password, hash new one.
+exports.changePassword = async (req, res) => {
+  try {
+    const { current_password, new_password } = req.body || {};
+    if (!current_password || !new_password) {
+      return res.status(400).json({ message: 'current_password and new_password are required' });
+    }
+    if (new_password.length < 6) {
+      return res.status(400).json({ message: 'New password must be at least 6 characters' });
+    }
+
+    const userId = req.user.id;
+    const r = await pool.query('SELECT password FROM users WHERE id = $1', [userId]);
+    if (r.rows.length === 0) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    const valid = await bcrypt.compare(current_password, r.rows[0].password);
+    if (!valid) {
+      return res.status(401).json({ message: 'Current password is incorrect' });
+    }
+
+    const hashed = await bcrypt.hash(new_password, 10);
+    await pool.query(
+      'UPDATE users SET password = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+      [hashed, userId],
+    );
+
+    res.json({ message: 'Password updated successfully' });
+  } catch (err) {
+    console.error('Change password error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
 // GET current user info (protected route)
 exports.getMe = async (req, res) => {
   try {

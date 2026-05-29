@@ -22,6 +22,7 @@ import AccountDeletedScreen from '../screens/admin/AccountDeletedScreen';
 import StudentDetailScreen from '../screens/admin/StudentDetailScreen';
 import CoursesListScreen from '../screens/admin/CoursesListScreen';
 import CreateCourseScreen from '../screens/admin/CreateCourseScreen';
+import AdminCourseDetailScreen from '../screens/admin/AdminCourseDetailScreen';
 import BatchesListScreen from '../screens/admin/BatchesListScreen';
 import CreateBatchScreen from '../screens/admin/CreateBatchScreen';
 import TrainersListScreen from '../screens/admin/TrainersListScreen';
@@ -36,17 +37,28 @@ import BatchDetailScreen from '../screens/student/BatchDetailScreen';
 import MyAttendanceScreen from '../screens/student/MyAttendanceScreen';
 import ParentRequestsScreen from '../screens/student/ParentRequestsScreen';
 
-// Trainer
-import TrainerDashboardScreen from '../screens/trainer/TrainerDashboardScreen';
+// Trainer / Staff
+import StaffTabNavigator from './StaffTabNavigator';
+import StaffNotificationsScreen from '../screens/staff/StaffNotificationsScreen';
+import StaffAttendanceHistoryScreen from '../screens/staff/StaffAttendanceHistoryScreen';
+import StaffStudentDetailScreen from '../screens/staff/StaffStudentDetailScreen';
+import StaffLeaveRequestsScreen from '../screens/staff/StaffLeaveRequestsScreen';
+import StaffSalaryScreen from '../screens/staff/StaffSalaryScreen';
 import BatchStudentsScreen from '../screens/trainer/BatchStudentsScreen';
 import AttendanceHistoryScreen from '../screens/trainer/AttendanceHistoryScreen';
 
 // Parent
-import ParentDashboardScreen from '../screens/parent/ParentDashboardScreen';
+import ParentTabNavigator from './ParentTabNavigator';
 import LinkChildScreen from '../screens/parent/LinkChildScreen';
+import LinkedChildrenScreen from '../screens/parent/LinkedChildrenScreen';
+import ChildProgressScreen from '../screens/parent/ChildProgressScreen';
+import ChildAchievementsScreen from '../screens/parent/ChildAchievementsScreen';
+import InformLeaveScreen from '../screens/parent/InformLeaveScreen';
+import ChildEventsScreen from '../screens/parent/ChildEventsScreen';
 import ChildDetailScreen from '../screens/parent/ChildDetailScreen';
 import ChildAttendanceScreen from '../screens/parent/ChildAttendanceScreen';
 import ChildPaymentsScreen from '../screens/parent/ChildPaymentsScreen';
+import ChildProfileScreen from '../screens/parent/ChildProfileScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -134,10 +146,12 @@ export default function AppNavigator() {
             component={PlanSelectionScreen}
             options={{ headerShown: true, title: 'Choose Your Plan', headerBackVisible: false }}
           />
+          {/* SetupInstitution renders its own progress header, so we
+              hide the native stack header to avoid stacking two bars. */}
           <Stack.Screen
             name="SetupInstitution"
             component={SetupInstitutionScreen}
-            options={{ headerShown: true, title: 'Academy Setup' }}
+            options={{ headerShown: false }}
           />
           <Stack.Screen
             name="PendingApproval"
@@ -161,12 +175,21 @@ export default function AppNavigator() {
           <Stack.Screen name="CoursesList" component={CoursesListScreen} />
           <Stack.Screen name="CreateCourse" component={CreateCourseScreen}
             options={{ headerShown: true, title: 'New Course' }} />
+          {/* AdminCourseDetailScreen renders its own image hero so we hide
+              the native stack header to avoid stacking two bars. */}
+          <Stack.Screen name="AdminCourseDetail" component={AdminCourseDetailScreen}
+            options={{ headerShown: false }} />
           <Stack.Screen name="BatchesList" component={BatchesListScreen} />
           <Stack.Screen name="CreateBatch" component={CreateBatchScreen}
             options={{ headerShown: true, title: 'New Batch' }} />
           <Stack.Screen name="TrainersList" component={TrainersListScreen} />
+          {/* CreateTrainerScreen renders its own header so we hide the
+              native stack header to avoid stacking two bars. */}
           <Stack.Screen name="CreateTrainer" component={CreateTrainerScreen}
-            options={{ headerShown: true, title: 'Add Trainer' }} />
+            options={{ headerShown: false }} />
+          {/* Admins reuse the same Notifications inbox as staff/parent —
+              it scopes to the calling user via JWT, so it works for every role. */}
+          <Stack.Screen name="StaffNotifications" component={StaffNotificationsScreen} />
         </Stack.Navigator>
       </NavigationContainer>
     );
@@ -192,17 +215,32 @@ export default function AppNavigator() {
             options={{ headerShown: true, title: 'My Attendance' }} />
           <Stack.Screen name="ParentRequests" component={ParentRequestsScreen}
             options={{ headerShown: true, title: 'Parent Requests' }} />
+          {/* Students reuse the same Notifications screen the staff module uses —
+              the inbox is per-user via the JWT, so it works for every role. */}
+          <Stack.Screen name="StaffNotifications" component={StaffNotificationsScreen} />
         </Stack.Navigator>
       </NavigationContainer>
     );
   }
 
   // ── TRAINER ──
+  // The five primary screens (Dashboard, Attendance, Students, Notifications,
+  // Profile) live inside StaffTabNavigator as bottom tabs. Detail screens
+  // (history / student detail / leave / salary) sit ABOVE the tabs and get
+  // pushed on top — full-screen, no tab bar visible.
   if (user.role === 'trainer') {
     return (
       <NavigationContainer>
         <Stack.Navigator screenOptions={{ headerShown: false }}>
-          <Stack.Screen name="TrainerDashboard" component={TrainerDashboardScreen} />
+          <Stack.Screen name="StaffTabs" component={StaffTabNavigator} />
+          {/* Legacy route name kept so any code that still calls
+              navigation.navigate('TrainerDashboard') continues to land on
+              the tabbed shell. */}
+          <Stack.Screen name="TrainerDashboard" component={StaffTabNavigator} />
+          <Stack.Screen name="StaffAttendanceHistory" component={StaffAttendanceHistoryScreen} />
+          <Stack.Screen name="StaffStudentDetail" component={StaffStudentDetailScreen} />
+          <Stack.Screen name="StaffLeaveRequests" component={StaffLeaveRequestsScreen} />
+          <Stack.Screen name="StaffSalary" component={StaffSalaryScreen} />
           <Stack.Screen name="BatchStudents" component={BatchStudentsScreen}
             options={{ headerShown: true, title: 'Mark Attendance' }} />
           <Stack.Screen name="AttendanceHistory" component={AttendanceHistoryScreen}
@@ -213,19 +251,40 @@ export default function AppNavigator() {
   }
 
   // ── PARENT ──
+  // ParentTabNavigator holds the five primary destinations (Home / Attendance
+  // / Progress / Payments / More) as bottom tabs. Detail screens (LinkedChildren,
+  // LinkChild, ChildDetail, ChildCertificates, InformLeave, ChildEvents,
+  // ChildProfile) sit ABOVE the tabs — pushing them hides the tab bar.
   if (user.role === 'parent') {
     return (
       <NavigationContainer>
         <Stack.Navigator screenOptions={{ headerShown: false }}>
-          <Stack.Screen name="ParentDashboard" component={ParentDashboardScreen} />
+          <Stack.Screen name="ParentTabs" component={ParentTabNavigator} />
+          {/* Legacy route — keep so any direct navigate('ParentDashboard')
+              still lands on the tabbed shell (which boots into Home). */}
+          <Stack.Screen name="ParentDashboard" component={ParentTabNavigator} />
+          <Stack.Screen name="LinkedChildren" component={LinkedChildrenScreen} />
           <Stack.Screen name="LinkChild" component={LinkChildScreen}
             options={{ headerShown: true, title: 'Link Child' }} />
           <Stack.Screen name="ChildDetail" component={ChildDetailScreen}
             options={{ headerShown: true, title: '' }} />
-          <Stack.Screen name="ChildAttendance" component={ChildAttendanceScreen}
-            options={{ headerShown: true, title: 'Attendance' }} />
-          <Stack.Screen name="ChildPayments" component={ChildPaymentsScreen}
-            options={{ headerShown: true, title: 'Payments' }} />
+          {/* The dashboard's Quick Actions push the same screens above the
+              tabs (with a back button). Same component, two entry points -
+              one in-tab, one stacked. */}
+          <Stack.Screen name="ChildAttendance" component={ChildAttendanceScreen} />
+          <Stack.Screen name="ChildProgress" component={ChildProgressScreen} />
+          <Stack.Screen name="ChildPayments" component={ChildPaymentsScreen} />
+          {/* Dashboard's "Certificates" Quick Action routes to this name. */}
+          <Stack.Screen name="ChildCertificates" component={ChildAchievementsScreen} />
+          <Stack.Screen name="ChildAchievements" component={ChildAchievementsScreen} />
+          <Stack.Screen name="InformLeave" component={InformLeaveScreen} />
+          <Stack.Screen name="ChildEvents" component={ChildEventsScreen} />
+          {/* ChildProfileScreen renders its own red hero/header, so we keep
+              the stack header hidden to avoid stacking two bars. */}
+          <Stack.Screen name="ChildProfile" component={ChildProfileScreen} />
+          {/* Parents reuse the same Notifications screen the staff module uses -
+              the inbox is per-user via the JWT, so it works for every role. */}
+          <Stack.Screen name="StaffNotifications" component={StaffNotificationsScreen} />
         </Stack.Navigator>
       </NavigationContainer>
     );

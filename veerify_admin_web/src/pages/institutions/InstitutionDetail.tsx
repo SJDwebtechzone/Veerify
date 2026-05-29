@@ -3,23 +3,53 @@ import { useParams, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Building2, User, Phone, Mail, MapPin,
   Globe, Award, Hash, CreditCard, CheckCircle,
-  XCircle, Clock, Zap
+  XCircle, Zap, Calendar, BookOpenCheck, Briefcase, ShieldCheck,
+  FileText, BarChart3, Users, Clock, Image as ImageIcon,
+  ExternalLink, Building, Languages,
 } from 'lucide-react';
 import apiClient from '../../api/client';
 
+interface Branch {
+  name?: string;
+  address?: string;
+  city?: string;
+  pincode?: string;
+}
+
 interface Institution {
   id: number;
+  // Core
   name: string;
+  brand_name?: string | null;
   institution_type: string;
-  website_url: string;
+  institution_types?: string[] | null;
+  registration_number: string;
+  date_of_establishment?: string | null;
+  logo_url: string;
+  // Contact & Location
   email: string;
   phone: string;
+  website_url: string;
   address: string;
   city: string;
   pincode: string;
-  registration_number: string;
+  no_of_branches?: number | null;
+  branches?: Branch[] | null;
+  // Accreditation
+  affiliation_or_board?: string | null;
+  accreditation_body_name?: string | null;
+  accreditation_expiry_date?: string | null;
+  accreditation_certificate_url?: string | null;
+  // Operations
+  total_student_capacity?: number | null;
+  medium_of_instruction?: string[] | null;
+  operating_hours?: string | null;
+  // Point of contact
   master_name: string;
-  logo_url: string;
+  master_role?: string | null;
+  master_email?: string | null;
+  master_phone_number?: string | null;
+  // Status + ownership
   onboarding_status: string;
   rejection_reason: string;
   created_at: string;
@@ -29,19 +59,48 @@ interface Institution {
   owner_name: string;
   owner_email: string;
   owner_phone: string;
+  // Plan
   plan_name: string;
   plan_price: string;
   plan_features: Record<string, boolean>;
   max_students: number;
   max_trainers: number;
   max_branches: number;
-  // Payment fields (populated after approval).
+  // Payment
   payment_link_id?: string | null;
   payment_link_url?: string | null;
   payment_link_status?: 'pending' | 'paid' | 'expired' | 'cancelled' | null;
-  payment_amount?: number | null;        // paise
+  payment_amount?: number | null;
   payment_reference?: string | null;
   paid_at?: string | null;
+}
+
+// Files saved as ABSOLUTE URLs sometimes use the API host (10.0.2.2 from
+// the Android emulator) which the browser can't reach. Rewrite known dev
+// hosts to whatever host the API client is currently pointed at.
+function resolveAssetUrl(raw?: string | null): string | null {
+  if (!raw) return null;
+  // Relative path? Prepend the API origin (sans /api).
+  if (raw.startsWith('/')) {
+    const apiOrigin = apiClient.defaults.baseURL?.replace(/\/api\/?$/, '') || '';
+    return `${apiOrigin}${raw}`;
+  }
+  // Replace emulator-only hosts
+  return raw.replace(/^http:\/\/10\.0\.2\.2(?::\d+)?/, () => {
+    return apiClient.defaults.baseURL?.replace(/\/api\/?$/, '') || raw;
+  });
+}
+
+function isPdfUrl(url: string | null): boolean {
+  if (!url) return false;
+  return /\.pdf(\?.*)?$/i.test(url);
+}
+
+function fmtDate(s?: string | null): string {
+  if (!s) return '—';
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return s;
+  return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 }
 
 export function InstitutionDetail() {
@@ -72,7 +131,6 @@ export function InstitutionDetail() {
 
   const handleApprove = async () => {
     if (!window.confirm(`Approve ${institution?.name}? This will notify the academy owner to complete payment.`)) return;
-
     setActionLoading(true);
     try {
       const res = await apiClient.post(`/onboarding/approve/${id}`);
@@ -90,7 +148,6 @@ export function InstitutionDetail() {
       setError('Please provide a rejection reason');
       return;
     }
-
     setActionLoading(true);
     try {
       await apiClient.post(`/onboarding/reject/${id}`, { reason: rejectReason });
@@ -121,7 +178,6 @@ export function InstitutionDetail() {
 
   const handleActivate = async () => {
     if (!window.confirm(`Mark ${institution?.name} as ACTIVE? This confirms payment received.`)) return;
-
     setActionLoading(true);
     try {
       const res = await apiClient.post(`/onboarding/activate/${id}`);
@@ -165,8 +221,19 @@ export function InstitutionDetail() {
 
   if (!institution) return null;
 
+  // ── Derived asset URLs (handle relative paths and emulator hosts) ──
+  const logoUrl = resolveAssetUrl(institution.logo_url);
+  const certUrl = resolveAssetUrl(institution.accreditation_certificate_url);
+  const certIsPdf = isPdfUrl(certUrl);
+
+  // Prefer institution_types[] (new), fall back to single institution_type.
+  const types =
+    Array.isArray(institution.institution_types) && institution.institution_types.length > 0
+      ? institution.institution_types
+      : (institution.institution_type ? [institution.institution_type] : []);
+
   return (
-    <div className="space-y-6 max-w-4xl">
+    <div className="space-y-6 max-w-6xl">
       {/* Back button + header */}
       <div className="flex items-start justify-between">
         <div>
@@ -175,10 +242,29 @@ export function InstitutionDetail() {
             className="flex items-center gap-2 text-gray-500 hover:text-gray-700 mb-3 transition-colors"
           >
             <ArrowLeft size={16} />
-            <span className="text-sm">Back to Pending</span>
+            <span className="text-sm">Back</span>
           </button>
-          <h1 className="text-2xl font-bold text-gray-900">{institution.name}</h1>
-          <p className="text-gray-500 mt-1">{institution.institution_type} • {institution.city}</p>
+          <div className="flex items-center gap-3">
+            {logoUrl ? (
+              <img
+                src={logoUrl}
+                alt={`${institution.name} logo`}
+                className="w-12 h-12 rounded-xl border border-gray-100 object-cover"
+              />
+            ) : null}
+            <div>
+              <h1 className="text-2xl font-bold text-gray-900">
+                {institution.brand_name || institution.name}
+              </h1>
+              <p className="text-gray-500 mt-1 text-sm">
+                {institution.brand_name && institution.brand_name !== institution.name
+                  ? `${institution.name} · `
+                  : ''}
+                {types.join(' · ') || '—'}
+                {institution.city ? ` · ${institution.city}` : ''}
+              </p>
+            </div>
+          </div>
         </div>
         <span className={`px-3 py-1 rounded-full text-sm font-semibold border ${getStatusColor(institution.onboarding_status)}`}>
           {institution.onboarding_status.replace(/_/g, ' ').toUpperCase()}
@@ -208,68 +294,275 @@ export function InstitutionDetail() {
         </div>
       )}
 
-      <div className="grid grid-cols-3 gap-6">
+      <div className="grid grid-cols-12 gap-6">
 
-        {/* LEFT COLUMN — Academy Details */}
-        <div className="col-span-2 space-y-6">
+        {/* ────────────────── LEFT COLUMN — Form Details ────────────────── */}
+        <div className="col-span-12 lg:col-span-8 space-y-6">
 
-          {/* Academy Information */}
-          <div className="bg-white rounded-xl border border-gray-100 p-6">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-              <Building2 size={20} className="text-blue-600" />
-              Academy Information
-            </h2>
-
+          {/* ── 1. Core Details ── */}
+          <Card icon={Building2} accent="blue" title="Core Details">
             <div className="grid grid-cols-2 gap-4">
               <InfoRow icon={Building2} label="Institution Name" value={institution.name} />
-              <InfoRow icon={Award} label="Type" value={institution.institution_type} />
-              <InfoRow icon={User} label="Master Name" value={institution.master_name} />
+              <InfoRow
+                icon={Award}
+                label="Brand Name"
+                value={institution.brand_name || '—'}
+              />
               <InfoRow icon={Hash} label="Registration No." value={institution.registration_number} />
-              <InfoRow icon={Phone} label="Phone" value={institution.phone} />
-              <InfoRow icon={Mail} label="Email" value={institution.email} />
-              {institution.website_url && (
-                <InfoRow icon={Globe} label="Website" value={institution.website_url} isLink />
-              )}
-              <InfoRow icon={MapPin} label="City" value={`${institution.city}${institution.pincode ? ` - ${institution.pincode}` : ''}`} />
+              <InfoRow
+                icon={Calendar}
+                label="Date of Establishment"
+                value={fmtDate(institution.date_of_establishment)}
+              />
             </div>
 
-            {institution.address && (
-              <div className="mt-4 pt-4 border-t border-gray-50">
-                <p className="text-xs text-gray-500 mb-1">Physical Address</p>
-                <p className="text-sm text-gray-900">{institution.address}</p>
+            {/* Type chips — multi-select */}
+            <div className="mt-4 pt-4 border-t border-gray-50">
+              <p className="text-xs text-gray-500 mb-2">Institution Type{types.length !== 1 ? 's' : ''}</p>
+              <div className="flex flex-wrap gap-2">
+                {types.length > 0 ? (
+                  types.map((t, i) => (
+                    <span
+                      key={`${t}-${i}`}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 bg-blue-50 text-blue-700 rounded-full text-xs font-semibold border border-blue-100"
+                    >
+                      {t}
+                    </span>
+                  ))
+                ) : (
+                  <span className="text-sm text-gray-400">—</span>
+                )}
               </div>
-            )}
-          </div>
+            </div>
+          </Card>
 
-          {/* Owner Information */}
-          <div className="bg-white rounded-xl border border-gray-100 p-6">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-              <User size={20} className="text-green-600" />
-              Owner / Contact Person
-            </h2>
+          {/* ── 2. Contact & Location ── */}
+          <Card icon={MapPin} accent="emerald" title="Contact & Location">
             <div className="grid grid-cols-2 gap-4">
+              <InfoRow icon={Mail} label="Official Email" value={institution.email} />
+              <InfoRow icon={Phone} label="Primary Contact" value={institution.phone} />
+              {institution.website_url ? (
+                <InfoRow icon={Globe} label="Website" value={institution.website_url} isLink />
+              ) : (
+                <InfoRow icon={Globe} label="Website" value="—" />
+              )}
+              <InfoRow
+                icon={Building}
+                label="Branches"
+                value={
+                  institution.no_of_branches != null && institution.no_of_branches > 0
+                    ? `${institution.no_of_branches} branch${institution.no_of_branches === 1 ? '' : 'es'}`
+                    : '—'
+                }
+              />
+            </div>
+
+            {/* Head office address */}
+            <div className="mt-4 pt-4 border-t border-gray-50">
+              <p className="text-xs text-gray-500 mb-1">Head Office Address</p>
+              <p className="text-sm text-gray-900">
+                {institution.address || '—'}
+                {(institution.city || institution.pincode) && (
+                  <span className="block text-gray-500 mt-1">
+                    {[institution.city, institution.pincode].filter(Boolean).join(' · ')}
+                  </span>
+                )}
+              </p>
+            </div>
+
+            {/* Branch list */}
+            {institution.branches && institution.branches.length > 0 ? (
+              <div className="mt-4 pt-4 border-t border-gray-50">
+                <p className="text-xs text-gray-500 mb-2">Branch Locations</p>
+                <div className="space-y-2">
+                  {institution.branches.map((b, i) => (
+                    <div
+                      key={i}
+                      className="border border-gray-100 rounded-lg p-3 bg-gray-50/40"
+                    >
+                      <div className="flex items-center justify-between mb-1">
+                        <p className="text-sm font-semibold text-gray-900">
+                          {b.name || `Branch ${i + 1}`}
+                        </p>
+                        <span className="text-xs text-gray-400">#{i + 1}</span>
+                      </div>
+                      {b.address ? (
+                        <p className="text-xs text-gray-600">{b.address}</p>
+                      ) : null}
+                      {(b.city || b.pincode) ? (
+                        <p className="text-xs text-gray-500 mt-1">
+                          {[b.city, b.pincode].filter(Boolean).join(' · ')}
+                        </p>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </Card>
+
+          {/* ── 3. Accreditation ── */}
+          <Card icon={ShieldCheck} accent="violet" title="Accreditation">
+            <div className="grid grid-cols-2 gap-4">
+              <InfoRow
+                icon={BookOpenCheck}
+                label="Affiliation / Board"
+                value={institution.affiliation_or_board || '—'}
+              />
+              <InfoRow
+                icon={Award}
+                label="Accreditation Body"
+                value={institution.accreditation_body_name || '—'}
+              />
+              <InfoRow
+                icon={Calendar}
+                label="Certificate Expiry"
+                value={fmtDate(institution.accreditation_expiry_date)}
+              />
+            </div>
+
+            {/* Certificate viewer */}
+            <div className="mt-4 pt-4 border-t border-gray-50">
+              <p className="text-xs text-gray-500 mb-2">Accreditation Certificate</p>
+              {certUrl ? (
+                certIsPdf ? (
+                  <a
+                    href={certUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-2 px-4 py-3 bg-red-50 border border-red-100 rounded-xl text-red-700 hover:bg-red-100 transition-colors"
+                  >
+                    <FileText size={18} />
+                    <span className="text-sm font-semibold">Open Certificate (PDF)</span>
+                    <ExternalLink size={14} />
+                  </a>
+                ) : (
+                  <a
+                    href={certUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-block"
+                    title="Click to open full-size"
+                  >
+                    <img
+                      src={certUrl}
+                      alt="Accreditation certificate"
+                      className="max-w-full max-h-64 rounded-xl border border-gray-200 hover:opacity-90 transition-opacity"
+                    />
+                    <div className="text-xs text-gray-500 mt-2 flex items-center gap-1">
+                      <ExternalLink size={11} />
+                      Click image to open full size
+                    </div>
+                  </a>
+                )
+              ) : (
+                <p className="text-sm text-gray-400 italic">No certificate uploaded.</p>
+              )}
+            </div>
+          </Card>
+
+          {/* ── 4. Operations ── */}
+          <Card icon={BarChart3} accent="orange" title="Operations">
+            <div className="grid grid-cols-2 gap-4">
+              <InfoRow
+                icon={Users}
+                label="Total Student Capacity"
+                value={
+                  institution.total_student_capacity != null
+                    ? institution.total_student_capacity.toLocaleString('en-IN')
+                    : '—'
+                }
+              />
+              <InfoRow
+                icon={Clock}
+                label="Operating Hours"
+                value={institution.operating_hours || '—'}
+              />
+            </div>
+
+            <div className="mt-4 pt-4 border-t border-gray-50">
+              <p className="text-xs text-gray-500 mb-2 flex items-center gap-1">
+                <Languages size={12} />
+                Medium of Instruction
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {institution.medium_of_instruction && institution.medium_of_instruction.length > 0 ? (
+                  institution.medium_of_instruction.map((m, i) => (
+                    <span
+                      key={`${m}-${i}`}
+                      className="px-2.5 py-1 bg-orange-50 text-orange-700 rounded-full text-xs font-semibold border border-orange-100"
+                    >
+                      {m}
+                    </span>
+                  ))
+                ) : (
+                  <span className="text-sm text-gray-400">—</span>
+                )}
+              </div>
+            </div>
+          </Card>
+
+          {/* ── 5. Point of Contact (Master) ── */}
+          <Card icon={Briefcase} accent="rose" title="Master / Point of Contact">
+            <div className="grid grid-cols-2 gap-4">
+              <InfoRow icon={User} label="Master Name" value={institution.master_name} />
+              <InfoRow
+                icon={Briefcase}
+                label="Role"
+                value={institution.master_role || '—'}
+              />
+              <InfoRow
+                icon={Mail}
+                label="Email"
+                value={institution.master_email || '—'}
+              />
+              <InfoRow
+                icon={Phone}
+                label="Phone"
+                value={institution.master_phone_number || '—'}
+              />
+            </div>
+          </Card>
+
+          {/* ── Owner / Login (admin context) ── */}
+          <Card icon={User} accent="slate" title="Account Owner">
+            <div className="grid grid-cols-3 gap-4">
               <InfoRow icon={User} label="Name" value={institution.owner_name} />
               <InfoRow icon={Mail} label="Email" value={institution.owner_email} />
               <InfoRow icon={Phone} label="Phone" value={institution.owner_phone || '—'} />
             </div>
-          </div>
+            <p className="text-xs text-gray-400 mt-3">
+              This is the user who registered the academy on the platform.
+            </p>
+          </Card>
 
-          {/* Logo */}
-          {institution.logo_url && (
-            <div className="bg-white rounded-xl border border-gray-100 p-6">
-              <h2 className="text-lg font-semibold text-gray-900 mb-4">Academy Logo</h2>
-              <img
-                src={institution.logo_url}
-                alt="Academy Logo"
-                className="w-32 h-32 object-cover rounded-xl border border-gray-100"
-              />
-            </div>
-          )}
+          {/* ── Documents (logo) ── */}
+          {logoUrl ? (
+            <Card icon={ImageIcon} accent="indigo" title="Brand Logo">
+              <a
+                href={logoUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-block"
+                title="Open full size"
+              >
+                <img
+                  src={logoUrl}
+                  alt="Academy Logo"
+                  className="w-40 h-40 object-cover rounded-xl border border-gray-100 hover:opacity-90 transition-opacity"
+                />
+                <div className="text-xs text-gray-500 mt-2 flex items-center gap-1">
+                  <ExternalLink size={11} />
+                  Click to open full size
+                </div>
+              </a>
+            </Card>
+          ) : null}
 
         </div>
 
-        {/* RIGHT COLUMN — Plan + Actions */}
-        <div className="space-y-6">
+        {/* ────────────────── RIGHT COLUMN — Plan + Actions ────────────────── */}
+        <div className="col-span-12 lg:col-span-4 space-y-6">
 
           {/* Subscription Plan */}
           <div className="bg-white rounded-xl border border-gray-100 p-6">
@@ -285,7 +578,7 @@ export function InstitutionDetail() {
               <p className={`text-xl font-bold ${
                 institution.plan_name === 'Pro' ? 'text-purple-700' : 'text-blue-700'
               }`}>
-                {institution.plan_name}
+                {institution.plan_name || '—'}
               </p>
               <p className={`text-2xl font-bold mt-1 ${
                 institution.plan_name === 'Pro' ? 'text-purple-900' : 'text-blue-900'
@@ -323,32 +616,24 @@ export function InstitutionDetail() {
             <div className="space-y-2 text-sm">
               <div className="flex justify-between">
                 <span className="text-gray-500">Submitted</span>
-                <span className="font-medium">
-                  {new Date(institution.created_at).toLocaleDateString('en-IN')}
-                </span>
+                <span className="font-medium">{fmtDate(institution.created_at)}</span>
               </div>
               {institution.approved_at && (
                 <div className="flex justify-between">
                   <span className="text-gray-500">Approved</span>
-                  <span className="font-medium text-green-600">
-                    {new Date(institution.approved_at).toLocaleDateString('en-IN')}
-                  </span>
+                  <span className="font-medium text-green-600">{fmtDate(institution.approved_at)}</span>
                 </div>
               )}
               {institution.subscription_start && (
                 <div className="flex justify-between">
                   <span className="text-gray-500">Active Since</span>
-                  <span className="font-medium">
-                    {new Date(institution.subscription_start).toLocaleDateString('en-IN')}
-                  </span>
+                  <span className="font-medium">{fmtDate(institution.subscription_start)}</span>
                 </div>
               )}
               {institution.subscription_end && (
                 <div className="flex justify-between">
                   <span className="text-gray-500">Expires</span>
-                  <span className="font-medium text-orange-600">
-                    {new Date(institution.subscription_end).toLocaleDateString('en-IN')}
-                  </span>
+                  <span className="font-medium text-orange-600">{fmtDate(institution.subscription_end)}</span>
                 </div>
               )}
             </div>
@@ -383,7 +668,6 @@ export function InstitutionDetail() {
             {/* APPROVED → Show payment status, payment link, and Activate override */}
             {institution.onboarding_status === 'approved' && (
               <>
-                {/* Status pill */}
                 {institution.payment_link_status === 'paid' ? (
                   <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-sm text-emerald-800">
                     <p className="font-semibold">✓ Payment received</p>
@@ -404,7 +688,6 @@ export function InstitutionDetail() {
                   </div>
                 )}
 
-                {/* The real Razorpay payment link, if we have one */}
                 {institution.payment_link_url ? (
                   <div className="border border-gray-200 rounded-lg p-3 bg-gray-50">
                     <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">
@@ -429,7 +712,6 @@ export function InstitutionDetail() {
                   </div>
                 )}
 
-                {/* Copy payment link button */}
                 <button
                   onClick={() => {
                     const link = institution.payment_link_url;
@@ -454,7 +736,6 @@ export function InstitutionDetail() {
                   📋 Copy Payment Message
                 </button>
 
-                {/* Resend email + regenerate link */}
                 <button
                   onClick={handleResend}
                   disabled={actionLoading}
@@ -463,7 +744,6 @@ export function InstitutionDetail() {
                   ↻ {actionLoading ? 'Sending...' : 'Resend Payment Link'}
                 </button>
 
-                {/* Manual override */}
                 <button
                   onClick={handleActivate}
                   disabled={actionLoading}
@@ -541,12 +821,48 @@ export function InstitutionDetail() {
   );
 }
 
-// Helper component for info rows
+// ── Card wrapper — coloured header icon + title ──────────────────────────
+const ACCENTS: Record<string, { icon: string; bg: string }> = {
+  blue:    { icon: 'text-blue-600',    bg: 'bg-blue-50' },
+  emerald: { icon: 'text-emerald-600', bg: 'bg-emerald-50' },
+  violet:  { icon: 'text-violet-600',  bg: 'bg-violet-50' },
+  orange:  { icon: 'text-orange-600',  bg: 'bg-orange-50' },
+  rose:    { icon: 'text-rose-600',    bg: 'bg-rose-50' },
+  indigo:  { icon: 'text-indigo-600',  bg: 'bg-indigo-50' },
+  slate:   { icon: 'text-slate-600',   bg: 'bg-slate-100' },
+};
+
+function Card({
+  icon: Icon,
+  accent,
+  title,
+  children,
+}: {
+  icon: any;
+  accent: keyof typeof ACCENTS;
+  title: string;
+  children: React.ReactNode;
+}) {
+  const a = ACCENTS[accent] || ACCENTS.blue;
+  return (
+    <div className="bg-white rounded-xl border border-gray-100 p-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+        <span className={`w-8 h-8 rounded-lg ${a.bg} flex items-center justify-center`}>
+          <Icon size={16} className={a.icon} />
+        </span>
+        {title}
+      </h2>
+      {children}
+    </div>
+  );
+}
+
+// ── Single label + value row ─────────────────────────────────────────────
 function InfoRow({
   icon: Icon,
   label,
   value,
-  isLink = false
+  isLink = false,
 }: {
   icon: any;
   label: string;
@@ -558,19 +874,19 @@ function InfoRow({
       <div className="w-8 h-8 rounded-lg bg-gray-100 flex items-center justify-center flex-shrink-0 mt-0.5">
         <Icon size={14} className="text-gray-500" />
       </div>
-      <div>
+      <div className="min-w-0">
         <p className="text-xs text-gray-500">{label}</p>
-        {isLink ? (
+        {isLink && value && value !== '—' ? (
           <a
-            href={value}
+            href={value.startsWith('http') ? value : `https://${value}`}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-sm font-medium text-blue-600 hover:underline"
+            className="text-sm font-medium text-blue-600 hover:underline break-all"
           >
             {value}
           </a>
         ) : (
-          <p className="text-sm font-medium text-gray-900">{value || '—'}</p>
+          <p className="text-sm font-medium text-gray-900 break-all">{value || '—'}</p>
         )}
       </div>
     </div>

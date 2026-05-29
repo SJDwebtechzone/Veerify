@@ -1,0 +1,119 @@
+// src/navigation/StaffTabNavigator.js
+//
+// Bottom tab bar for the Staff (trainer) experience.
+// Tabs: Dashboard / Attendance / Students / Notifications / Profile.
+// Active tab gets the brand red highlight + filled icon stroke; inactive tabs
+// stay muted gray. Tab bar is a floating rounded card sitting above the
+// system inset, matching the institution admin's modern tab bar look.
+
+import React from 'react';
+import { Platform, Text, StyleSheet } from 'react-native';
+import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import {
+  LayoutDashboard, ClipboardCheck, Users, Bell, UserCircle,
+} from 'lucide-react-native';
+
+import StaffDashboardScreen     from '../screens/staff/StaffDashboardScreen';
+import StaffAttendanceScreen    from '../screens/staff/StaffAttendanceScreen';
+import StaffStudentsScreen      from '../screens/staff/StaffStudentsScreen';
+import StaffNotificationsScreen from '../screens/staff/StaffNotificationsScreen';
+import StaffProfileScreen       from '../screens/staff/StaffProfileScreen';
+
+import { palette, shadows, spacing } from '../theme';
+
+const Tab = createBottomTabNavigator();
+
+function TabLabel({ focused, children }) {
+  return (
+    <Text
+      style={{
+        fontSize: 11,
+        fontWeight: focused ? '700' : '500',
+        color: focused ? palette.purple.vivid : palette.textMuted,
+        marginTop: 2,
+      }}
+    >
+      {children}
+    </Text>
+  );
+}
+
+function makeIcon(Icon) {
+  return ({ focused }) => (
+    <Icon
+      size={22}
+      strokeWidth={focused ? 2.4 : 2}
+      color={focused ? palette.purple.vivid : palette.textMuted}
+    />
+  );
+}
+
+export default function StaffTabNavigator() {
+  return (
+    <Tab.Navigator
+      screenOptions={{
+        headerShown: false,
+        tabBarShowLabel: true,
+        tabBarStyle: styles.tabBar,
+        tabBarItemStyle: { paddingTop: 8 },
+        tabBarHideOnKeyboard: true,
+      }}
+    >
+      <Tab.Screen
+        name="StaffDashboard"
+        component={StaffDashboardScreen}
+        options={{
+          tabBarIcon: makeIcon(LayoutDashboard),
+          tabBarLabel: ({ focused }) => <TabLabel focused={focused}>Dashboard</TabLabel>,
+        }}
+      />
+      <Tab.Screen
+        name="StaffAttendance"
+        component={StaffAttendanceScreen}
+        options={{
+          tabBarIcon: makeIcon(ClipboardCheck),
+          tabBarLabel: ({ focused }) => <TabLabel focused={focused}>Attendance</TabLabel>,
+        }}
+      />
+      <Tab.Screen
+        name="StaffStudents"
+        component={StaffStudentsScreen}
+        options={{
+          tabBarIcon: makeIcon(Users),
+          tabBarLabel: ({ focused }) => <TabLabel focused={focused}>Students</TabLabel>,
+        }}
+      />
+      <Tab.Screen
+        name="StaffNotifications"
+        component={StaffNotificationsScreen}
+        options={{
+          tabBarIcon: makeIcon(Bell),
+          tabBarLabel: ({ focused }) => <TabLabel focused={focused}>Alerts</TabLabel>,
+        }}
+      />
+      <Tab.Screen
+        name="StaffProfile"
+        component={StaffProfileScreen}
+        options={{
+          tabBarIcon: makeIcon(UserCircle),
+          tabBarLabel: ({ focused }) => <TabLabel focused={focused}>Profile</TabLabel>,
+        }}
+      />
+    </Tab.Navigator>
+  );
+}
+
+const styles = StyleSheet.create({
+  tabBar: {
+    position: 'absolute',
+    left: spacing.lg,
+    right: spacing.lg,
+    bottom: Platform.OS === 'ios' ? 24 : 14,
+    height: 64,
+    borderRadius: 22,
+    backgroundColor: palette.surface,
+    borderTopWidth: 0,
+    paddingHorizontal: spacing.sm,
+    ...shadows.raised,
+  },
+});

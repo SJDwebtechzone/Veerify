@@ -72,24 +72,32 @@ export default function HomeTabScreen({ navigation }) {
 
   const load = useCallback(async () => {
     try {
-      // Global CMS (banners, categories, events list — not institution-scoped yet)
-      const [bannersRes, catsRes] = await Promise.all([
+      // ── Global content (always loads, even without an institution) ──
+      // mobile_events is currently a global table so we surface its rows
+      // regardless of selection. Nearby academies is naturally guest-friendly.
+      const [bannersRes, catsRes, evtRes, nearbyRes] = await Promise.all([
         apiClient.get('/cms/banners?active=true').catch(() => ({ data: { items: [] } })),
         apiClient.get('/cms/categories?active=true').catch(() => ({ data: { items: [] } })),
+        // Events: any institution id gives the same global rows back, but the
+        // route requires an id. Use 1 as a stub; once events are truly
+        // institution-scoped we'll switch back to selectedInstitution.id.
+        apiClient.get(`/institutions/${selectedInstitution?.id || 1}/events`).catch(() => ({ data: { events: [] } })),
+        apiClient.get('/institutions/nearby?limit=8').catch(() => ({ data: { institutions: [] } })),
       ]);
       setBanners(bannersRes.data.items || []);
       setCategories(catsRes.data.items || []);
+      setEvents(evtRes.data.events || []);
+      setNearbyAcademies(
+        (nearbyRes.data.institutions || []).filter((i) => i.id !== selectedInstitution?.id),
+      );
 
+      // ── Institution-scoped (only when one is picked) ──
       if (selectedInstitution?.id) {
-        // Institution-scoped: programs (featured first), events
-        const [progRes, evtRes, nearbyRes] = await Promise.all([
-          apiClient.get(`/institutions/${selectedInstitution.id}/programs?featured=true&limit=10`).catch(() => ({ data: { programs: [] } })),
-          apiClient.get(`/institutions/${selectedInstitution.id}/events`).catch(() => ({ data: { events: [] } })),
-          apiClient.get('/institutions/nearby?limit=8').catch(() => ({ data: { institutions: [] } })),
-        ]);
+        const progRes = await apiClient
+          .get(`/institutions/${selectedInstitution.id}/programs?featured=true&limit=10`)
+          .catch(() => ({ data: { programs: [] } }));
         let featured = progRes.data.programs || [];
-        // If no featured set yet, fall back to recent programs so the section
-        // doesn't render empty during early data entry.
+        // Fallback so the Featured section doesn't render empty on a fresh academy.
         if (featured.length === 0) {
           const all = await apiClient
             .get(`/institutions/${selectedInstitution.id}/programs?limit=6`)
@@ -97,15 +105,8 @@ export default function HomeTabScreen({ navigation }) {
           featured = all.data.programs || [];
         }
         setFeaturedPrograms(featured);
-        setEvents(evtRes.data.events || []);
-        // Filter the currently-selected academy out of "Nearby Branches"
-        setNearbyAcademies(
-          (nearbyRes.data.institutions || []).filter((i) => i.id !== selectedInstitution.id),
-        );
       } else {
         setFeaturedPrograms([]);
-        setEvents([]);
-        setNearbyAcademies([]);
       }
     } catch (err) {
       console.log('[Home] load error:', err?.message);
@@ -120,16 +121,11 @@ export default function HomeTabScreen({ navigation }) {
   useFocusEffect(useCallback(() => { setLoading(true); load(); }, [load]));
   useEffect(() => { setLoading(true); load(); }, [selectedInstitution?.id, load]);
 
-  // ─── Empty state: no institution chosen ───
-  if (!instLoading && !selectedInstitution) {
-    return (
-      <View style={styles.screen}>
-        <ChooseInstitutionEmpty
-          onPress={() => navigation.navigate('SelectInstitution')}
-        />
-      </View>
-    );
-  }
+  // We no longer block the entire Home tab when no institution is picked.
+  // The user can still browse banners, categories and nearby academies; only
+  // the institution-scoped sections (Featured Programs, Events) hide themselves
+  // and a soft inline banner near the top nudges them to pick one.
+  const noInstitution = !instLoading && !selectedInstitution;
 
   if (loading && featuredPrograms.length === 0 && banners.length === 0) {
     return (
@@ -167,7 +163,11 @@ export default function HomeTabScreen({ navigation }) {
               <ChevronDown size={16} color={palette.purple.vivid} strokeWidth={2.4} />
             </TouchableOpacity>
           </View>
-          <TouchableOpacity style={styles.bellButton} activeOpacity={0.85}>
+          <TouchableOpacity
+            style={styles.bellButton}
+            onPress={() => navigation.navigate('StaffNotifications')}
+            activeOpacity={0.85}
+          >
             <Bell size={20} color={palette.text} strokeWidth={2.2} />
           </TouchableOpacity>
         </View>
@@ -207,12 +207,33 @@ export default function HomeTabScreen({ navigation }) {
           </Section>
         )}
 
-        {/* ── Featured Programs ───────────────────────────────── */}
-        <Section
-          title="Featured Programs"
-          subtitle={selectedInstitution?.name}
-          actionLabel="See all"
-          onAction={() => {
+        {/* ── Pick-an-academy soft prompt (only when none selected) ── */}
+        {noInstitution ? (
+          <TouchableOpacity
+            style={styles.pickAcademyCard}
+            onPress={() => navigation.navigate('SelectInstitution')}
+            activeOpacity={0.85}
+          >
+            <View style={styles.pickAcademyIcon}>
+              <Building2 size={20} color={palette.purple.on} strokeWidth={2.4} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.pickAcademyTitle}>Pick your academy</Text>
+              <Text style={styles.pickAcademyHint}>
+                Get personalised programs, batches and live classes.
+              </Text>
+            </View>
+            <ChevronRight size={18} color={palette.purple.vivid} strokeWidth={2.4} />
+          </TouchableOpacity>
+        ) : null}
+
+        {/* ── Featured Programs (institution-scoped — hides when none picked) ── */}
+        {selectedInstitution?.id ? (
+          <Section
+            title="Featured Programs"
+            subtitle={selectedInstitution?.name}
+            actionLabel="See all"
+            onAction={() => {
             // jumpTo is the bottom-tab navigator's dedicated tab-switch API.
             // navigation.navigate() can be ambiguous when both stack and tab
             // navigators exist in the tree; jumpTo always lands on the tab.
@@ -242,6 +263,7 @@ export default function HomeTabScreen({ navigation }) {
             </ScrollView>
           )}
         </Section>
+        ) : null}
 
         {/* ── Upcoming Live Classes ───────────────────────────── */}
         <Section
@@ -543,6 +565,27 @@ const styles = StyleSheet.create({
   sectionSubtitle: { ...type.caption, color: palette.textMuted, marginTop: 2 },
   sectionAction: { flexDirection: 'row', alignItems: 'center', gap: 2, marginTop: 2 },
   sectionActionText: { ...type.caption, color: palette.purple.vivid, fontWeight: '700' },
+
+  // Pick-academy soft prompt (shown when no institution is selected)
+  pickAcademyCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    marginHorizontal: spacing.xl,
+    marginTop: spacing.lg,
+    padding: spacing.md,
+    backgroundColor: palette.purple.soft,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: palette.purple.vivid,
+  },
+  pickAcademyIcon: {
+    width: 40, height: 40, borderRadius: 20,
+    backgroundColor: '#fff',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  pickAcademyTitle: { ...type.bodyBold, color: palette.text },
+  pickAcademyHint: { ...type.caption, color: palette.textMuted, marginTop: 2 },
 
   // Banner
   banner: {

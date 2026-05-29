@@ -10,7 +10,9 @@ router.get('/my', verifyToken, requireRole('student'), enrollmentController.getM
 router.delete('/:id', verifyToken, requireRole('student'), enrollmentController.cancelEnrollment);
 router.patch('/:id/payment', verifyToken, requireRole('student'), enrollmentController.markPaid);
 
-// Admin/trainer route
+// Admin/trainer route — enrollments for a single batch
 router.get('/batch/:id', verifyToken, requireRole('admin', 'trainer'), enrollmentController.getEnrollmentsByBatch);
+// Admin-only — aggregated enrollments across every batch of a course
+router.get('/course/:id', verifyToken, requireRole('admin'), enrollmentController.getEnrollmentsByCourse);
 
 module.exports = router;

@@ -10,4 +10,7 @@ router.post('/login', authController.login);
 // Protected route - get logged-in user info
 router.get('/me', verifyToken, authController.getMe);
 
+// Change own password
+router.post('/change-password', verifyToken, authController.changePassword);
+
 module.exports = router;

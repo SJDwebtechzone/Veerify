@@ -17,16 +17,38 @@ const uploadRoutes = require('./src/routes/upload.routes');
 const planRoutes = require('./src/routes/plan.routes');
 const onboardingRoutes = require('./src/routes/onboarding.routes');
 const paymentsRoutes = require('./src/routes/payments.routes');
+const leaveRoutes = require('./src/routes/leave.routes');
+const notificationRoutes = require('./src/routes/notification.routes');
+const salaryRoutes = require('./src/routes/salary.routes');
+const adminRoutes = require('./src/routes/admin.routes');
 
 
 const app = express();
+// CORS allowlist.
+//
+// Dev origins are always allowed so `npm run dev` on the admin web keeps
+// working. Production origins should be set via the CORS_ORIGINS env var on
+// the VPS (comma-separated). When the admin web is hosted, add its URL
+// there (e.g. CORS_ORIGINS="http://72.61.245.163:5173,https://admin.veerify.com").
+const DEFAULT_ORIGINS = [
+  'http://localhost:5173',
+  'http://localhost:5174',
+  'http://localhost:3000',
+  'http://localhost:4173',
+];
+const extraOrigins = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+const ALLOWED_ORIGINS = [...DEFAULT_ORIGINS, ...extraOrigins];
+
 app.use(cors({
-  origin: [
-    'http://localhost:5173',
-    'http://localhost:5174',
-    'http://localhost:3000',
-    'http://localhost:4173',
-  ],
+  origin: (origin, cb) => {
+    // No origin = mobile apps / curl / server-to-server calls — always allow.
+    if (!origin) return cb(null, true);
+    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    return cb(new Error(`CORS blocked: ${origin}`));
+  },
   credentials: true,
 }));// Bumped to 12MB so legacy data-URL payloads (if any) also work.
 // Capture the raw request body on req.rawBody. The Razorpay webhook needs the
@@ -61,6 +83,10 @@ app.use('/api/uploads', uploadRoutes);
 app.use('/api/plans', planRoutes);
 app.use('/api/onboarding', onboardingRoutes);
 app.use('/api/payments', paymentsRoutes);
+app.use('/api/leave-requests', leaveRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/salaries', salaryRoutes);
+app.use('/api/admin', adminRoutes);
 app.use('/api/uploads', uploadRoutes);
 
 app.use((req, res) => {

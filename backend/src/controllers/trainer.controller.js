@@ -15,7 +15,16 @@ const getAdminInstitutionId = async (userId) => {
 exports.createTrainer = async (req, res) => {
   const client = await pool.connect();
   try {
-    const { name, email, phone, password, specialization, belt_level, experience_years, bio } = req.body;
+    const {
+      // Account
+      name, email, phone, password,
+      // Profile (legacy fields)
+      specialization, belt_level, experience_years, bio,
+      // Personal (migration 016)
+      gender, date_of_birth,
+      // Identity + documents (migration 016)
+      govt_proof_type, govt_proof_number, photo_url, certificate_url,
+    } = req.body;
     const adminId = req.user.id;
 
     if (!name || !email || !password) {
@@ -47,12 +56,24 @@ exports.createTrainer = async (req, res) => {
     );
     const user = userResult.rows[0];
 
-    // Step 2: Create trainer profile
+    // Step 2: Create trainer profile with all the extended-enrollment fields
     const trainerResult = await client.query(
-      `INSERT INTO trainers (user_id, institution_id, specialization, belt_level, experience_years, bio)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO trainers (
+         user_id, institution_id,
+         specialization, belt_level, experience_years, bio,
+         gender, date_of_birth,
+         govt_proof_type, govt_proof_number,
+         photo_url, certificate_url
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING *`,
-      [user.id, institutionId, specialization, belt_level, experience_years || 0, bio]
+      [
+        user.id, institutionId,
+        specialization || null, belt_level || null, experience_years || 0, bio || null,
+        gender || null, date_of_birth || null,
+        govt_proof_type || null, govt_proof_number || null,
+        photo_url || null, certificate_url || null,
+      ]
     );
 
     await client.query('COMMIT');
@@ -72,6 +93,61 @@ exports.createTrainer = async (req, res) => {
     res.status(500).json({ message: 'Server error', error: err.message });
   } finally {
     client.release();
+  }
+};
+
+// GET /api/trainers/me — the calling trainer's own joined profile.
+// Returns trainer-row fields + user fields + a few aggregates (assigned
+// batch count, student count across those batches) so the Staff Profile
+// screen has everything it needs in one round-trip.
+exports.getMe = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const profile = await pool.query(
+      `SELECT
+         t.id             AS trainer_id,
+         t.user_id,
+         t.institution_id,
+         t.specialization,
+         t.belt_level,
+         t.experience_years,
+         t.bio,
+         t.gender,
+         t.date_of_birth,
+         t.govt_proof_type,
+         t.govt_proof_number,
+         t.photo_url,
+         t.certificate_url,
+         t.created_at     AS joined_at,
+         u.name,
+         u.email,
+         u.phone,
+         u.role,
+         i.name           AS institution_name,
+         i.logo_url       AS institution_logo,
+         (SELECT COUNT(*) FROM batches b WHERE b.trainer_id = t.id)
+                          AS assigned_batches,
+         (SELECT COUNT(DISTINCT e.student_id)
+            FROM enrollments e
+            JOIN batches b ON e.batch_id = b.id
+           WHERE b.trainer_id = t.id)
+                          AS total_students
+       FROM trainers t
+       JOIN users u ON t.user_id = u.id
+       LEFT JOIN institutions i ON t.institution_id = i.id
+       WHERE t.user_id = $1`,
+      [userId],
+    );
+
+    if (profile.rows.length === 0) {
+      return res.status(404).json({ message: 'Trainer profile not found' });
+    }
+
+    res.json({ trainer: profile.rows[0] });
+  } catch (err) {
+    console.error('Get my trainer profile error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
 

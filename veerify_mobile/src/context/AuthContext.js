@@ -1,5 +1,4 @@
 import React, { createContext, useState, useEffect, useContext } from 'react';
-import { Alert } from 'react-native';
 import { saveToken, getToken, deleteToken } from '../utils/storage';
 import apiClient from '../api/client';
 
@@ -77,21 +76,6 @@ export const AuthProvider = ({ children }) => {
         }
         setOnboardingStatus(status);
         setInstitution(inst);
-
-        // ─── ON-DEVICE DIAGNOSTIC (temporary) ───
-        // Shows exactly what mobile received so we can debug routing without
-        // needing Metro logs. Remove this Alert once the flow is solid.
-        Alert.alert(
-          'DEBUG: what mobile sees',
-          [
-            `user.id = ${userData.id}`,
-            `user.email = ${userData.email}`,
-            `user.role = ${userData.role}`,
-            `status = ${status}`,
-            `institution = ${inst ? `"${inst.name}" (owner_user_id=${inst.owner_user_id})` : 'null'}`,
-            fetchError ? `\n⚠ fetch error: ${fetchError}` : '',
-          ].filter(Boolean).join('\n'),
-        );
       }
 
       setUser(userData);

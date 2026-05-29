@@ -144,6 +144,69 @@ exports.getEnrollmentsByBatch = async (req, res) => {
   }
 };
 
+// GET every enrollment across every batch of a single course. Admin-only,
+// scoped to the admin's own institution. Used by the admin Course Detail
+// screen to show the full enrolled roster + payment status in one shot.
+exports.getEnrollmentsByCourse = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user.id;
+
+    // Resolve the calling admin's institution and confirm the course
+    // belongs to it.
+    const userRes = await pool.query(
+      'SELECT institution_id FROM users WHERE id = $1',
+      [userId],
+    );
+    const adminInstitutionId = userRes.rows[0]?.institution_id;
+    if (!adminInstitutionId) {
+      return res.status(403).json({ message: 'No institution linked to your account' });
+    }
+
+    const courseRes = await pool.query(
+      'SELECT id, institution_id, name FROM courses WHERE id = $1',
+      [id],
+    );
+    if (courseRes.rows.length === 0) {
+      return res.status(404).json({ message: 'Course not found' });
+    }
+    if (courseRes.rows[0].institution_id !== adminInstitutionId) {
+      return res.status(403).json({ message: 'Not your course' });
+    }
+
+    // Aggregate every enrollment across every batch under this course.
+    const result = await pool.query(
+      `SELECT
+         e.id              AS enrollment_id,
+         e.enrolled_at,
+         e.payment_status,
+         e.student_id,
+         u.name            AS student_name,
+         u.email           AS student_email,
+         u.phone           AS student_phone,
+         b.id              AS batch_id,
+         b.name            AS batch_name,
+         b.days_of_week,
+         b.start_time,
+         b.end_time
+       FROM enrollments e
+       JOIN batches b ON e.batch_id = b.id
+       JOIN users   u ON e.student_id = u.id
+       WHERE b.course_id = $1
+       ORDER BY e.enrolled_at DESC`,
+      [id],
+    );
+
+    res.json({
+      count: result.rows.length,
+      enrollments: result.rows,
+    });
+  } catch (err) {
+    console.error('Get enrollments by course error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
 // CANCEL enrollment (student deletes their own)
 exports.cancelEnrollment = async (req, res) => {
   try {

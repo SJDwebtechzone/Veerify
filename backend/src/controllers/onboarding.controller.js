@@ -98,28 +98,70 @@ exports.selectPlan = async (req, res) => {
 };
 
 // STEP 2: Admin submits academy setup form
+// As of migration 014 the form is split into 5 categories. We accept every
+// new field as optional (NULL-friendly) and validate only the minimum
+// required by the legacy form. Required-field rules will tighten once the
+// product team finalises the spec.
 exports.setupAcademy = async (req, res) => {
   try {
     const {
+      // ── Core Details ──
       name,
-      institution_type,
-      website_url,
-      email,
-      phone,
-      address,
+      brand_name,
+      institution_type,         // legacy single value (kept for back-compat)
+      institution_types,        // new TEXT[] of selected types
+      registration_number,
+      date_of_establishment,
+      logo_url,
+
+      // ── Contact & Location ──
+      address,           // head office address
       city,
       pincode,
-      registration_number,
+      no_of_branches,
+      branches,          // array of { name, address, city, pincode }
+      email,             // official email
+      phone,             // primary contact number
+      website_url,
+
+      // ── Accreditation ──
+      affiliation_or_board,
+      accreditation_body_name,
+      accreditation_expiry_date,
+      accreditation_certificate_url,
+
+      // ── Operations ──
+      total_student_capacity,
+      medium_of_instruction,   // array of strings
+      operating_hours,
+
+      // ── Point of Contact (Master) ──
       master_name,
-      logo_url
+      master_role,
+      master_email,
+      master_phone_number,
     } = req.body;
 
     const userId = req.user.id;
 
-    // Validation
-    if (!name || !institution_type || !email || !phone || !address || !registration_number || !master_name) {
-      return res.status(400).json({ 
-        message: 'All required fields must be filled' 
+    // Mobile clients post `institution_types` (array). Older clients still
+    // post `institution_type` (single string). Normalise to both:
+    //   - typesArr: clean, de-duped array
+    //   - primaryType: first entry (or the legacy string), kept in
+    //     institution_type for back-compat with existing read paths.
+    const typesArr = Array.isArray(institution_types)
+      ? institution_types
+          .map((t) => (typeof t === 'string' ? t.trim() : ''))
+          .filter(Boolean)
+          .filter((t, i, a) => a.indexOf(t) === i) // de-dupe
+      : (institution_type ? [String(institution_type).trim()] : []);
+    const primaryType = typesArr[0] || null;
+
+    // Minimum-viable validation. Anything else is optional until the spec
+    // is finalised.
+    if (!name || !primaryType || !email || !phone || !address || !registration_number || !master_name) {
+      return res.status(400).json({
+        message: 'Please fill all required fields: institution name, at least one type, official email, primary phone, head office address, registration number and master name.',
       });
     }
 
@@ -130,50 +172,100 @@ exports.setupAcademy = async (req, res) => {
     );
 
     if (instResult.rows.length === 0) {
-      return res.status(404).json({ 
-        message: 'Please select a plan first' 
+      return res.status(404).json({
+        message: 'Please select a plan first'
       });
     }
 
     const institution = instResult.rows[0];
 
     if (institution.onboarding_status === 'registered') {
-      return res.status(400).json({ 
-        message: 'Please select a subscription plan first' 
+      return res.status(400).json({
+        message: 'Please select a subscription plan first'
       });
     }
 
-    // Update institution with all details
+    // Normalise array / json inputs so pg doesn't blow up on bad shapes.
+    const safeBranches = Array.isArray(branches) ? JSON.stringify(branches) : '[]';
+    const safeMedium = Array.isArray(medium_of_instruction)
+      ? medium_of_instruction
+      : (medium_of_instruction ? [String(medium_of_instruction)] : null);
+
+    // Update institution with all details. Order of $-params matters; keep
+    // grouped by category for sanity when reading SQL. `institution_types`
+    // holds the canonical array; `institution_type` mirrors the first entry
+    // so legacy SELECT paths keep working.
     const updated = await pool.query(
       `UPDATE institutions SET
-         name = $1,
-         institution_type = $2,
-         website_url = $3,
-         email = $4,
-         phone = $5,
-         address = $6,
-         city = $7,
-         pincode = $8,
-         registration_number = $9,
-         master_name = $10,
-         logo_url = $11,
-         onboarding_status = 'pending_approval',
-         status = 'pending'
-       WHERE owner_user_id = $12
+         -- core details
+         name                          = $1,
+         brand_name                    = $2,
+         institution_type              = $3,
+         institution_types             = $4,
+         registration_number           = $5,
+         date_of_establishment         = $6,
+         logo_url                      = $7,
+         -- contact & location
+         address                       = $8,
+         city                          = $9,
+         pincode                       = $10,
+         no_of_branches                = $11,
+         branches                      = $12::jsonb,
+         email                         = $13,
+         phone                         = $14,
+         website_url                   = $15,
+         -- accreditation
+         affiliation_or_board          = $16,
+         accreditation_body_name       = $17,
+         accreditation_expiry_date     = $18,
+         accreditation_certificate_url = $19,
+         -- operations
+         total_student_capacity        = $20,
+         medium_of_instruction         = $21,
+         operating_hours               = $22,
+         -- point of contact
+         master_name                   = $23,
+         master_role                   = $24,
+         master_email                  = $25,
+         master_phone_number           = $26,
+         -- lifecycle
+         onboarding_status             = 'pending_approval',
+         status                        = 'pending'
+       WHERE owner_user_id = $27
        RETURNING *`,
       [
         name,
-        institution_type,
-        website_url,
+        brand_name || null,
+        primaryType,
+        typesArr,
+        registration_number,
+        date_of_establishment || null,
+        logo_url || null,
+
+        address,
+        city || null,
+        pincode || null,
+        no_of_branches != null ? Number(no_of_branches) : 0,
+        safeBranches,
         email,
         phone,
-        address,
-        city,
-        pincode,
-        registration_number,
+        website_url || null,
+
+        affiliation_or_board || null,
+        accreditation_body_name || null,
+        accreditation_expiry_date || null,
+        accreditation_certificate_url || null,
+
+        total_student_capacity != null ? Number(total_student_capacity) : null,
+        safeMedium,
+        operating_hours || null,
+
         master_name,
-        logo_url || null,
-        userId
+        master_role || null,
+        master_email || null,
+        master_phone_number || null,
+
+        userId,
       ]
     );
 

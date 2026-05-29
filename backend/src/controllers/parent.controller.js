@@ -1,4 +1,5 @@
 const pool = require('../config/db');
+const { insertNotification } = require('./notification.controller');
 
 // ============================================
 // PARENT-SIDE: Link, view, manage children
@@ -92,6 +93,25 @@ exports.linkChild = async (req, res) => {
       );
     }
 
+    // Fire a notification to the student so they're nudged the next time they
+    // open the app. Best-effort — don't fail the link call if the notification
+    // write errors out.
+    try {
+      const parentRow = await pool.query('SELECT name FROM users WHERE id = $1', [parentId]);
+      const parentName = parentRow.rows[0]?.name || 'A parent';
+      await insertNotification({
+        user_id:        child.id,
+        institution_id: null,
+        category:       'system',
+        title:          'New parent link request',
+        message:        `${parentName} requested to link as your parent. Tap to approve or decline.`,
+        data:           { screen: 'ParentRequests', link_id: linkResult.rows[0].id },
+        created_by:     parentId,
+      });
+    } catch (err) {
+      console.warn('[linkChild] notify student failed:', err.message);
+    }
+
     res.status(201).json({
       message: `Request sent to ${child.name}. They'll see your request when they log in and can approve or decline.`,
       link: linkResult.rows[0],
@@ -99,8 +119,8 @@ exports.linkChild = async (req, res) => {
         id: child.id,
         name: child.name,
         email: child.email,
-        phone: child.phone
-      }
+        phone: child.phone,
+      },
     });
   } catch (err) {
     console.error('Link child error:', err);
@@ -448,6 +468,188 @@ exports.rejectParent = async (req, res) => {
     });
   } catch (err) {
     console.error('Reject parent error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+// ============================================
+// ADMIN-SIDE: Link a parent and a child directly
+// ============================================
+//
+// When the academy admin links a parent to a student themselves, we skip the
+// "child approves" handshake — the institution is trusted to vouch for the
+// relationship. Both users must belong to the calling admin's institution
+// and the child must have role='student'. The parent can be looked up by
+// id OR by phone/email (admin form usually has phone/email handy).
+
+exports.adminLink = async (req, res) => {
+  try {
+    const adminId = req.user.id;
+    const { parent_id, parent_phone, parent_email, child_id, relationship } = req.body || {};
+
+    if (!child_id) {
+      return res.status(400).json({ message: 'child_id is required' });
+    }
+    if (!parent_id && !parent_phone && !parent_email) {
+      return res.status(400).json({ message: 'parent_id, parent_phone or parent_email is required' });
+    }
+
+    // Admin's institution.
+    const adminRow = await pool.query('SELECT institution_id FROM users WHERE id = $1', [adminId]);
+    const instId = adminRow.rows[0]?.institution_id;
+    if (!instId) {
+      return res.status(400).json({ message: 'Admin is not linked to an institution' });
+    }
+
+    // Resolve the parent user.
+    let parentRow;
+    if (parent_id) {
+      parentRow = await pool.query(
+        'SELECT id, name, role, institution_id FROM users WHERE id = $1',
+        [parent_id],
+      );
+    } else if (parent_phone) {
+      parentRow = await pool.query(
+        'SELECT id, name, role, institution_id FROM users WHERE phone = $1',
+        [parent_phone],
+      );
+    } else {
+      parentRow = await pool.query(
+        'SELECT id, name, role, institution_id FROM users WHERE email = $1',
+        [parent_email],
+      );
+    }
+    if (!parentRow || parentRow.rows.length === 0) {
+      return res.status(404).json({ message: 'Parent account not found. They must register first.' });
+    }
+    const parent = parentRow.rows[0];
+    if (parent.role !== 'parent') {
+      return res.status(400).json({ message: `That account is registered as ${parent.role}, not parent.` });
+    }
+
+    // Resolve the child user and verify both belong to this institution.
+    const childRow = await pool.query(
+      'SELECT id, name, role, institution_id FROM users WHERE id = $1',
+      [child_id],
+    );
+    if (childRow.rows.length === 0) {
+      return res.status(404).json({ message: 'Student not found' });
+    }
+    const child = childRow.rows[0];
+    if (child.role !== 'student') {
+      return res.status(400).json({ message: 'Target user is not a student' });
+    }
+    if (child.institution_id !== instId) {
+      return res.status(403).json({ message: 'That student is not in your institution' });
+    }
+    // Parent doesn't have to belong to the institution (often they don't until
+    // we link them), but if they DO it must match.
+    if (parent.institution_id && parent.institution_id !== instId) {
+      return res.status(403).json({ message: 'Parent belongs to a different institution' });
+    }
+
+    // Insert or revive the link as 'active' (admin auth bypasses the approval).
+    const existing = await pool.query(
+      `SELECT id, status FROM parent_child_links WHERE parent_id = $1 AND child_id = $2`,
+      [parent.id, child.id],
+    );
+    let result;
+    if (existing.rows.length === 0) {
+      result = await pool.query(
+        `INSERT INTO parent_child_links (parent_id, child_id, relationship, status)
+         VALUES ($1, $2, COALESCE($3, 'parent'), 'active')
+         RETURNING *`,
+        [parent.id, child.id, relationship || null],
+      );
+    } else {
+      result = await pool.query(
+        `UPDATE parent_child_links
+            SET status = 'active',
+                relationship = COALESCE($1, relationship),
+                linked_at = CURRENT_TIMESTAMP
+          WHERE id = $2
+          RETURNING *`,
+        [relationship || null, existing.rows[0].id],
+      );
+    }
+
+    // Inform the student that an admin linked them to a parent.
+    try {
+      await insertNotification({
+        user_id:        child.id,
+        institution_id: instId,
+        category:       'system',
+        title:          'Parent linked',
+        message:        `Your academy linked ${parent.name} as your parent. They can now view your attendance and progress.`,
+        data:           { screen: 'ParentRequests', link_id: result.rows[0].id },
+        created_by:     adminId,
+      });
+    } catch (err) {
+      console.warn('[adminLink] notify student failed:', err.message);
+    }
+
+    res.status(201).json({
+      message: `${parent.name} linked to ${child.name}.`,
+      link: result.rows[0],
+    });
+  } catch (err) {
+    console.error('Admin link parent error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// ============================================
+// ADMIN-SIDE: List all parent-child links in the institution
+// ============================================
+exports.adminListLinks = async (req, res) => {
+  try {
+    const adminId = req.user.id;
+    const adminRow = await pool.query('SELECT institution_id FROM users WHERE id = $1', [adminId]);
+    const instId = adminRow.rows[0]?.institution_id;
+    if (!instId) return res.status(400).json({ message: 'Admin is not linked to an institution' });
+
+    const result = await pool.query(
+      `SELECT
+         pcl.id, pcl.status, pcl.relationship, pcl.linked_at,
+         p.id AS parent_id,    p.name AS parent_name,    p.email AS parent_email,    p.phone AS parent_phone,
+         c.id AS child_id,     c.name AS child_name,     c.email AS child_email,     c.phone AS child_phone
+       FROM parent_child_links pcl
+       JOIN users p ON pcl.parent_id = p.id
+       JOIN users c ON pcl.child_id  = c.id
+      WHERE c.institution_id = $1
+      ORDER BY pcl.linked_at DESC`,
+      [instId],
+    );
+    res.json({ count: result.rows.length, links: result.rows });
+  } catch (err) {
+    console.error('Admin list links error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// ============================================
+// ADMIN-SIDE: Remove a parent-child link
+// ============================================
+exports.adminUnlink = async (req, res) => {
+  try {
+    const adminId = req.user.id;
+    const { id } = req.params;
+
+    const adminRow = await pool.query('SELECT institution_id FROM users WHERE id = $1', [adminId]);
+    const instId = adminRow.rows[0]?.institution_id;
+    if (!instId) return res.status(400).json({ message: 'Admin is not linked to an institution' });
+
+    // Scope check: only unlink rows where the child belongs to this institution.
+    const r = await pool.query(
+      `DELETE FROM parent_child_links pcl
+        USING users c
+       WHERE pcl.id = $1 AND pcl.child_id = c.id AND c.institution_id = $2
+       RETURNING pcl.id`,
+      [id, instId],
+    );
+    if (r.rows.length === 0) return res.status(404).json({ message: 'Link not found' });
+    res.json({ message: 'Link removed', id: r.rows[0].id });
+  } catch (err) {
+    console.error('Admin unlink error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
