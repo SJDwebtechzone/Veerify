@@ -18,9 +18,19 @@ const planRoutes = require('./src/routes/plan.routes');
 const onboardingRoutes = require('./src/routes/onboarding.routes');
 const paymentsRoutes = require('./src/routes/payments.routes');
 const leaveRoutes = require('./src/routes/leave.routes');
+const trainerLeaveRoutes = require('./src/routes/trainerLeave.routes');
+const institutionPayoutRoutes = require('./src/routes/institutionPayout.routes');
+const performanceReportRoutes = require('./src/routes/performanceReport.routes');
+const referralRoutes = require('./src/routes/referral.routes');
+const beltRoutes = require('./src/routes/belt.routes');
+const certificateRoutes = require('./src/routes/certificate.routes');
 const notificationRoutes = require('./src/routes/notification.routes');
 const salaryRoutes = require('./src/routes/salary.routes');
 const adminRoutes = require('./src/routes/admin.routes');
+const announcementRoutes = require('./src/routes/announcement.routes');
+const studentRoutes = require('./src/routes/student.routes');
+const courseVideoRoutes = require('./src/routes/courseVideo.routes');
+const marketplaceRoutes = require('./src/routes/marketplace.routes');
 
 
 const app = express();
@@ -84,10 +94,20 @@ app.use('/api/plans', planRoutes);
 app.use('/api/onboarding', onboardingRoutes);
 app.use('/api/payments', paymentsRoutes);
 app.use('/api/leave-requests', leaveRoutes);
+app.use('/api/trainer-leave-requests', trainerLeaveRoutes);
+app.use('/api/institution-payouts', institutionPayoutRoutes);
+app.use('/api/performance-reports', performanceReportRoutes);
+app.use('/api/referrals', referralRoutes);
+app.use('/api/belts', beltRoutes);
+app.use('/api/certificates', certificateRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/salaries', salaryRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/announcements', announcementRoutes);
+app.use('/api/students', studentRoutes);
+app.use('/api/course-videos', courseVideoRoutes);
 app.use('/api/uploads', uploadRoutes);
+app.use('/api/marketplace-settings', marketplaceRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ message: 'Route not found' });

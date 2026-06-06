@@ -153,15 +153,28 @@ exports.getMyCourses = async (req, res) => {
 exports.getCoursesByInstitution = async (req, res) => {
   try {
     const { id } = req.params;
+    // When ?include_all=1 the super admin web institution detail page gets
+    // every course regardless of status / approval state. Without it (the
+    // default), only active courses on approved institutions are returned
+    // so the student-facing browse list stays clean.
+    const includeAll = req.query.include_all === '1' || req.query.include_all === 'true';
+
+    const extraWhere = includeAll
+      ? 'AND i.deleted_at IS NULL'
+      : `AND i.status = 'approved'
+         AND i.deleted_at IS NULL
+         AND COALESCE(c.status, 'active') = 'active'`;
 
     const result = await pool.query(
-      `SELECT c.*, i.name as institution_name
+      `SELECT c.*, i.name as institution_name,
+              (SELECT COUNT(*)::int FROM batches b WHERE b.course_id = c.id) AS batch_count,
+              (SELECT COUNT(*)::int FROM enrollments e
+                 JOIN batches b ON e.batch_id = b.id
+                 WHERE b.course_id = c.id) AS enrollment_count
        FROM courses c
        JOIN institutions i ON c.institution_id = i.id
        WHERE c.institution_id = $1
-         AND i.status = 'approved'
-         AND i.deleted_at IS NULL
-         AND COALESCE(c.status, 'active') = 'active'
+         ${extraWhere}
        ORDER BY
          CASE c.badge
            WHEN 'popular'      THEN 1

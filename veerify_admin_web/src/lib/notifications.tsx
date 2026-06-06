@@ -21,6 +21,15 @@ export interface OnboardingCounts {
   rejected: number;
   expired: number;
   total: number;
+  // Platform-wide people counts (added in the same payload so the dashboard
+  // doesn't need a second round-trip for the headline cards).
+  total_students: number;
+  total_trainers: number;
+  total_parents: number;
+  // Monthly Recurring Revenue — sum of plan price for every currently-
+  // active institution. In rupees (NOT paise) to match the rest of the
+  // pricing in the system.
+  monthly_revenue: number;
 }
 
 export interface RecentPending {
@@ -45,6 +54,8 @@ interface NotificationsContextValue {
 
 const EMPTY: OnboardingCounts = {
   pending_approval: 0, approved: 0, active: 0, rejected: 0, expired: 0, total: 0,
+  total_students: 0, total_trainers: 0, total_parents: 0,
+  monthly_revenue: 0,
 };
 
 const NotificationsContext = createContext<NotificationsContextValue | undefined>(undefined);

@@ -3,8 +3,8 @@ import {
   Building2,
   GraduationCap,
   UserCog,
-  BookOpen,
-  CalendarRange,
+  // BookOpen is only referenced by the commented-out Courses section below.
+  // Re-import it when restoring that nav entry.
   Wallet,
   Bell,
   Star,
@@ -44,30 +44,26 @@ export const navSections: NavSection[] = [
   {
     label: 'Students',
     icon: GraduationCap,
-    children: [
-      { label: 'All Students', to: '/students' },
-      { label: 'Attendance', to: '/students/attendance' },
-      { label: 'Enrollments', to: '/students/enrollments' },
-    ],
+    to: '/students',
   },
   {
     label: 'Trainers',
     icon: UserCog,
-    children: [
-      { label: 'Trainers List', to: '/trainers' },
-      { label: 'Skills', to: '/trainers/skills' },
-      { label: 'Availability', to: '/trainers/availability' },
-    ],
+    to: '/trainers',
   },
-  {
-    label: 'Courses',
-    icon: BookOpen,
-    children: [
-      { label: 'Courses', to: '/courses' },
-      { label: 'Videos', to: '/courses/videos' },
-      { label: 'Syllabus', to: '/courses/syllabus' },
-    ],
-  },
+  // Courses section temporarily hidden by product decision. Routes for
+  // /courses, /courses/videos and /courses/syllabus are still mounted in
+  // App.tsx so existing direct links don't 404; just the sidebar entry is
+  // suppressed. Restore the block below to bring it back.
+  // {
+  //   label: 'Courses',
+  //   icon: BookOpen,
+  //   children: [
+  //     { label: 'Courses', to: '/courses' },
+  //     { label: 'Videos', to: '/courses/videos' },
+  //     { label: 'Syllabus', to: '/courses/syllabus' },
+  //   ],
+  // },
   {
     label: 'Mobile App',
     icon: Smartphone,
@@ -79,19 +75,10 @@ export const navSections: NavSection[] = [
     ],
   },
   {
-    label: 'Batches',
-    icon: CalendarRange,
-    children: [
-      { label: 'Active Batches', to: '/batches' },
-      { label: 'Assign Trainers', to: '/batches/assign' },
-      { label: 'Capacity', to: '/batches/capacity' },
-    ],
-  },
-  {
     label: 'Payments',
     icon: Wallet,
     children: [
-      { label: 'Revenue Analytics', to: '/payments' },
+      { label: 'Institution Payout', to: '/payments' },
       { label: 'Subscription Payments', to: '/payments/subscriptions' },
       { label: 'Pending Payments', to: '/payments/pending' },
     ],
@@ -100,7 +87,7 @@ export const navSections: NavSection[] = [
     label: 'Notifications',
     icon: Bell,
     children: [
-      { label: 'Announcements', to: '/notifications' },
+      { label: 'Broadcasts', to: '/notifications' },
       { label: 'Push Notifications', to: '/notifications/push' },
       { label: 'Emails', to: '/notifications/emails' },
     ],
@@ -118,7 +105,8 @@ export const navSections: NavSection[] = [
     icon: Settings,
     children: [
       { label: 'Subscription Plans', to: '/settings/plans' },
-      { label: 'Roles & Permissions', to: '/settings/roles' },
+      { label: 'Marketplace Settings', to: '/settings/marketplace' },
+      { label: 'Refer & Earn', to: '/settings/referral' },
       { label: 'General Settings', to: '/settings' },
     ],
   },

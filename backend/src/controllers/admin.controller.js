@@ -81,13 +81,14 @@ exports.getDashboardStats = async (req, res) => {
         [institutionId, todayAbbr],
       ),
 
-      // Pending fees — sum + count of pending enrollments. We compute the
-      // amount from courses.price (monthly fee) because we don't store an
-      // explicit per-enrollment amount column today.
+      // Pending fees — sum + count of pending enrollments. Prefer the
+      // enrolment's explicit payment_amount when present; fall back to the
+      // course's listed price for older rows where the student hasn't
+      // initiated payment yet so we still have a useful estimate.
       pool.query(
         `SELECT
-           COUNT(*)::int                              AS pending_count,
-           COALESCE(SUM(c.price), 0)::numeric        AS pending_total
+           COUNT(*)::int                                                       AS pending_count,
+           COALESCE(SUM(COALESCE(e.payment_amount, c.price)), 0)::numeric     AS pending_total
          FROM enrollments e
          JOIN batches b ON e.batch_id = b.id
          JOIN courses c ON b.course_id = c.id
@@ -96,16 +97,19 @@ exports.getDashboardStats = async (req, res) => {
         [institutionId],
       ),
 
-      // Revenue this month — sum of course.price for paid enrollments
-      // recorded this calendar month.
+      // Revenue this month — sum of the REAL paid amount on enrollments
+      // whose payment landed in the current calendar month. We use
+      // payment_amount (set when the student paid) rather than the
+      // course's listed price, and COALESCE(paid_at, enrolled_at) so legacy
+      // rows without a recorded paid_at still get attributed to the month
+      // the enrolment happened. Without this, the dashboard never moves on
+      // new payments — only on new enrolments.
       pool.query(
-        `SELECT COALESCE(SUM(c.price), 0)::numeric AS total
+        `SELECT COALESCE(SUM(e.payment_amount), 0)::numeric AS total
          FROM enrollments e
-         JOIN batches b ON e.batch_id = b.id
-         JOIN courses c ON b.course_id = c.id
-         WHERE b.institution_id = $1
+         WHERE e.institution_id = $1
            AND e.payment_status = 'paid'
-           AND e.enrolled_at >= date_trunc('month', NOW())`,
+           AND COALESCE(e.paid_at, e.enrolled_at) >= date_trunc('month', NOW())`,
         [institutionId],
       ),
 
@@ -122,6 +126,9 @@ exports.getDashboardStats = async (req, res) => {
       ),
 
       // Monthly revenue series for the last 6 calendar months (oldest first).
+      // Same fix as above — bucket by COALESCE(paid_at, enrolled_at) and sum
+      // the real payment_amount so the chart reflects actual cash inflow,
+      // not enrolment events times the listed price.
       pool.query(
         `WITH months AS (
            SELECT generate_series(
@@ -133,14 +140,13 @@ exports.getDashboardStats = async (req, res) => {
          SELECT
            to_char(m.m, 'Mon')           AS label,
            m.m                           AS month_start,
-           COALESCE(SUM(c.price), 0)::numeric AS total
+           COALESCE(SUM(e.payment_amount), 0)::numeric AS total
          FROM months m
          LEFT JOIN enrollments e
-           ON e.enrolled_at >= m.m
-           AND e.enrolled_at <  m.m + INTERVAL '1 month'
+           ON e.institution_id = $1
            AND e.payment_status = 'paid'
-         LEFT JOIN batches b ON e.batch_id = b.id AND b.institution_id = $1
-         LEFT JOIN courses c ON b.course_id = c.id
+           AND COALESCE(e.paid_at, e.enrolled_at) >= m.m
+           AND COALESCE(e.paid_at, e.enrolled_at) <  m.m + INTERVAL '1 month'
          GROUP BY m.m
          ORDER BY m.m`,
         [institutionId],

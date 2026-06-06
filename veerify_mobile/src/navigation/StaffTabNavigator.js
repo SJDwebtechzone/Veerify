@@ -10,13 +10,13 @@ import React from 'react';
 import { Platform, Text, StyleSheet } from 'react-native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import {
-  LayoutDashboard, ClipboardCheck, Users, Bell, UserCircle,
+  LayoutDashboard, ClipboardCheck, Users, Video, UserCircle,
 } from 'lucide-react-native';
 
 import StaffDashboardScreen     from '../screens/staff/StaffDashboardScreen';
 import StaffAttendanceScreen    from '../screens/staff/StaffAttendanceScreen';
 import StaffStudentsScreen      from '../screens/staff/StaffStudentsScreen';
-import StaffNotificationsScreen from '../screens/staff/StaffNotificationsScreen';
+import StaffVideosScreen        from '../screens/staff/StaffVideosScreen';
 import StaffProfileScreen       from '../screens/staff/StaffProfileScreen';
 
 import { palette, shadows, spacing } from '../theme';
@@ -84,11 +84,11 @@ export default function StaffTabNavigator() {
         }}
       />
       <Tab.Screen
-        name="StaffNotifications"
-        component={StaffNotificationsScreen}
+        name="StaffVideos"
+        component={StaffVideosScreen}
         options={{
-          tabBarIcon: makeIcon(Bell),
-          tabBarLabel: ({ focused }) => <TabLabel focused={focused}>Alerts</TabLabel>,
+          tabBarIcon: makeIcon(Video),
+          tabBarLabel: ({ focused }) => <TabLabel focused={focused}>Sessions</TabLabel>,
         }}
       />
       <Tab.Screen

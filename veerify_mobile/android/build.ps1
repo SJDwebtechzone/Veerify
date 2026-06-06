@@ -50,44 +50,93 @@ if ($DeepClean) {
 # ---------------------------------------------------------------------------
 # 1. Patch graphicsConversions.h in the gradle cache.
 # ---------------------------------------------------------------------------
-$pattern     = 'return\s+std::format\("\{\}%",\s*dimension\.value\);'
-$replacement = 'return std::to_string(dimension.value) + "%";'
-$detect      = 'std::format\("\{\}%"'
+# The header lives inside the react-android-0.85.3-{debug,release}/prefab
+# folder that gradle materialises lazily during the FIRST build using that
+# variant. So debug builds extract one copy, release builds extract a
+# second copy - and a fresh release build extracts its copy AFTER this
+# patch step has already run.
+#
+# We work around that by running the patch as a function so we can call it
+# twice: once before the build, and once more after a failure if it looks
+# like the C++ format error.
+function Invoke-GraphicsConversionsPatch {
+    param([switch]$Quiet)
 
-Write-Host "==> Patching graphicsConversions.h (if needed)..." -ForegroundColor Cyan
-$patched = 0
-Get-ChildItem -Path "$env:USERPROFILE\.gradle\caches" -Recurse -Filter 'graphicsConversions.h' -ErrorAction SilentlyContinue | ForEach-Object {
-    $content = Get-Content $_.FullName -Raw
-    if ($content -match $detect) {
-        try {
-            # Gradle marks finalised cache files read-only. Clear that flag
-            # so Set-Content doesn't silently fail.
-            $fi = Get-Item $_.FullName
-            if ($fi.IsReadOnly) { $fi.IsReadOnly = $false }
-        } catch {}
-        ($content -replace $pattern, $replacement) | Set-Content -Path $_.FullName -NoNewline
-        # Verify the write actually took.
-        $stillBroken = (Get-Content $_.FullName -Raw) -match $detect
-        if ($stillBroken) {
-            Write-Host "    FAILED:  $($_.FullName)" -ForegroundColor Red
-        } else {
-            Write-Host "    patched: $($_.FullName)" -ForegroundColor Green
-            $patched++
+    $pattern     = 'return\s+std::format\("\{\}%",\s*dimension\.value\);'
+    $replacement = 'return std::to_string(dimension.value) + "%";'
+    $detect      = 'std::format\("\{\}%"'
+
+    if (-not $Quiet) {
+        Write-Host "==> Patching graphicsConversions.h (if needed)..." -ForegroundColor Cyan
+    }
+    $patched = 0
+    Get-ChildItem -Path "$env:USERPROFILE\.gradle\caches" -Recurse -Filter 'graphicsConversions.h' -ErrorAction SilentlyContinue | ForEach-Object {
+        $content = Get-Content $_.FullName -Raw
+        if ($content -match $detect) {
+            try {
+                # Gradle marks finalised cache files read-only. Clear that flag
+                # so Set-Content doesn't silently fail.
+                $fi = Get-Item $_.FullName
+                if ($fi.IsReadOnly) { $fi.IsReadOnly = $false }
+            } catch {}
+            ($content -replace $pattern, $replacement) | Set-Content -Path $_.FullName -NoNewline
+            # Verify the write actually took.
+            $stillBroken = (Get-Content $_.FullName -Raw) -match $detect
+            if ($stillBroken) {
+                Write-Host "    FAILED:  $($_.FullName)" -ForegroundColor Red
+            } else {
+                if (-not $Quiet) {
+                    Write-Host "    patched: $($_.FullName)" -ForegroundColor Green
+                }
+                $patched++
+            }
         }
     }
+    if ($patched -eq 0 -and -not $Quiet) {
+        Write-Host "    (no patch needed, already clean)" -ForegroundColor DarkGray
+    }
+    return $patched
 }
-if ($patched -eq 0) { Write-Host "    (no patch needed, already clean)" -ForegroundColor DarkGray }
+
+Invoke-GraphicsConversionsPatch | Out-Null
 
 # ---------------------------------------------------------------------------
 # 2. Run gradle, capturing output to build-error.log and console.
 # ---------------------------------------------------------------------------
 $logFile = 'build-error.log'
-Write-Host "==> Running: .\gradlew $($cleanedArgs -join ' ')" -ForegroundColor Cyan
-Write-Host "    (output also captured to $logFile)" -ForegroundColor DarkGray
 
-# Tee-Object mirrors to console AND saves to file.
-& .\gradlew @cleanedArgs 2>&1 | Tee-Object -FilePath $logFile
-$gradleExit = $LASTEXITCODE
+function Invoke-Gradle {
+    param([string]$LogPath)
+    Write-Host "==> Running: .\gradlew $($cleanedArgs -join ' ')" -ForegroundColor Cyan
+    Write-Host "    (output also captured to $LogPath)" -ForegroundColor DarkGray
+    & .\gradlew @cleanedArgs 2>&1 | Tee-Object -FilePath $LogPath
+    return $LASTEXITCODE
+}
+
+$gradleExit = Invoke-Gradle -LogPath $logFile
+
+# If the build died on the known graphicsConversions.h std::format issue,
+# odds are gradle just extracted the release prefab AFTER our initial
+# patch run. Re-patch the (now-extracted) headers and try once more.
+if ($gradleExit -ne 0 -and (Test-Path $logFile)) {
+    $hadFormatError = Select-String -Path $logFile -Pattern "no member named 'format' in namespace 'std'" -Quiet
+    if (-not $hadFormatError) {
+        # Fallback regex - the build log is full of CRLF surprises so try a
+        # looser match before giving up.
+        $hadFormatError = Select-String -Path $logFile -Pattern 'std::format\(' -Quiet
+    }
+    if ($hadFormatError) {
+        Write-Host ""
+        Write-Host "==> Detected std::format error - re-patching newly extracted headers and retrying..." -ForegroundColor Yellow
+        $patchedNow = Invoke-GraphicsConversionsPatch
+        if ($patchedNow -gt 0) {
+            Write-Host "    re-patched $patchedNow file(s). Retrying build..." -ForegroundColor Yellow
+            $gradleExit = Invoke-Gradle -LogPath $logFile
+        } else {
+            Write-Host "    (no new headers to patch - failure is something else)" -ForegroundColor DarkGray
+        }ygujjiuujijuhjuhjuhjuhjujuhjujuhjuhjujuhjhju
+    }
+}
 
 # ---------------------------------------------------------------------------
 # 3. On failure, auto-extract the error block.

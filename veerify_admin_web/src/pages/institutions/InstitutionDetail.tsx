@@ -1,13 +1,45 @@
 import { useState, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   ArrowLeft, Building2, User, Phone, Mail, MapPin,
   Globe, Award, Hash, CreditCard, CheckCircle,
   XCircle, Zap, Calendar, BookOpenCheck, Briefcase, ShieldCheck,
   FileText, BarChart3, Users, Clock, Image as ImageIcon,
-  ExternalLink, Building, Languages,
+  ExternalLink, Building, Languages, Send, BookOpen, UserCog,
+  GraduationCap, Layers, Wallet, Settings,
 } from 'lucide-react';
 import apiClient from '../../api/client';
+
+interface CourseRow {
+  id: number;
+  name: string;
+  description: string | null;
+  short_description: string | null;
+  image_url: string | null;
+  price: string | number | null;
+  duration_months: number | null;
+  mode: 'online' | 'offline' | 'hybrid' | null;
+  category: string | null;
+  level: string | null;
+  status: 'active' | 'inactive' | 'draft' | null;
+  badge: 'popular' | 'new' | 'kids_special' | null;
+  batch_count: number;
+  enrollment_count: number;
+  created_at: string;
+}
+
+interface StaffRow {
+  id: number;
+  name: string;
+  email: string;
+  phone: string | null;
+  specialization: string | null;
+  belt_level: string | null;
+  experience_years: number | null;
+  photo_url: string | null;
+  gender: string | null;
+  created_at: string;
+}
 
 interface Branch {
   name?: string;
@@ -111,11 +143,35 @@ export function InstitutionDetail() {
   const [actionLoading, setActionLoading] = useState(false);
   const [showRejectModal, setShowRejectModal] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
+  // Super-admin -> institution owner notification modal
+  const [showNotifyModal, setShowNotifyModal] = useState(false);
+  const [notifyTitle, setNotifyTitle] = useState('');
+  const [notifyMessage, setNotifyMessage] = useState('');
   const [error, setError] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
 
+  // Courses + staff for this institution, fetched once it loads.
+  const [courses, setCourses] = useState<CourseRow[] | null>(null);
+  const [staff, setStaff] = useState<StaffRow[] | null>(null);
+
   useEffect(() => {
     loadInstitution();
+  }, [id]);
+
+  // Side-load the courses + staff for this institution. Independent fetches so
+  // one slow query doesn't block the other section from rendering.
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    apiClient
+      .get(`/courses/institution/${id}?include_all=1`)
+      .then((r) => { if (!cancelled) setCourses(r.data?.courses || []); })
+      .catch(() => { if (!cancelled) setCourses([]); });
+    apiClient
+      .get(`/trainers/all?institution_id=${id}`)
+      .then((r) => { if (!cancelled) setStaff(r.data?.trainers || []); })
+      .catch(() => { if (!cancelled) setStaff([]); });
+    return () => { cancelled = true; };
   }, [id]);
 
   const loadInstitution = async () => {
@@ -190,6 +246,30 @@ export function InstitutionDetail() {
     }
   };
 
+  const handleSendNotification = async () => {
+    if (!notifyTitle.trim()) {
+      setError('Title is required');
+      return;
+    }
+    setActionLoading(true);
+    setError('');
+    try {
+      const res = await apiClient.post(`/onboarding/${id}/notify`, {
+        title:    notifyTitle.trim(),
+        message:  notifyMessage.trim() || null,
+        category: 'system',
+      });
+      setSuccessMessage(res.data?.message || 'Notification sent.');
+      setShowNotifyModal(false);
+      setNotifyTitle('');
+      setNotifyMessage('');
+    } catch (err: any) {
+      setError(err.response?.data?.message || 'Failed to send notification');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   const getStatusColor = (status: string) => {
     const colors: Record<string, string> = {
       pending_approval: 'bg-yellow-100 text-yellow-800 border-yellow-200',
@@ -219,7 +299,14 @@ export function InstitutionDetail() {
     );
   }
 
-  if (!institution) return null;
+    if (!institution) {
+    return (
+      <div className="text-center py-20">
+        <p className="text-gray-500">Institution data not found.</p>
+        <button onClick={() => navigate(-1)} className="mt-4 text-blue-600 hover:underline">Go back</button>
+      </div>
+    );
+  }
 
   // ── Derived asset URLs (handle relative paths and emulator hosts) ──
   const logoUrl = resolveAssetUrl(institution.logo_url);
@@ -524,6 +611,50 @@ export function InstitutionDetail() {
             </div>
           </Card>
 
+          {/* ── Courses Offered ── */}
+          <Card
+            icon={BookOpen}
+            accent="violet"
+            title="Courses Offered"
+            count={courses?.length}
+          >
+            {courses === null ? (
+              <p className="text-sm text-gray-400 italic py-4">Loading courses…</p>
+            ) : courses.length === 0 ? (
+              <p className="text-sm text-gray-400 italic py-4">
+                This institution hasn't published any courses yet.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {courses.map((c) => (
+                  <CourseRowItem key={c.id} course={c} />
+                ))}
+              </div>
+            )}
+          </Card>
+
+          {/* ── Staff (Trainers) ── */}
+          <Card
+            icon={UserCog}
+            accent="emerald"
+            title="Staff"
+            count={staff?.length}
+          >
+            {staff === null ? (
+              <p className="text-sm text-gray-400 italic py-4">Loading staff…</p>
+            ) : staff.length === 0 ? (
+              <p className="text-sm text-gray-400 italic py-4">
+                No trainers enrolled at this institution yet.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {staff.map((s) => (
+                  <StaffRowItem key={s.id} staff={s} />
+                ))}
+              </div>
+            )}
+          </Card>
+
           {/* ── Owner / Login (admin context) ── */}
           <Card icon={User} accent="slate" title="Account Owner">
             <div className="grid grid-cols-3 gap-4">
@@ -642,6 +773,25 @@ export function InstitutionDetail() {
           {/* Action Buttons */}
           <div className="bg-white rounded-xl border border-gray-100 p-6 space-y-3">
             <h2 className="text-sm font-semibold text-gray-900 mb-3">Actions</h2>
+
+            {/* Send notification - available at any status so the super
+                admin can reach owners about renewals, feature launches,
+                or platform-wide announcements regardless of lifecycle. */}
+            <button
+              onClick={() => setShowNotifyModal(true)}
+              disabled={actionLoading}
+              className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-white border-2 border-blue-200 text-blue-700 rounded-xl font-semibold hover:bg-blue-50 transition-colors disabled:opacity-60"
+            >
+              <Send size={18} />
+              Send Notification
+            </button>
+            <Link
+              to={`/institutions/${institution?.id}/marketplace`}
+              className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-indigo-600 text-white rounded-xl font-semibold hover:bg-indigo-700 transition-colors mt-3"
+            >
+              <Settings size={18} />
+              Marketplace Settings
+            </Link>
 
             {/* PENDING → Show Approve + Reject */}
             {institution.onboarding_status === 'pending_approval' && (
@@ -782,6 +932,74 @@ export function InstitutionDetail() {
         </div>
       </div>
 
+      {/* Notify Modal - super admin -> institution owner */}
+      {showNotifyModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-2xl">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-xl bg-blue-50 flex items-center justify-center">
+                <Send size={18} className="text-blue-600" />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-gray-900">Send Notification</h3>
+                <p className="text-xs text-gray-500">
+                  To {institution.owner_name || institution.name}
+                </p>
+              </div>
+            </div>
+
+            <p className="text-sm text-gray-500 mb-4">
+              This appears in the institution owner's mobile inbox the next time
+              they open the Veerify app.
+            </p>
+
+            <label className="block text-xs font-semibold text-gray-700 mb-1">Title</label>
+            <input
+              type="text"
+              value={notifyTitle}
+              onChange={(e) => setNotifyTitle(e.target.value)}
+              placeholder="e.g. Renewal due in 7 days"
+              maxLength={150}
+              className="w-full border border-gray-200 rounded-xl p-3 text-sm mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+
+            <label className="block text-xs font-semibold text-gray-700 mb-1">Message</label>
+            <textarea
+              value={notifyMessage}
+              onChange={(e) => setNotifyMessage(e.target.value)}
+              placeholder="Add the details here. Keep it short and clear."
+              maxLength={800}
+              className="w-full border border-gray-200 rounded-xl p-3 text-sm h-28 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            <p className="text-xs text-gray-400 mt-1 text-right">
+              {notifyMessage.length}/800
+            </p>
+
+            <div className="flex gap-3 mt-4">
+              <button
+                onClick={() => {
+                  setShowNotifyModal(false);
+                  setNotifyTitle('');
+                  setNotifyMessage('');
+                  setError('');
+                }}
+                className="flex-1 px-4 py-2.5 border border-gray-200 text-gray-700 rounded-xl font-medium hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSendNotification}
+                disabled={actionLoading || !notifyTitle.trim()}
+                className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 text-white rounded-xl font-semibold hover:bg-blue-700 disabled:opacity-60"
+              >
+                <Send size={16} />
+                {actionLoading ? 'Sending...' : 'Send'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Reject Modal */}
       {showRejectModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -836,11 +1054,13 @@ function Card({
   icon: Icon,
   accent,
   title,
+  count,
   children,
 }: {
   icon: any;
   accent: keyof typeof ACCENTS;
   title: string;
+  count?: number;
   children: React.ReactNode;
 }) {
   const a = ACCENTS[accent] || ACCENTS.blue;
@@ -851,6 +1071,11 @@ function Card({
           <Icon size={16} className={a.icon} />
         </span>
         {title}
+        {count != null ? (
+          <span className={`ml-1 text-xs font-bold px-2 py-0.5 rounded-full ${a.bg} ${a.icon}`}>
+            {count}
+          </span>
+        ) : null}
       </h2>
       {children}
     </div>
@@ -858,6 +1083,129 @@ function Card({
 }
 
 // ── Single label + value row ─────────────────────────────────────────────
+// ── Course row inside the Courses Offered card ────────────────────────
+function CourseRowItem({ course }: { course: CourseRow }) {
+  const img = resolveAssetUrl(course.image_url);
+  const status = course.status || 'active';
+  const statusStyle: Record<string, string> = {
+    active:   'bg-green-100 text-green-700',
+    draft:    'bg-yellow-100 text-yellow-700',
+    inactive: 'bg-gray-100 text-gray-600',
+  };
+  const modeLabel = course.mode
+    ? course.mode.charAt(0).toUpperCase() + course.mode.slice(1)
+    : null;
+
+  return (
+    <div className="flex items-center gap-3 p-3 rounded-lg hover:bg-gray-50 transition-colors border border-gray-100">
+      <div className="w-12 h-12 rounded-lg overflow-hidden flex-shrink-0 bg-violet-50 flex items-center justify-center">
+        {img ? (
+          <img src={img} alt={course.name} className="w-full h-full object-cover" />
+        ) : (
+          <BookOpen size={18} className="text-violet-600" />
+        )}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          <p className="text-sm font-semibold text-gray-900 truncate">{course.name}</p>
+          <span className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${statusStyle[status] || statusStyle.active}`}>
+            {status}
+          </span>
+        </div>
+        <div className="flex items-center gap-3 mt-0.5 text-[11px] text-gray-500">
+          {course.category ? <span>{course.category}</span> : null}
+          {modeLabel ? <span>· {modeLabel}</span> : null}
+          {course.level ? <span>· {course.level}</span> : null}
+        </div>
+        <div className="flex items-center gap-3 mt-1 text-[11px]">
+          {course.price != null ? (
+            <span className="inline-flex items-center gap-1 text-violet-700 font-semibold">
+              <Wallet size={10} />
+              ₹{Number(course.price).toLocaleString('en-IN')}
+            </span>
+          ) : null}
+          <span className="inline-flex items-center gap-1 text-gray-500">
+            <Layers size={10} />
+            {course.batch_count} batch{course.batch_count === 1 ? '' : 'es'}
+          </span>
+          <span className="inline-flex items-center gap-1 text-gray-500">
+            <Users size={10} />
+            {course.enrollment_count} enrolled
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Staff (trainer) row inside the Staff card ─────────────────────────
+function StaffRowItem({ staff }: { staff: StaffRow }) {
+  const photo = resolveAssetUrl(staff.photo_url);
+  const initials =
+    (staff.name || '?')
+      .split(' ')
+      .map((w) => w[0])
+      .filter(Boolean)
+      .slice(0, 2)
+      .join('')
+      .toUpperCase();
+
+  return (
+    <div className="flex items-center gap-3 p-3 rounded-lg hover:bg-gray-50 transition-colors border border-gray-100">
+      <div className="w-12 h-12 rounded-full overflow-hidden flex-shrink-0 border-2 border-emerald-100 bg-emerald-50 flex items-center justify-center">
+        {photo ? (
+          <img src={photo} alt={staff.name} className="w-full h-full object-cover" />
+        ) : (
+          <span className="text-sm font-bold text-emerald-700">{initials}</span>
+        )}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          <p className="text-sm font-semibold text-gray-900 truncate">{staff.name}</p>
+          {staff.specialization ? (
+            <span className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-blue-100 text-blue-700">
+              {staff.specialization}
+            </span>
+          ) : null}
+        </div>
+        <div className="flex items-center gap-3 mt-0.5 text-[11px] text-gray-500">
+          {staff.belt_level ? (
+            <span className="inline-flex items-center gap-1">
+              <Award size={10} />
+              {staff.belt_level}
+            </span>
+          ) : null}
+          {staff.experience_years != null ? (
+            <span>· {staff.experience_years} yr{staff.experience_years === 1 ? '' : 's'} exp</span>
+          ) : null}
+          {staff.gender ? <span>· {staff.gender}</span> : null}
+        </div>
+        <div className="flex items-center gap-3 mt-1 text-[11px]">
+          {staff.phone ? (
+            <a
+              href={`tel:${staff.phone}`}
+              className="inline-flex items-center gap-1 text-gray-700 hover:text-green-600"
+            >
+              <Phone size={10} className="text-green-500" />
+              {staff.phone}
+            </a>
+          ) : null}
+          {staff.email ? (
+            <a
+              href={`mailto:${staff.email}`}
+              className="inline-flex items-center gap-1 text-gray-700 hover:text-blue-600 truncate"
+              title={staff.email}
+            >
+              <Mail size={10} className="text-blue-500" />
+              {staff.email}
+            </a>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function InfoRow({
   icon: Icon,
   label,

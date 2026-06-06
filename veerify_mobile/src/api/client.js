@@ -23,7 +23,6 @@ import { getToken } from '../utils/storage';
 //     PRODUCTION_API_BASE → your deployed backend (https preferred).
 //     DEV_LAN_IP          → your dev laptop's LAN IP for testing on phone.
 
-const PRODUCTION_API_BASE = 'http://72.61.245.163:5002/api';
 const DEV_LAN_IP = '192.168.1.5';
 const DEV_PORT = 5000;
 

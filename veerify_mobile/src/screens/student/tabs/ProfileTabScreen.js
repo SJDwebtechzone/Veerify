@@ -19,7 +19,7 @@ import {
 import {
   LogIn, UserPlus, Sparkles, ChevronRight, GraduationCap, ClipboardCheck,
   Award, Wallet, Gift, Settings, LifeBuoy, LogOut, ShieldCheck, Edit3,
-  Crown, Lock,
+  Crown, Lock, Star,
 } from 'lucide-react-native';
 
 import { useAuth } from '../../../context/AuthContext';
@@ -259,7 +259,8 @@ function LoggedInView({ user, subscription, selectedInstitution, onLogout, navig
       <View style={styles.grid}>
         <Tile icon={GraduationCap}  label="Enrolled Programs" accent={palette.purple} onPress={() => placeholder('Enrolled Programs')} />
         <Tile icon={ClipboardCheck} label="Attendance"        accent={palette.green}  onPress={() => placeholder('Attendance')} />
-        <Tile icon={Award}          label="Certificates"      accent={palette.orange} onPress={() => placeholder('Certificates')} />
+        <Tile icon={Star}           label="My Performance"    accent={palette.orange} onPress={() => navigation.navigate('StudentPerformanceReports')} />
+        <Tile icon={Award}          label="Belts & Certs"     accent={palette.teal}   onPress={() => navigation.navigate('StudentBeltJourney')} />
         <Tile icon={Wallet}         label="Payments"          accent={palette.blue}   onPress={() => placeholder('Payment History')} />
         <Tile icon={Gift}           label="Refer & Earn"      accent={palette.pink}   onPress={handleReferral} />
         <Tile icon={Settings}       label="Settings"          accent={palette.teal}   onPress={() => placeholder('Settings')} />

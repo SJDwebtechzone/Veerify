@@ -1,15 +1,35 @@
 const pool = require('../config/db');
 const { sendApprovalEmail, sendActivationEmail } = require('../utils/mailer');
 const { createPaymentLink, verifyWebhookSignature } = require('../utils/razorpay');
+const { insertNotification } = require('./notification.controller');
+const { creditReferralReward, consumeDiscount } = require('./referral.controller');
 
 // STEP 1: Admin selects a plan
 exports.selectPlan = async (req, res) => {
   try {
-    const { plan_id } = req.body;
+    const { plan_id, referral_code } = req.body;
     const userId = req.user.id;
 
     if (!plan_id) {
       return res.status(400).json({ message: 'Plan ID is required' });
+    }
+
+    // Optional referral code — captured here on first plan selection. We
+    // resolve it to a referrer institution and use it in the INSERT below.
+    // Apply-after-the-fact is also possible via POST /api/referrals/apply.
+    let referredBy = null;
+    if (referral_code) {
+      const code = String(referral_code).trim().toUpperCase();
+      const ref = await pool.query(
+        `SELECT id, owner_user_id FROM institutions
+          WHERE referral_code = $1 AND deleted_at IS NULL`,
+        [code],
+      );
+      if (ref.rows.length > 0) {
+        referredBy = ref.rows[0].id;
+        // Self-referral guard.
+        if (ref.rows[0].owner_user_id === userId) referredBy = null;
+      }
     }
 
     // Verify plan exists
@@ -62,6 +82,62 @@ exports.selectPlan = async (req, res) => {
         [plan_id, userId],
       );
 
+      // If a referral code was supplied AND this institution hasn't already
+      // been referred AND hasn't paid yet, apply it now. (The earlier code
+      // only did this for fresh-INSERT institutions, so admins who came
+      // back to PlanSelection after first creating their academy were
+      // silently losing the code.)
+      if (
+        referredBy &&
+        !current.referred_by_institution_id &&
+        !current.paid_at
+      ) {
+        try {
+          await pool.query(
+            `UPDATE institutions
+                SET referred_by_institution_id = $1
+              WHERE id = $2`,
+            [referredBy, current.id],
+          );
+          const settingsRow = await pool.query(
+            `SELECT points_per_referral FROM referral_settings WHERE id = 1`,
+          );
+          const pts = Number(settingsRow.rows[0]?.points_per_referral) || 500;
+          await pool.query(
+            `INSERT INTO referrals
+               (referrer_institution_id, referred_institution_id,
+                referral_code, status, reward_points)
+             VALUES ($1, $2, $3, 'pending', $4)
+             ON CONFLICT (referred_institution_id) DO NOTHING`,
+            [referredBy, current.id, referral_code.toUpperCase(), pts],
+          );
+
+          // Notify the referrer that they got a pending referral (same
+          // best-effort pattern used by /referrals/apply).
+          try {
+            const referrerOwner = await pool.query(
+              `SELECT owner_user_id FROM institutions WHERE id = $1`,
+              [referredBy],
+            );
+            const ownerId = referrerOwner.rows[0]?.owner_user_id;
+            if (ownerId) {
+              await insertNotification({
+                user_id:        ownerId,
+                institution_id: referredBy,
+                category:       'system',
+                title:          'New referral registered',
+                message:        `${current.name || 'A new institution'} signed up with your referral code. You'll earn points once they pay their first subscription.`,
+                data:           { screen: 'AdminReferEarn' },
+              });
+            }
+          } catch (err) {
+            console.warn('[selectPlan/existing] notify failed:', err?.message);
+          }
+        } catch (err) {
+          console.warn('[selectPlan/existing] referral apply failed:', err?.message);
+        }
+      }
+
       return res.json({
         message: allowStatusReset
           ? 'Plan selected successfully'
@@ -73,12 +149,34 @@ exports.selectPlan = async (req, res) => {
 
     // Create new institution with plan selected
     const newInst = await pool.query(
-      `INSERT INTO institutions 
-         (owner_user_id, plan_id, onboarding_status, name, status)
-       VALUES ($1, $2, 'plan_selected', 'Unnamed Academy', 'pending')
+      `INSERT INTO institutions
+         (owner_user_id, plan_id, onboarding_status, name, status,
+          referred_by_institution_id)
+       VALUES ($1, $2, 'plan_selected', 'Unnamed Academy', 'pending', $3)
        RETURNING *`,
-      [userId, plan_id]
+      [userId, plan_id, referredBy]
     );
+
+    // If a referral code was applied, also insert a 'pending' referrals row
+    // so the referrer's dashboard shows the new sign-up immediately.
+    if (referredBy) {
+      try {
+        const settingsRow = await pool.query(
+          `SELECT points_per_referral FROM referral_settings WHERE id = 1`,
+        );
+        const pts = Number(settingsRow.rows[0]?.points_per_referral) || 500;
+        await pool.query(
+          `INSERT INTO referrals
+             (referrer_institution_id, referred_institution_id,
+              referral_code, status, reward_points)
+           VALUES ($1, $2, $3, 'pending', $4)
+           ON CONFLICT (referred_institution_id) DO NOTHING`,
+          [referredBy, newInst.rows[0].id, referral_code.toUpperCase(), pts],
+        );
+      } catch (err) {
+        console.warn('[selectPlan] referrals insert failed:', err?.message);
+      }
+    }
 
     // Update user's institution_id
     await pool.query(
@@ -284,7 +382,7 @@ exports.getMyStatus = async (req, res) => {
     const userId = req.user.id;
 
     const result = await pool.query(
-      `SELECT i.*, sp.name AS plan_name, sp.price AS plan_price, 
+      `SELECT i.*, sp.name AS plan_name, sp.price AS plan_price,
               sp.features AS plan_features
        FROM institutions i
        LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
@@ -301,12 +399,45 @@ exports.getMyStatus = async (req, res) => {
 
     const inst = result.rows[0];
 
+    // ── Map trial lifecycle → navigation status ────────────────────────────
+    // The mobile navigator routes by `status`:
+    //   'active'           → AdminDashboard
+    //   'approved' / 'payment_pending' → PaymentScreen
+    // During the free trial / grace period the institution is functionally
+    // active (full feature access; the dashboard banner nags about payment).
+    // Only when grace has expired AND they haven't paid do we force the
+    // payment screen. This is the difference between "you may pay" and
+    // "you must pay to continue".
+    let effectiveStatus = inst.onboarding_status;
+    if (inst.onboarding_status === 'approved') {
+      const now  = Date.now();
+      const paid = !!inst.paid_at;
+      const tEnd = inst.trial_ends_at ? new Date(inst.trial_ends_at).getTime() : null;
+      const gEnd = inst.grace_ends_at ? new Date(inst.grace_ends_at).getTime() : null;
+
+      if (paid) {
+        effectiveStatus = 'active';
+      } else if (tEnd && now <= tEnd) {
+        // Trial active — full free access.
+        effectiveStatus = 'active';
+      } else if (gEnd && now <= gEnd) {
+        // Grace period — still allowed in, but banner pushes them to pay.
+        effectiveStatus = 'active';
+      } else if (tEnd) {
+        // Trial+grace exhausted without payment — hard lock.
+        effectiveStatus = 'payment_pending';
+      }
+      // Else (no trial_ends_at): legacy approved row from before the trial
+      // concept existed — keep the old payment-first behaviour.
+    }
+
     res.json({
       // When the row is soft-deleted, onboarding_status is already 'deleted'.
       // We also send back the snapshot of the previous status so the mobile
       // app can say "Your previously-active academy was deleted" vs.
       // "Your pending application was deleted".
-      status: inst.onboarding_status,
+      status: effectiveStatus,
+      onboarding_status_raw: inst.onboarding_status,
       institution: inst,
       rejection_reason: inst.rejection_reason || null,
       deleted_at:             inst.deleted_at || null,
@@ -317,6 +448,110 @@ exports.getMyStatus = async (req, res) => {
   } catch (err) {
     console.error('Get status error:', err);
     res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Subscription lifecycle: trial / grace / locked / paid
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Each institution's lifecycle phase is derived from three timestamps on the
+// row (trial_starts_at, trial_ends_at, grace_ends_at — populated when the
+// super admin approves the row) plus paid_at:
+//
+//   paid_at IS NOT NULL          -> 'paid'      (active subscription)
+//   trial_ends_at IS NULL        -> 'pending'   (not approved yet)
+//   NOW() <= trial_ends_at       -> 'trial'     (free access, no payment needed)
+//   NOW() <= grace_ends_at       -> 'grace'     (must pay now to keep using app)
+//   NOW() > grace_ends_at        -> 'locked'    (hard-locked until they pay)
+//
+// The mobile admin app polls this on dashboard mount to decide whether to
+// show the trial banner / grace warning / lock overlay, and what amount to
+// charge (applies plan.discount).
+exports.getSubscriptionStatus = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const result = await pool.query(
+      `SELECT i.id, i.name, i.onboarding_status, i.paid_at,
+              i.trial_starts_at, i.trial_ends_at, i.grace_ends_at,
+              i.payment_link_url, i.payment_link_status,
+              sp.id    AS plan_id,
+              sp.name  AS plan_name,
+              sp.price AS plan_price,
+              sp.trial_days       AS plan_trial_days,
+              sp.grace_days       AS plan_grace_days,
+              sp.discount_enabled AS plan_discount_enabled,
+              sp.discount_percent AS plan_discount_percent
+       FROM institutions i
+       LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
+       WHERE i.owner_user_id = $1`,
+      [userId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({ phase: 'registered', institution: null });
+    }
+
+    const r = result.rows[0];
+    const now = new Date();
+
+    // Compute phase.
+    let phase;
+    if (r.paid_at) {
+      phase = 'paid';
+    } else if (!r.trial_ends_at) {
+      phase = 'pending';
+    } else if (now <= new Date(r.trial_ends_at)) {
+      phase = 'trial';
+    } else if (r.grace_ends_at && now <= new Date(r.grace_ends_at)) {
+      phase = 'grace';
+    } else {
+      phase = 'locked';
+    }
+
+    // Days remaining (ceil so a few hours left still reads as "1 day").
+    const daysLeft = (target) => {
+      if (!target) return null;
+      const ms = new Date(target).getTime() - now.getTime();
+      return ms > 0 ? Math.ceil(ms / (24 * 60 * 60 * 1000)) : 0;
+    };
+
+    // Effective price the academy will pay — plan price minus discount.
+    const basePrice   = Number(r.plan_price) || 0;
+    const discountOn  = !!r.plan_discount_enabled;
+    const discountPct = Number(r.plan_discount_percent) || 0;
+    const effectivePrice = discountOn && discountPct > 0
+      ? Math.round(basePrice * (1 - discountPct / 100))
+      : basePrice;
+
+    res.json({
+      phase,
+      institution_id: r.id,
+      institution_name: r.name,
+      onboarding_status: r.onboarding_status,
+      trial_starts_at:  r.trial_starts_at,
+      trial_ends_at:    r.trial_ends_at,
+      grace_ends_at:    r.grace_ends_at,
+      days_left_in_trial: daysLeft(r.trial_ends_at),
+      days_left_in_grace: daysLeft(r.grace_ends_at),
+      plan: {
+        id: r.plan_id,
+        name: r.plan_name,
+        price: basePrice,
+        trial_days: Number(r.plan_trial_days) || 0,
+        grace_days: Number(r.plan_grace_days) || 0,
+        discount_enabled: discountOn,
+        discount_percent: discountPct,
+        effective_price: effectivePrice,
+      },
+      payment_link_url:    r.payment_link_url || null,
+      payment_link_status: r.payment_link_status || null,
+      paid_at:             r.paid_at || null,
+    });
+  } catch (err) {
+    console.error('Subscription status error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
 
@@ -634,10 +869,16 @@ exports.approveInstitution = async (req, res) => {
     const { id } = req.params;
     const adminId = req.user.id;
 
-    // Pull institution + owner + plan in one shot.
+    // Pull institution + owner + plan in one shot. The trial/grace/discount
+    // columns on subscription_plans drive what trial window we open here and
+    // what we actually charge.
     const instResult = await pool.query(
       `SELECT i.*, u.email AS owner_email, u.name AS owner_name, u.phone AS owner_phone,
-              sp.name AS plan_name, sp.price AS plan_price
+              sp.name AS plan_name, sp.price AS plan_price,
+              sp.trial_days AS plan_trial_days,
+              sp.grace_days AS plan_grace_days,
+              sp.discount_enabled AS plan_discount_enabled,
+              sp.discount_percent AS plan_discount_percent
        FROM institutions i
        JOIN users u ON i.owner_user_id = u.id
        LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
@@ -663,22 +904,54 @@ exports.approveInstitution = async (req, res) => {
       });
     }
 
-    // Flip status to approved first so the UI updates even if email/Razorpay fails.
+    // Effective price = plan price with discount applied if enabled. We round
+    // to the nearest rupee so the Razorpay link doesn't end up with paise.
+    const trialDays   = Number(institution.plan_trial_days)   || 0;
+    const graceDays   = Number(institution.plan_grace_days)   || 0;
+    const discountOn  = !!institution.plan_discount_enabled;
+    const discountPct = Number(institution.plan_discount_percent) || 0;
+    const basePrice   = Number(institution.plan_price);
+    const effectivePrice = discountOn && discountPct > 0
+      ? Math.round(basePrice * (1 - discountPct / 100))
+      : basePrice;
+
+    // Flip status to approved AND open the trial window in the same write so
+    // we don't end up with an approved institution that has no trial_ends_at
+    // (which would look like "locked" to the gating logic).
+    //
+    // After approval the academy goes straight into trial — they get full
+    // app access for trial_days. Within (trial_days + grace_days), they
+    // must pay. After that they're locked until they do.
     await pool.query(
       `UPDATE institutions SET
          onboarding_status = 'approved',
-         status = 'approved',
-         approved_by = $1,
-         approved_at = NOW()
+         status            = 'approved',
+         approved_by       = $1,
+         approved_at       = NOW(),
+         trial_starts_at   = NOW(),
+         trial_ends_at     = NOW() + ($3 || ' days')::interval,
+         grace_ends_at     = NOW() + (($3::int + $4::int) || ' days')::interval
        WHERE id = $2`,
-      [adminId, id]
+      [adminId, id, trialDays, graceDays]
     );
 
     const warnings = [];
 
-    // 3. Create payment link.
+    // 3a. Apply referral-wallet discount (if any) before generating the link.
+    //     This is the FIRST renewal payment so we consume points here.
+    let referralDiscount = 0;
+    try {
+      const ref = await consumeDiscount(id, effectivePrice);
+      referralDiscount = ref.discount || 0;
+    } catch (err) {
+      console.warn('[approve] referral discount failed:', err?.message);
+    }
+    const finalPayable = Math.max(0, effectivePrice - referralDiscount);
+
+    // 3b. Create payment link at the FINAL price (after plan discount and
+    //     referral discount).
     const linkResult = await createPaymentLink({
-      amountInRupees: institution.plan_price,
+      amountInRupees: finalPayable,
       institution,
     });
 
@@ -696,7 +969,9 @@ exports.approveInstitution = async (req, res) => {
       warnings.push(`Payment link not created: ${linkResult.error}`);
     }
 
-    // 4. Email the owner (only if we have a link to send).
+    // 4. Email the owner (only if we have a link to send). The mailer branches
+    //    on trialDays: with a trial it sends a "free trial started" email
+    //    instead of a "please pay" email.
     if (linkResult.ok) {
       const mailResult = await sendApprovalEmail({
         to:              institution.owner_email,
@@ -705,6 +980,11 @@ exports.approveInstitution = async (req, res) => {
         planName:        institution.plan_name,
         planPrice:       institution.plan_price,
         paymentUrl:      linkResult.link.short_url,
+        trialDays,
+        graceDays,
+        effectivePrice,
+        discountEnabled: discountOn,
+        discountPercent: discountPct,
       });
       if (!mailResult.ok) {
         warnings.push(`Email not sent: ${mailResult.error}`);
@@ -749,7 +1029,9 @@ exports.resendPaymentLink = async (req, res) => {
 
     const instResult = await pool.query(
       `SELECT i.*, u.email AS owner_email, u.name AS owner_name, u.phone AS owner_phone,
-              sp.name AS plan_name, sp.price AS plan_price
+              sp.name AS plan_name, sp.price AS plan_price,
+              sp.discount_enabled AS plan_discount_enabled,
+              sp.discount_percent AS plan_discount_percent
        FROM institutions i
        JOIN users u ON i.owner_user_id = u.id
        LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
@@ -768,8 +1050,17 @@ exports.resendPaymentLink = async (req, res) => {
       });
     }
 
+    // Same discount math as approveInstitution so a resend doesn't accidentally
+    // charge full price.
+    const discountOn  = !!institution.plan_discount_enabled;
+    const discountPct = Number(institution.plan_discount_percent) || 0;
+    const basePrice   = Number(institution.plan_price);
+    const effectivePrice = discountOn && discountPct > 0
+      ? Math.round(basePrice * (1 - discountPct / 100))
+      : basePrice;
+
     const linkResult = await createPaymentLink({
-      amountInRupees: institution.plan_price,
+      amountInRupees: effectivePrice,
       institution,
     });
     if (!linkResult.ok) {
@@ -876,6 +1167,13 @@ exports.activateInstitution = async (req, res) => {
 
     // Activate institution. We also mark the payment_link_status as 'paid' so
     // the admin UI shows the right badge even on a manual override.
+    // Was this institution already paid before this call? If so, we skip the
+    // referral credit so manual re-activations don't double-credit.
+    const preFlight = await pool.query(
+      `SELECT paid_at FROM institutions WHERE id = $1`, [id],
+    );
+    const wasAlreadyPaid = !!preFlight.rows[0]?.paid_at;
+
     const updated = await pool.query(
       `UPDATE institutions SET
          onboarding_status   = 'active',
@@ -895,6 +1193,13 @@ exports.activateInstitution = async (req, res) => {
        WHERE id = $1 AND payment_link_status <> 'paid'`,
       [id]
     );
+
+    // Credit the referring institution (if any) — best effort.
+    if (!wasAlreadyPaid) {
+      creditReferralReward(Number(id)).catch((err) =>
+        console.warn('[activate] referral credit failed:', err?.message),
+      );
+    }
 
     // Also activate the owner user
     await pool.query(
@@ -1011,6 +1316,10 @@ exports.handlePaymentWebhook = async (req, res) => {
     }
 
     // Activate.
+    // Track whether this is the first-ever paid event, so we only credit
+    // the referrer once per institution.
+    const wasAlreadyPaid = !!institution.paid_at;
+
     const updated = await pool.query(
       `UPDATE institutions SET
          onboarding_status    = 'active',
@@ -1029,6 +1338,13 @@ exports.handlePaymentWebhook = async (req, res) => {
       `UPDATE users SET status = 'active' WHERE id = $1`,
       [institution.owner_user_id]
     );
+
+    // Credit the referring institution (if any) — best effort, after commit.
+    if (!wasAlreadyPaid) {
+      creditReferralReward(institution.id).catch((err) =>
+        console.warn('[webhook] referral credit failed:', err?.message),
+      );
+    }
 
     // Fire-and-forget welcome email. Don't let it block the webhook ack.
     sendActivationEmail({
@@ -1304,6 +1620,218 @@ exports.startOverMyInstitution = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// GET /api/onboarding/recent-payments
+//
+// Subscription payments made by institutions. Powers the "Recent Payments"
+// table on the super admin web dashboard.
+//
+// Notes:
+//   - payment_amount stored in PAISE in the institutions table (Razorpay
+//     convention), so we divide by 100 to return rupees to the client.
+//   - Returns the Razorpay payment_link_id when available (live Razorpay
+//     flow) and falls back to payment_reference (used by the mock pay
+//     flow). The client decides which to show as the payment id.
+// ─────────────────────────────────────────────────────────────────────────────
+exports.getRecentInstitutionPayments = async (_req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT
+         i.id                  AS institution_id,
+         i.name                AS institution_name,
+         i.logo_url,
+         i.payment_link_id,
+         i.payment_link_url,
+         i.payment_link_status,
+         i.payment_reference,
+         (i.payment_amount / 100.0)::numeric(10,2) AS amount_inr,
+         i.paid_at,
+         i.subscription_start,
+         i.subscription_end,
+         sp.name  AS plan_name,
+         sp.price AS plan_price,
+         u.name   AS owner_name,
+         u.email  AS owner_email
+       FROM institutions i
+       LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
+       LEFT JOIN users u ON i.owner_user_id = u.id
+       WHERE i.paid_at IS NOT NULL
+         AND i.deleted_at IS NULL
+       ORDER BY i.paid_at DESC
+       LIMIT 25`,
+    );
+
+    res.json({
+      count: result.rows.length,
+      payments: result.rows,
+    });
+  } catch (err) {
+    console.error('getRecentInstitutionPayments error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SUPER ADMIN: send a notification to an institution.
+// POST /api/onboarding/:id/notify   body: { title, message?, category? }
+//
+// Resolves the institution's owner_user_id and drops a notification row in
+// that user's inbox. The owner sees it on next sync of the bell icon in
+// the mobile admin app. Used by the platform super admin in veerify_admin_web
+// to ping individual institutions ("Your renewal is due", "New feature
+// available", etc.).
+// ─────────────────────────────────────────────────────────────────────────────
+exports.notifyInstitution = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { title, message, category } = req.body || {};
+    const senderId = req.user?.id || null;
+
+    if (!title || !String(title).trim()) {
+      return res.status(400).json({ message: 'Title is required' });
+    }
+
+    const instResult = await pool.query(
+      `SELECT id, name, owner_user_id FROM institutions WHERE id = $1`,
+      [id],
+    );
+    if (instResult.rows.length === 0) {
+      return res.status(404).json({ message: 'Institution not found' });
+    }
+    const institution = instResult.rows[0];
+    if (!institution.owner_user_id) {
+      return res.status(400).json({
+        message: 'Institution has no linked owner user',
+      });
+    }
+
+    const inserted = await insertNotification({
+      user_id:        institution.owner_user_id,
+      institution_id: institution.id,
+      category:       category || 'system',
+      title:          String(title).trim(),
+      message:        message ? String(message).trim() : null,
+      data:           { source: 'super_admin', institution_id: institution.id },
+      created_by:     senderId,
+    });
+
+    res.status(201).json({
+      message: `Notification sent to ${institution.name}.`,
+      notification: inserted,
+    });
+  } catch (err) {
+    console.error('notifyInstitution error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SUPER ADMIN: broadcast a notification to many institutions at once.
+// POST /api/onboarding/notify-bulk
+//   body: {
+//     scope: 'all' | 'active' | 'pending' | 'specific',
+//     institution_ids?: number[],   // required when scope === 'specific'
+//     title: string,
+//     message?: string,
+//     category?: string,
+//   }
+//
+// Resolves the scope to a list of institutions, fans out one notification
+// per owner inside a single transaction, returns delivered + skipped counts.
+// Soft-deleted institutions are always skipped (the owner can't read their
+// inbox in a deleted state anyway).
+// ─────────────────────────────────────────────────────────────────────────────
+exports.notifyInstitutionsBulk = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const {
+      scope = 'active',
+      institution_ids,
+      title,
+      message,
+      category,
+    } = req.body || {};
+    const senderId = req.user?.id || null;
+
+    if (!title || !String(title).trim()) {
+      return res.status(400).json({ message: 'Title is required' });
+    }
+
+    // Build the WHERE clause per scope. All scopes drop soft-deleted rows.
+    let whereSql = 'deleted_at IS NULL AND owner_user_id IS NOT NULL';
+    const params = [];
+
+    switch (scope) {
+      case 'all':
+        // No extra filter - every non-deleted institution with an owner.
+        break;
+      case 'active':
+        whereSql += ` AND onboarding_status = 'active'`;
+        break;
+      case 'pending':
+        whereSql += ` AND onboarding_status = 'pending_approval'`;
+        break;
+      case 'specific':
+        if (!Array.isArray(institution_ids) || institution_ids.length === 0) {
+          return res.status(400).json({
+            message: 'institution_ids must be a non-empty array when scope is "specific"',
+          });
+        }
+        params.push(institution_ids);
+        whereSql += ` AND id = ANY($${params.length}::int[])`;
+        break;
+      default:
+        return res.status(400).json({ message: `Unknown scope: ${scope}` });
+    }
+
+    const targets = await pool.query(
+      `SELECT id, name, owner_user_id FROM institutions WHERE ${whereSql}`,
+      params,
+    );
+
+    if (targets.rows.length === 0) {
+      return res.status(400).json({
+        message: 'No institutions matched the selected scope',
+      });
+    }
+
+    await client.query('BEGIN');
+    let delivered = 0;
+    for (const inst of targets.rows) {
+      try {
+        await insertNotification({
+          user_id:        inst.owner_user_id,
+          institution_id: inst.id,
+          category:       category || 'system',
+          title:          String(title).trim(),
+          message:        message ? String(message).trim() : null,
+          data:           { source: 'super_admin', scope },
+          created_by:     senderId,
+        }, client);
+        delivered += 1;
+      } catch (err) {
+        // Swallow per-row failures so one bad row doesn't roll back the
+        // whole broadcast. We surface the skipped count in the response.
+        console.warn(`[notify-bulk] insert failed for inst=${inst.id}:`, err.message);
+      }
+    }
+    await client.query('COMMIT');
+
+    res.status(201).json({
+      message: `Notification sent to ${delivered} ${delivered === 1 ? 'institution' : 'institutions'}.`,
+      delivered_count: delivered,
+      skipped_count:   targets.rows.length - delivered,
+      scope,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('notifyInstitutionsBulk error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  } finally {
+    client.release();
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GET /api/onboarding/counts
 // Lightweight summary endpoint polled by the admin web every 30 seconds so the
 // sidebar / bell can show live counts without re-fetching the full list.
@@ -1315,40 +1843,63 @@ exports.startOverMyInstitution = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 exports.getOnboardingCounts = async (_req, res) => {
   try {
-    const summary = await pool.query(`
-      SELECT
-        COUNT(*) FILTER (WHERE onboarding_status = 'pending_approval' AND deleted_at IS NULL) AS pending_approval,
-        COUNT(*) FILTER (WHERE onboarding_status = 'approved'         AND deleted_at IS NULL) AS approved,
-        COUNT(*) FILTER (WHERE onboarding_status = 'active'           AND deleted_at IS NULL) AS active,
-        COUNT(*) FILTER (WHERE onboarding_status = 'rejected'         AND deleted_at IS NULL) AS rejected,
-        COUNT(*) FILTER (WHERE subscription_end IS NOT NULL AND subscription_end < NOW() AND deleted_at IS NULL) AS expired,
-        COUNT(*) FILTER (WHERE deleted_at IS NOT NULL)                AS deleted,
-        COUNT(*) FILTER (WHERE deleted_at IS NULL)                    AS total
-      FROM institutions
-    `);
-
-    const recent = await pool.query(`
-      SELECT
-        i.id,
-        i.name,
-        i.logo_url,
-        i.city,
-        i.created_at,
-        u.name  AS owner_name,
-        u.email AS owner_email,
-        sp.name AS plan_name,
-        sp.price AS plan_price
-      FROM institutions i
-      JOIN users u ON i.owner_user_id = u.id
-      LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
-      WHERE i.onboarding_status = 'pending_approval'
-        AND i.deleted_at IS NULL
-      ORDER BY i.created_at DESC
-      LIMIT 5
-    `);
+    // Four queries in parallel: institution summary, recent pending list,
+    // platform-wide people totals, and the platform MRR (sum of plan price
+    // for every currently-active institution = the monthly subscription
+    // revenue the super admin sees on the dashboard).
+    const [summary, recent, peopleCounts, mrrRow] = await Promise.all([
+      pool.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE onboarding_status = 'pending_approval' AND deleted_at IS NULL) AS pending_approval,
+          COUNT(*) FILTER (WHERE onboarding_status = 'approved'         AND deleted_at IS NULL) AS approved,
+          COUNT(*) FILTER (WHERE onboarding_status = 'active'           AND deleted_at IS NULL) AS active,
+          COUNT(*) FILTER (WHERE onboarding_status = 'rejected'         AND deleted_at IS NULL) AS rejected,
+          COUNT(*) FILTER (WHERE subscription_end IS NOT NULL AND subscription_end < NOW() AND deleted_at IS NULL) AS expired,
+          COUNT(*) FILTER (WHERE deleted_at IS NOT NULL)                AS deleted,
+          COUNT(*) FILTER (WHERE deleted_at IS NULL)                    AS total
+        FROM institutions
+      `),
+      pool.query(`
+        SELECT
+          i.id,
+          i.name,
+          i.logo_url,
+          i.city,
+          i.created_at,
+          u.name  AS owner_name,
+          u.email AS owner_email,
+          sp.name AS plan_name,
+          sp.price AS plan_price
+        FROM institutions i
+        JOIN users u ON i.owner_user_id = u.id
+        LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
+        WHERE i.onboarding_status = 'pending_approval'
+          AND i.deleted_at IS NULL
+        ORDER BY i.created_at DESC
+        LIMIT 5
+      `),
+      pool.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE role = 'student' AND COALESCE(is_deleted, false) = false) AS total_students,
+          COUNT(*) FILTER (WHERE role = 'trainer' AND COALESCE(is_deleted, false) = false) AS total_trainers,
+          COUNT(*) FILTER (WHERE role = 'parent'  AND COALESCE(is_deleted, false) = false) AS total_parents
+        FROM users
+      `),
+      // Monthly Recurring Revenue: sum of plan price for every currently-
+      // active institution. Institutions without a linked plan contribute 0.
+      pool.query(`
+        SELECT COALESCE(SUM(sp.price), 0)::numeric AS monthly_revenue
+        FROM institutions i
+        LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
+        WHERE i.onboarding_status = 'active'
+          AND i.deleted_at IS NULL
+      `),
+    ]);
 
     // pg returns COUNT(*) as a string; coerce to numbers for the client.
     const c = summary.rows[0] || {};
+    const p = peopleCounts.rows[0] || {};
+    const m = mrrRow.rows[0] || {};
     res.json({
       counts: {
         pending_approval: Number(c.pending_approval || 0),
@@ -1358,6 +1909,10 @@ exports.getOnboardingCounts = async (_req, res) => {
         expired:          Number(c.expired || 0),
         deleted:          Number(c.deleted || 0),
         total:            Number(c.total || 0),
+        total_students:   Number(p.total_students || 0),
+        total_trainers:   Number(p.total_trainers || 0),
+        total_parents:    Number(p.total_parents || 0),
+        monthly_revenue:  Number(m.monthly_revenue || 0),
       },
       recent_pending: recent.rows,
     });

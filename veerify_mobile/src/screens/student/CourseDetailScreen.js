@@ -110,8 +110,78 @@ export default function CourseDetailScreen({ navigation, route }) {
   };
 
   const handleEnroll = () => {
-    if (triggerPaywall('Enroll')) return;
-    // Phase 2: hit enrollment endpoint
+    // Guests must log in first — the enrollment form is per-user.
+    if (isGuest) {
+      Alert.alert(
+        'Login to Continue Learning',
+        'Sign in to enroll in this program.',
+        [
+          { text: 'Not now', style: 'cancel' },
+          { text: 'Login', onPress: () => navigation.getParent()?.navigate('Login') },
+        ],
+      );
+      return;
+    }
+
+    // The enrollment table is keyed on batch_id (each enrollment ties a
+    // student to one specific batch). So before opening the form we need
+    // to know which batch the student is enrolling into.
+    const availableBatches = batches.filter(
+      (b) => Number(b.enrolled_count || 0) < Number(b.capacity || 0),
+    );
+    const allBatches = batches;
+
+    if (allBatches.length === 0) {
+      Alert.alert(
+        'No batches yet',
+        'This program does not have any batches available. Please check back soon.',
+      );
+      return;
+    }
+
+    if (availableBatches.length === 0) {
+      Alert.alert(
+        'All batches are full',
+        'Every batch for this program is at capacity. Please check back soon.',
+      );
+      return;
+    }
+
+    const courseSummary = {
+      id:               program.id,
+      name:             program.name,
+      price:            program.price,
+      institution_name: program.institution_name,
+    };
+
+    // Single batch? Skip the picker.
+    if (availableBatches.length === 1) {
+      navigation.navigate('EnrollmentForm', {
+        batch: { ...availableBatches[0], course_price: program.price },
+        course: courseSummary,
+      });
+      return;
+    }
+
+    // Multiple batches — pop a chooser. Alert.alert supports up to 3 buttons
+    // on Android (plus Cancel), so we cap at 3; if you ever need more, swap
+    // this for a real bottom-sheet.
+    const top = availableBatches.slice(0, 3);
+    Alert.alert(
+      'Pick a batch',
+      'Which batch would you like to enroll in?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        ...top.map((b) => ({
+          text: `${b.name}${b.start_time ? ' · ' + b.start_time.slice(0, 5) : ''}`,
+          onPress: () => navigation.navigate('EnrollmentForm', {
+            batch: { ...b, course_price: program.price },
+            course: courseSummary,
+          }),
+        })),
+      ],
+      { cancelable: true },
+    );
   };
 
   // Open the intro video URL externally (browser / YouTube app / VLC for .mp4).

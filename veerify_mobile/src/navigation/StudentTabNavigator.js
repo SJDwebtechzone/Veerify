@@ -60,11 +60,13 @@ export default function StudentTabNavigator() {
           tabBarIcon: ({ focused }) => <TabIcon emoji="🕒" focused={focused} />,
         }}
       />
-      <Tab.Screen 
-        name="Live" 
+      <Tab.Screen
+        name="Sessions"
         component={LiveTabScreen}
         options={{
-          tabBarIcon: ({ focused }) => <TabIcon emoji="📡" focused={focused} />,
+          // Covers BOTH recorded videos (📺) and live sessions — the screen
+          // itself has a toggle to switch between the two views.
+          tabBarIcon: ({ focused }) => <TabIcon emoji="📺" focused={focused} />,
         }}
       />
       <Tab.Screen 

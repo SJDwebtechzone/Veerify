@@ -23,7 +23,7 @@ import {
 } from 'react-native';
 import {
   ArrowLeft, Mail, Phone, Award, BookOpen, Briefcase, Lock,
-  Wallet, Bell, LogOut, ChevronRight, X as XIcon, Eye, EyeOff,
+  Wallet, LogOut, ChevronRight, X as XIcon, Eye, EyeOff,
   GraduationCap, Users, Calendar,
 } from 'lucide-react-native';
 
@@ -199,8 +199,11 @@ export default function StaffProfileScreen({ navigation }) {
           )}
         </Card>
 
-        {/* Account settings */}
+        {/* Account settings — "Salary details" temporarily hidden by product
+            decision until the institution payout flow stabilises. Restore the
+            commented row below to bring it back. */}
         <Card title="Account settings" icon={Lock}>
+          {/*
           <SettingRow
             icon={Wallet}
             accent={palette.green}
@@ -209,21 +212,13 @@ export default function StaffProfileScreen({ navigation }) {
             onPress={() => navigation.navigate('StaffSalary')}
           />
           <Divider />
+          */}
           <SettingRow
             icon={Lock}
             accent={palette.blue}
             label="Change password"
             description="Update your account password"
             onPress={() => setPwOpen(true)}
-          />
-          <Divider />
-          <SettingRow
-            icon={Bell}
-            accent={palette.orange}
-            label="Notification preferences"
-            description="Coming soon"
-            onPress={() => Alert.alert('Coming soon', 'Notification preferences will land in a later step.')}
-            muted
           />
         </Card>
 

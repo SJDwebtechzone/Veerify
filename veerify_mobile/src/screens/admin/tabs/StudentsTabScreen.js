@@ -1,70 +1,116 @@
 // src/screens/admin/tabs/StudentsTabScreen.js
 //
-// Students tab — list every learner enrolled in the institution.
+// Students tab — every learner enrolled in this institution.
 //
-// Layout:
-//   1. Header — "Students" title + count + filter icon button
-//   2. Search bar (name / ID / course)
-//   3. Segmented tabs: All / Active / Inactive (with live counts)
-//   4. Scrollable list of student cards (avatar, name + ID, course + level
-//      pill, status dot, chevron)
-//   5. Floating action button (+) for adding a new student
+// Data: GET /api/enrollments/institution/me, then de-duplicated by student_id
+//       (one row per student even if they're enrolled in multiple batches).
+//       The same endpoint feeds the Payments tab, so a single fetch covers
+//       both tabs in practice.
 //
-// Placeholder dataset for now — we'll swap to GET /students once the screen
-// design is locked across the rest of the institution-admin flow.
+// Status: 'Active' = student has at least one paid enrollment; 'Inactive' =
+//         everyone else (pending / failed payments).
+//
+// Empty state: shows when the institution has no enrolments yet.
 
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
   View, Text, FlatList, TextInput, TouchableOpacity,
-  StyleSheet, Image, Alert,
+  StyleSheet, Image, Alert, ActivityIndicator, RefreshControl,
 } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import {
   Search, SlidersHorizontal, ChevronRight, Users, UserPlus,
 } from 'lucide-react-native';
 
+import apiClient from '../../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../../theme';
 import FAB from '../../../components/FAB';
 
-// ─── Placeholder data ────────────────────────────────────────────────────────
-const STUDENTS = [
-  { id: 'STU-1042', name: 'Aarav Sharma',    course: 'Karate',     level: 'Yellow Belt', active: true,  avatar: null, accent: palette.purple },
-  { id: 'STU-1043', name: 'Priya Iyer',      course: 'Taekwondo',  level: 'Green Belt',  active: true,  avatar: null, accent: palette.blue },
-  { id: 'STU-1044', name: 'Rohan Mehta',     course: 'BJJ',        level: 'White Belt',  active: true,  avatar: null, accent: palette.green },
-  { id: 'STU-1045', name: 'Diya Krishnan',   course: 'Boxing',     level: 'Beginner',    active: false, avatar: null, accent: palette.orange },
-  { id: 'STU-1046', name: 'Ishaan Kapoor',   course: 'Karate',     level: 'Orange Belt', active: true,  avatar: null, accent: palette.pink },
-  { id: 'STU-1047', name: 'Ananya Reddy',    course: 'Kickboxing', level: 'Intermediate',active: true,  avatar: null, accent: palette.teal },
-  { id: 'STU-1048', name: 'Kabir Singh',     course: 'BJJ',        level: 'Blue Belt',   active: true,  avatar: null, accent: palette.purple },
-  { id: 'STU-1049', name: 'Saanvi Patel',    course: 'Taekwondo',  level: 'White Belt',  active: false, avatar: null, accent: palette.rose },
-  { id: 'STU-1050', name: 'Vihaan Joshi',    course: 'Karate',     level: 'Yellow Belt', active: true,  avatar: null, accent: palette.blue },
-  { id: 'STU-1051', name: 'Myra Choudhary',  course: 'Boxing',     level: 'Advanced',    active: true,  avatar: null, accent: palette.green },
-];
-
 const TABS = ['All', 'Active', 'Inactive'];
 
+// Rotate through theme accents so cards in the list have visual variety
+// without needing a real per-student accent column on the DB.
+const ACCENT_CYCLE = [
+  palette.purple, palette.blue, palette.green, palette.orange,
+  palette.pink, palette.teal, palette.rose,
+];
+
+// Resolve a backend-relative photo URL to something the device can render.
+function resolvePhoto(url) {
+  if (!url) return null;
+  if (url.startsWith('http')) return url;
+  const base = apiClient?.defaults?.baseURL?.replace(/\/api\/?$/, '') || '';
+  return base + url;
+}
+
 export default function StudentsTabScreen({ navigation }) {
-  const [search, setSearch] = useState('');
-  const [tab, setTab] = useState('All');
+  const [search,     setSearch]     = useState('');
+  const [tab,        setTab]        = useState('All');
+  const [loading,    setLoading]    = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [students,   setStudents]   = useState([]);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await apiClient.get('/enrollments/institution/me');
+      const rows = res.data?.enrollments || [];
+
+      // Collapse multiple enrolments into one student row each. We keep the
+      // most recent enrolment's course/batch (newest-first ordering from the
+      // backend means the first hit per student_id is the most recent).
+      const byStudent = new Map();
+      rows.forEach((e, idx) => {
+        if (byStudent.has(e.student_id)) {
+          const prev = byStudent.get(e.student_id);
+          // Promote to active if ANY of their enrolments is paid.
+          if (e.payment_status === 'paid') prev.active = true;
+          return;
+        }
+        byStudent.set(e.student_id, {
+          id:        e.student_id,
+          name:      e.student_name || 'Unnamed student',
+          email:     e.student_email || null,
+          phone:     e.student_phone || null,
+          course:    e.course_name || '—',
+          batch:     e.batch_name || '',
+          enrolled_at: e.enrolled_at,
+          photo_url: resolvePhoto(e.student_photo_url),
+          active:    e.payment_status === 'paid',
+          accent:    ACCENT_CYCLE[idx % ACCENT_CYCLE.length],
+        });
+      });
+      setStudents(Array.from(byStudent.values()));
+    } catch (err) {
+      console.log('[StudentsTab] load error:', err?.message);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, []);
+
+  useFocusEffect(useCallback(() => { load(); }, [load]));
 
   const counts = useMemo(() => ({
-    All:      STUDENTS.length,
-    Active:   STUDENTS.filter(s => s.active).length,
-    Inactive: STUDENTS.filter(s => !s.active).length,
-  }), []);
+    All:      students.length,
+    Active:   students.filter((s) => s.active).length,
+    Inactive: students.filter((s) => !s.active).length,
+  }), [students]);
 
   const visible = useMemo(() => {
-    let arr = STUDENTS;
-    if (tab === 'Active')   arr = arr.filter(s => s.active);
-    if (tab === 'Inactive') arr = arr.filter(s => !s.active);
+    let arr = students;
+    if (tab === 'Active')   arr = arr.filter((s) => s.active);
+    if (tab === 'Inactive') arr = arr.filter((s) => !s.active);
     const q = search.trim().toLowerCase();
     if (q) {
-      arr = arr.filter(s =>
+      arr = arr.filter((s) =>
         s.name.toLowerCase().includes(q) ||
-        s.id.toLowerCase().includes(q) ||
+        String(s.id).toLowerCase().includes(q) ||
+        (s.email || '').toLowerCase().includes(q) ||
         s.course.toLowerCase().includes(q),
       );
     }
     return arr;
-  }, [search, tab]);
+  }, [search, tab, students]);
 
   const placeholder = (msg) => Alert.alert(msg, "We'll wire this up next.");
 
@@ -122,30 +168,51 @@ export default function StudentsTabScreen({ navigation }) {
       </View>
 
       {/* ───── List ───── */}
-      <FlatList
-        data={visible}
-        keyExtractor={(item) => item.id}
-        contentContainerStyle={styles.listContent}
-        ItemSeparatorComponent={() => <View style={{ height: spacing.md }} />}
-        ListEmptyComponent={
-          <View style={styles.empty}>
-            <Users size={36} color={palette.textLight} strokeWidth={2} />
-            <Text style={styles.emptyTitle}>
-              {search ? 'No matching students' : 'No students yet'}
-            </Text>
-            <Text style={styles.emptyBody}>
-              {search ? 'Try a different search term.' : 'Tap + to add your first student.'}
-            </Text>
-          </View>
-        }
-        renderItem={({ item }) => (
-          <StudentRow
-            item={item}
-            onPress={() => navigation.navigate('StudentDetail', { student: item })}
-          />
-        )}
-        showsVerticalScrollIndicator={false}
-      />
+      {loading ? (
+        <View style={styles.empty}>
+          <ActivityIndicator color={palette.purple.vivid} />
+        </View>
+      ) : (
+        <FlatList
+          data={visible}
+          keyExtractor={(item) => String(item.id)}
+          contentContainerStyle={styles.listContent}
+          ItemSeparatorComponent={() => <View style={{ height: spacing.md }} />}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={() => { setRefreshing(true); load(); }}
+              tintColor={palette.purple.vivid}
+            />
+          }
+          ListEmptyComponent={
+            <View style={styles.empty}>
+              <Users size={36} color={palette.textLight} strokeWidth={2} />
+              <Text style={styles.emptyTitle}>
+                {search
+                  ? 'No matching students'
+                  : students.length === 0
+                    ? 'No enrolments yet'
+                    : `No ${tab.toLowerCase()} students`}
+              </Text>
+              <Text style={styles.emptyBody}>
+                {search
+                  ? 'Try a different search term.'
+                  : students.length === 0
+                    ? 'Students will appear here once they enrol in one of your courses.'
+                    : 'Switch tabs to see other students.'}
+              </Text>
+            </View>
+          }
+          renderItem={({ item }) => (
+            <StudentRow
+              item={item}
+              onPress={() => navigation.navigate('StudentDetail', { student: item })}
+            />
+          )}
+          showsVerticalScrollIndicator={false}
+        />
+      )}
 
       <FAB
         icon={UserPlus}
@@ -161,7 +228,7 @@ export default function StudentsTabScreen({ navigation }) {
 function StudentRow({ item, onPress }) {
   return (
     <TouchableOpacity style={styles.row} onPress={onPress} activeOpacity={0.85}>
-      <Avatar avatar={item.avatar} name={item.name} accent={item.accent} />
+      <Avatar photoUrl={item.photo_url} name={item.name} accent={item.accent} />
       <View style={{ flex: 1 }}>
         <View style={styles.rowTop}>
           <Text style={styles.name} numberOfLines={1}>{item.name}</Text>
@@ -172,14 +239,18 @@ function StudentRow({ item, onPress }) {
             ]}
           />
         </View>
-        <Text style={styles.studentId}>{item.id}</Text>
+        {item.email ? (
+          <Text style={styles.studentId} numberOfLines={1}>{item.email}</Text>
+        ) : null}
         <View style={styles.metaRow}>
           <View style={[styles.coursePill, { backgroundColor: item.accent.soft }]}>
             <Text style={[styles.coursePillText, { color: item.accent.on }]}>
               {item.course}
             </Text>
           </View>
-          <Text style={styles.levelText}>• {item.level}</Text>
+          {item.batch ? (
+            <Text style={styles.levelText} numberOfLines={1}>• {item.batch}</Text>
+          ) : null}
         </View>
       </View>
       <ChevronRight size={18} color={palette.textLight} strokeWidth={2} />
@@ -187,14 +258,14 @@ function StudentRow({ item, onPress }) {
   );
 }
 
-function Avatar({ avatar, name, accent }) {
-  if (avatar) {
-    return <Image source={{ uri: avatar }} style={styles.avatar} />;
+function Avatar({ photoUrl, name, accent }) {
+  if (photoUrl) {
+    return <Image source={{ uri: photoUrl }} style={styles.avatar} />;
   }
   return (
     <View style={[styles.avatar, { backgroundColor: accent.soft, alignItems: 'center', justifyContent: 'center' }]}>
       <Text style={[styles.avatarInitial, { color: accent.on }]}>
-        {name?.charAt(0).toUpperCase()}
+        {(name || '?').charAt(0).toUpperCase()}
       </Text>
     </View>
   );

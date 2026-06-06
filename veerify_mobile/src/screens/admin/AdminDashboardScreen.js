@@ -18,12 +18,15 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet,
   Dimensions, Image, Alert, ActivityIndicator, RefreshControl,
+  Linking,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import {
   Bell, Users, GraduationCap, Calendar, Wallet,
   TrendingUp, ClipboardCheck, UserPlus, CalendarPlus,
   Megaphone, BellPlus, ChevronRight, BookOpen,
+  Clock, AlertTriangle, Lock, CheckCircle2,
+  CalendarOff, Gift,
 } from 'lucide-react-native';
 import { LineChart } from 'react-native-chart-kit';
 
@@ -37,13 +40,27 @@ import FAB from '../../components/FAB';
 const SCREEN_WIDTH = Dimensions.get('window').width;
 const CHART_WIDTH = SCREEN_WIDTH - spacing.xl * 2;
 
+// Belt-rank distribution palette. Shares sum to 1.0 and match what a
+// healthy real-world academy looks like — most students are white, far
+// fewer reach black. The strap widths come straight from these shares
+// until/unless we wire up a real belt_level column on students.
+const BELT_RANKS = [
+  { key: 'white',  bg: '#FFFFFF', fg: '#111827', share: 0.32 },
+  { key: 'yellow', bg: '#FACC15', fg: '#5C3D04', share: 0.18 },
+  { key: 'orange', bg: '#F97316', fg: '#4A1B0C', share: 0.14 },
+  { key: 'green',  bg: '#22C55E', fg: '#173404', share: 0.12 },
+  { key: 'blue',   bg: '#3B82F6', fg: '#042C53', share: 0.10 },
+  { key: 'brown',  bg: '#92400E', fg: '#FFFFFF', share: 0.08 },
+  { key: 'black',  bg: '#111111', fg: '#FFFFFF', share: 0.06 },
+];
+
 // Compact currency formatter — ₹1,250 → "₹1.25k", ₹98,000 → "₹98k",
 // ₹2,40,000 → "₹2.4L". Keeps stat-card values readable at small widths.
 function fmtINRShort(n) {
   const v = Number(n) || 0;
-  if (v >= 10_000_000) return `₹${(v / 10_000_000).toFixed(1)}Cr`;
-  if (v >= 100_000)    return `₹${(v / 100_000).toFixed(1)}L`;
-  if (v >= 1_000)      return `₹${(v / 1_000).toFixed(v >= 10_000 ? 0 : 1)}k`;
+  if (v >= 10000000) return `₹${(v / 10000000).toFixed(1)}Cr`;
+  if (v >= 100000)   return `₹${(v / 100000).toFixed(1)}L`;
+  if (v >= 1000)     return `₹${(v / 1000).toFixed(v >= 10000 ? 0 : 1)}k`;
   return `₹${v.toLocaleString('en-IN')}`;
 }
 
@@ -95,11 +112,24 @@ export default function AdminDashboardScreen({ navigation }) {
     monthly_revenue: [],
     recent_activity: [],
   });
+  // Trial/grace/locked phase for the institution. Populated by
+  // /onboarding/subscription-status; drives the banner shown right under
+  // the hero.
+  const [subscription, setSubscription] = useState(null);
 
   const load = useCallback(async () => {
     try {
-      const res = await apiClient.get('/admin/dashboard');
-      setData(res.data || {});
+      // Both the dashboard summary and the subscription phase ride the same
+      // refresh — pull in parallel so pull-to-refresh updates the banner too.
+      const [dashRes, subRes] = await Promise.all([
+        apiClient.get('/admin/dashboard'),
+        apiClient.get('/onboarding/subscription-status').catch((err) => {
+          console.log('[AdminDashboard] subscription-status error:', err.message);
+          return null;
+        }),
+      ]);
+      setData(dashRes.data || {});
+      if (subRes && subRes.data) setSubscription(subRes.data);
     } catch (err) {
       // Leave the previous snapshot in place on transient errors so the
       // screen doesn't flash zeros.
@@ -116,9 +146,6 @@ export default function AdminDashboardScreen({ navigation }) {
   // Greeting prefers the academy name; falls back to the owner's first name
   // if for any reason the institution row hasn't loaded yet.
   const academyName = institution?.name || (user?.name || 'Academy').split(' ')[0];
-  // Initial used by the avatar fallback (still the owner's initial — that's
-  // their personal identity badge).
-  const firstName = (user?.name || 'Sensei').split(' ')[0];
 
   const counts = data.counts || {};
   const unread = counts.unread_notifications || 0;
@@ -209,42 +236,53 @@ export default function AdminDashboardScreen({ navigation }) {
           />
         }
       >
-        {/* ───── Header ───── */}
-        <View style={styles.header}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.greeting}>Welcome back</Text>
-            <Text style={styles.userName} numberOfLines={1}>{academyName} 👋</Text>
+        {/* ───── Hero block (concept B - solid red dojo banner) ─────
+            Big brand-red panel as the very top of the screen. Anchors
+            the dashboard with the academy name + active student count
+            as the headline metric. Bell + initials sit floating in the
+            top-right corner. */}
+        <View style={styles.hero}>
+          <View style={styles.heroTopRow}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.heroEyebrow}>OSU SENSEI</Text>
+              <Text style={styles.heroDojo} numberOfLines={1}>{academyName}</Text>
+            </View>
+            {/* Notification bell — the only top-right action. The profile
+                avatar that used to sit beside it was removed because it
+                wasn't wired to a real screen; the dashboard's Profile tab
+                already provides that destination. */}
+            <TouchableOpacity
+              onPress={() => navigation.navigate('StaffNotifications')}
+              style={styles.heroBellBtn}
+              activeOpacity={0.85}
+            >
+              <Bell size={16} color="#fff" strokeWidth={2.4} />
+              {unread > 0 && (
+                <View style={styles.dot}>
+                  <Text style={styles.dotText}>{unread > 9 ? '9+' : unread}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
           </View>
-          <TouchableOpacity
-            onPress={() => navigation.navigate('StaffNotifications')}
-            style={styles.iconButton}
-            activeOpacity={0.8}
-          >
-            <Bell size={20} color={palette.text} strokeWidth={2.2} />
-            {unread > 0 && (
-              <View style={styles.dot}>
-                <Text style={styles.dotText}>{unread > 9 ? '9+' : unread}</Text>
-              </View>
-            )}
-          </TouchableOpacity>
-          <TouchableOpacity
-            onPress={() => placeholder('Profile')}
-            activeOpacity={0.85}
-            style={styles.avatarWrap}
-          >
-            {user?.profile_image ? (
-              <Image source={{ uri: user.profile_image }} style={styles.avatar} />
-            ) : (
-              <View style={[styles.avatar, styles.avatarFallback]}>
-                <Text style={styles.avatarText}>
-                  {firstName.charAt(0).toUpperCase()}
-                </Text>
-              </View>
-            )}
-          </TouchableOpacity>
+
+          <View style={styles.heroHeadlineRow}>
+            <Text style={styles.heroHeadlineNumber}>{counts.students || 0}</Text>
+            <Text style={styles.heroHeadlineLabel}>
+              active student{(counts.students || 0) === 1 ? '' : 's'}
+            </Text>
+          </View>
         </View>
 
-        {/* ───── Stats grid ───── */}
+        {/* ───── Subscription banner (trial / grace / locked) ─────
+            Hidden when the academy has already paid (phase === 'paid') or
+            isn't yet approved (phase === 'pending' / 'registered'). Inside
+            the trial it's an informational blue strip; in grace it turns
+            amber + adds Pay Now; after grace it goes red + locks the CTA. */}
+        <SubscriptionBanner
+          subscription={subscription}
+        />
+
+        {/* ───── Stats grid (original 6 cards) ───── */}
         <View style={styles.statsGrid}>
           {stats.reduce((rows, stat, idx) => {
             if (idx % 2 === 0) rows.push([stat]);
@@ -267,16 +305,43 @@ export default function AdminDashboardScreen({ navigation }) {
         </View>
 
         {/* ───── Quick actions ───── */}
+        {/* Six tiles in one row look cramped — chunk into rows of 3 so each
+            tile gets ~1/3 of the available width and the labels can breathe. */}
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Quick Actions</Text>
           </View>
           <View style={styles.quickActions}>
-            <QuickAction icon={UserPlus}     label="Add Student"   accent={palette.purple} onPress={() => placeholder('Add Student')} />
-            <QuickAction icon={BookOpen}     label="Add Course"    accent={palette.teal}   onPress={() => navigation.navigate('CreateCourse')} />
-            <QuickAction icon={CalendarPlus} label="Create Batch"  accent={palette.blue}   onPress={() => navigation.navigate('CreateBatch')} />
-            <QuickAction icon={BellPlus}     label="Add Event"     accent={palette.green}  onPress={() => placeholder('Add Event')} />
-            <QuickAction icon={Megaphone}    label="Send Notice"   accent={palette.orange} onPress={() => placeholder('Send Notice')} />
+            {[
+              { icon: UserPlus,     label: 'Add Student',    accent: palette.purple, onPress: () => placeholder('Add Student') },
+              { icon: BookOpen,     label: 'Add Course',     accent: palette.teal,   onPress: () => navigation.navigate('CreateCourse') },
+              { icon: CalendarPlus, label: 'Create Batch',   accent: palette.blue,   onPress: () => navigation.navigate('CreateBatch') },
+              { icon: BellPlus,     label: 'Add Event',      accent: palette.green,  onPress: () => placeholder('Add Event') },
+              { icon: Megaphone,    label: 'Send Notice',    accent: palette.orange, onPress: () => navigation.navigate('SendAnnouncement') },
+              { icon: CalendarOff,  label: 'Trainer Leaves', accent: palette.rose,   onPress: () => navigation.navigate('AdminTrainerLeaves') },
+              { icon: Gift,         label: 'Refer & Earn',   accent: palette.green,  onPress: () => navigation.navigate('AdminReferEarn') },
+            ].reduce((rows, qa, idx) => {
+              if (idx % 3 === 0) rows.push([qa]);
+              else rows[rows.length - 1].push(qa);
+              return rows;
+            }, []).map((row, ri) => (
+              <View key={ri} style={styles.quickActionsRow}>
+                {row.map((qa) => (
+                  <QuickAction
+                    key={qa.label}
+                    icon={qa.icon}
+                    label={qa.label}
+                    accent={qa.accent}
+                    onPress={qa.onPress}
+                  />
+                ))}
+                {/* Pad short trailing rows so the last tile doesn't stretch to
+                    full width. Spacer copies the same flex:1 the tile uses. */}
+                {Array.from({ length: 3 - row.length }, (_, i) => (
+                  <View key={`pad-${i}`} style={{ flex: 1 }} />
+                ))}
+              </View>
+            ))}
           </View>
         </View>
 
@@ -389,45 +454,320 @@ function ActivityRow({ accent, title, meta }) {
   );
 }
 
+/**
+ * SubscriptionBanner — surfaces the institution's lifecycle phase.
+ *
+ *   trial   : informational, no CTA. Counts down days left.
+ *   grace   : amber, "Pay now to continue". Opens payment link.
+ *   locked  : red, hard-lock messaging. Opens payment link.
+ *   paid    : hidden (academy is fully active).
+ *   pending : hidden (still awaiting super-admin approval).
+ *
+ * The discount, if enabled on the plan, is applied server-side and surfaces
+ * here as plan.effective_price (the actual amount the academy will pay).
+ */
+function SubscriptionBanner({ subscription }) {
+  if (!subscription) return null;
+  const { phase, days_left_in_trial, days_left_in_grace,
+          payment_link_url, plan } = subscription;
+
+  // Nothing to show for already-active or not-yet-approved academies.
+  if (phase === 'paid' || phase === 'pending' || phase === 'registered') {
+    return null;
+  }
+
+  // Open the Razorpay link in the system browser. We don't have a deep
+  // payment screen for the institution-admin yet; the link itself is the
+  // hosted Razorpay page.
+  const onPay = async () => {
+    if (!payment_link_url) {
+      Alert.alert('Payment link not ready',
+        'Your payment link is still being generated. Please pull to refresh in a moment.');
+      return;
+    }
+    try {
+      const can = await Linking.canOpenURL(payment_link_url);
+      if (!can) throw new Error('Cannot open URL');
+      await Linking.openURL(payment_link_url);
+    } catch {
+      Alert.alert('Could not open payment page',
+        'Please try again, or check your email for the payment link.');
+    }
+  };
+
+  // Phase-specific copy + colour.
+  let cfg;
+  if (phase === 'trial') {
+    const days = Number(days_left_in_trial) || 0;
+    cfg = {
+      tone: 'blue',
+      Icon: Clock,
+      title: `Free trial — ${days} day${days === 1 ? '' : 's'} left`,
+      subtitle: `Enjoy all features. After your trial ends you'll have ${plan?.grace_days || 0} days to pay.`,
+      ctaLabel: 'View plan',
+      showCTA: !!payment_link_url,
+    };
+  } else if (phase === 'grace') {
+    const days = Number(days_left_in_grace) || 0;
+    cfg = {
+      tone: 'amber',
+      Icon: AlertTriangle,
+      title: `Payment due — ${days} day${days === 1 ? '' : 's'} of grace left`,
+      subtitle: `Pay ₹${(plan?.effective_price || plan?.price || 0).toLocaleString('en-IN')} to keep your academy active.`,
+      ctaLabel: 'Pay now',
+      showCTA: true,
+    };
+  } else {
+    // 'locked' phase
+    cfg = {
+      tone: 'red',
+      Icon: Lock,
+      title: 'Subscription locked',
+      subtitle: `Your grace period ended. Pay ₹${(plan?.effective_price || plan?.price || 0).toLocaleString('en-IN')} to restore access.`,
+      ctaLabel: 'Pay now',
+      showCTA: true,
+    };
+  }
+
+  const toneStyles = subStyles.tones[cfg.tone];
+  const Icon = cfg.Icon;
+  return (
+    <View style={[subStyles.card, toneStyles.card]}>
+      <View style={[subStyles.iconWrap, toneStyles.iconWrap]}>
+        <Icon size={18} color={toneStyles.iconColor} strokeWidth={2.4} />
+      </View>
+      <View style={{ flex: 1 }}>
+        <Text style={[subStyles.title, toneStyles.title]}>{cfg.title}</Text>
+        <Text style={[subStyles.subtitle, toneStyles.subtitle]}>{cfg.subtitle}</Text>
+        {plan?.discount_enabled && plan?.discount_percent > 0 ? (
+          <Text style={[subStyles.discount, toneStyles.subtitle]}>
+            {plan.discount_percent}% discount applied (was ₹{(plan.price || 0).toLocaleString('en-IN')})
+          </Text>
+        ) : null}
+      </View>
+      {cfg.showCTA ? (
+        <TouchableOpacity
+          onPress={onPay}
+          style={[subStyles.cta, toneStyles.cta]}
+          activeOpacity={0.85}
+        >
+          <Text style={[subStyles.ctaText, toneStyles.ctaText]}>{cfg.ctaLabel}</Text>
+        </TouchableOpacity>
+      ) : null}
+    </View>
+  );
+}
+
+const subStyles = StyleSheet.create({
+  card: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    padding: 14,
+    borderRadius: radius.lg,
+    marginTop: spacing.lg,
+    borderWidth: 1,
+  },
+  iconWrap: {
+    width: 32, height: 32, borderRadius: 16,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  title: { fontSize: 14, fontWeight: '700' },
+  subtitle: { fontSize: 12, marginTop: 2, lineHeight: 16 },
+  discount: { fontSize: 11, marginTop: 4, fontWeight: '600' },
+  cta: {
+    paddingHorizontal: 12, paddingVertical: 8,
+    borderRadius: radius.md,
+  },
+  ctaText: { fontSize: 12, fontWeight: '700' },
+
+  tones: {
+    blue: {
+      card:     { backgroundColor: '#EFF6FF', borderColor: '#BFDBFE' },
+      iconWrap: { backgroundColor: '#DBEAFE' },
+      iconColor:'#1D4ED8',
+      title:    { color: '#1E3A8A' },
+      subtitle: { color: '#1E40AF' },
+      cta:      { backgroundColor: '#1D4ED8' },
+      ctaText:  { color: '#FFFFFF' },
+    },
+    amber: {
+      card:     { backgroundColor: '#FFFBEB', borderColor: '#FCD34D' },
+      iconWrap: { backgroundColor: '#FEF3C7' },
+      iconColor:'#B45309',
+      title:    { color: '#78350F' },
+      subtitle: { color: '#92400E' },
+      cta:      { backgroundColor: '#B45309' },
+      ctaText:  { color: '#FFFFFF' },
+    },
+    red: {
+      card:     { backgroundColor: '#FEF2F2', borderColor: '#FCA5A5' },
+      iconWrap: { backgroundColor: '#FEE2E2' },
+      iconColor:'#B91C1C',
+      title:    { color: '#7F1D1D' },
+      subtitle: { color: '#991B1B' },
+      cta:      { backgroundColor: '#B91C1C' },
+      ctaText:  { color: '#FFFFFF' },
+    },
+  },
+});
+
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: palette.bg },
   scrollContent: {
-    paddingTop: spacing.xxl,
+    // Hero bleeds to the very top of the screen — the hero itself
+    // handles status-bar padding so the brand-red panel runs edge to
+    // edge under the system clock.
+    paddingTop: 0,
     paddingHorizontal: spacing.xl,
   },
 
-  // Header
-  header: {
+  // ── Concept B hero block ─────────────────────────────────────────
+  // Solid brand-red panel that anchors the top of the dashboard.
+  // Bleeds full-width by using negative horizontal margins to cancel
+  // out the ScrollView's padding.
+  hero: {
+    backgroundColor: palette.rose.vivid,
+    marginHorizontal: -spacing.xl,
+    paddingHorizontal: spacing.xl,
+    paddingTop: spacing.xxl + spacing.md,
+    paddingBottom: spacing.xl + spacing.sm,
+    marginBottom: spacing.xl,
+    borderBottomLeftRadius: radius.xl,
+    borderBottomRightRadius: radius.xl,
+  },
+  heroTopRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: spacing.xxl,
-    gap: spacing.md,
+    gap: spacing.sm,
   },
-  greeting: { ...type.caption, color: palette.textMuted, marginBottom: 2 },
-  userName: { ...type.display, color: palette.text },
-  iconButton: {
-    width: 42, height: 42, borderRadius: 21,
-    backgroundColor: palette.surface,
+  heroEyebrow: {
+    ...type.micro,
+    color: 'rgba(255,255,255,0.7)',
+    fontWeight: '800',
+    letterSpacing: 1.6,
+  },
+  heroDojo: {
+    ...type.h1,
+    color: '#fff',
+    fontSize: 20,
+    marginTop: 2,
+  },
+  heroBellBtn: {
+    width: 36, height: 36, borderRadius: 18,
+    backgroundColor: 'rgba(255,255,255,0.18)',
     alignItems: 'center', justifyContent: 'center',
-    ...shadows.card,
   },
+  heroHeadlineRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: 8,
+    marginTop: spacing.lg,
+  },
+  heroHeadlineNumber: {
+    fontSize: 38,
+    fontWeight: '800',
+    color: '#fff',
+    letterSpacing: -1,
+  },
+  heroHeadlineLabel: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.85)',
+  },
+
+  // Notification dot (used by hero bell)
   dot: {
-    position: 'absolute', top: 6, right: 6,
+    position: 'absolute', top: 4, right: 4,
     minWidth: 16, height: 16, borderRadius: 8,
-    backgroundColor: palette.rose.vivid,
+    backgroundColor: '#fff',
     paddingHorizontal: 4,
     alignItems: 'center', justifyContent: 'center',
-    borderWidth: 2, borderColor: palette.surface,
   },
-  dotText: { color: '#fff', fontSize: 9, fontWeight: '700' },
-  avatarWrap: { ...shadows.card, borderRadius: 21 },
-  avatar: { width: 42, height: 42, borderRadius: 21, backgroundColor: palette.purple.soft },
-  avatarFallback: { alignItems: 'center', justifyContent: 'center' },
-  avatarText: { ...type.h3, color: palette.purple.on },
+  dotText: { color: palette.rose.vivid, fontSize: 9, fontWeight: '800' },
 
-  // Stats grid
+  // Stats grid (legacy - kept in case anything else references it)
   statsGrid: { gap: spacing.md, marginBottom: spacing.xxl },
   statsRow: { flexDirection: 'row', gap: spacing.md },
+
+  // ── Concept D: belt distribution hero ────────────────────────────────
+  beltCard: {
+    backgroundColor: palette.surface,
+    borderRadius: radius.lg,
+    padding: spacing.lg,
+    marginBottom: spacing.md,
+    ...shadows.card,
+  },
+  beltHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: spacing.sm + 2,
+  },
+  beltHeading: {
+    ...type.micro,
+    color: palette.textMuted,
+    fontWeight: '800',
+    letterSpacing: 1.2,
+  },
+  beltCountLabel: {
+    ...type.micro,
+    color: palette.textLight,
+    fontWeight: '700',
+  },
+  beltStrap: {
+    flexDirection: 'row',
+    height: 32,
+    borderRadius: 6,
+    overflow: 'hidden',
+    borderWidth: 0.5,
+    borderColor: 'rgba(0,0,0,0.1)',
+  },
+  beltSegment: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  beltSegmentText: {
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  beltLegendRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 6,
+  },
+  beltLegendItem: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  beltLegendDot: { width: 8, height: 8, borderRadius: 4 },
+  beltLegendText: {
+    ...type.micro,
+    color: palette.textLight,
+    fontWeight: '700',
+  },
+
+  // 2x2 pastel tile grid
+  tileGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm + 2,
+    marginBottom: spacing.xxl,
+  },
+  tile: {
+    width: `${(100 - 4) / 2}%`,
+    borderRadius: radius.lg,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md - 2,
+  },
+  tileLabel: {
+    ...type.micro,
+    fontWeight: '800',
+    letterSpacing: 0.6,
+  },
+  tileValue: {
+    fontSize: 22,
+    fontWeight: '800',
+    marginTop: 4,
+    letterSpacing: -0.3,
+  },
 
   // Section header
   section: { marginBottom: spacing.xxl },
@@ -441,14 +781,19 @@ const styles = StyleSheet.create({
   linkRow: { flexDirection: 'row', alignItems: 'center', gap: 2 },
   linkText: { ...type.caption, color: palette.purple.vivid, fontWeight: '700' },
 
-  // Quick actions
+  // Quick actions — outer card stacks the rows vertically.
   quickActions: {
-    flexDirection: 'row',
-    gap: spacing.md,
     backgroundColor: palette.surface,
     padding: spacing.lg,
     borderRadius: radius.lg,
+    gap: spacing.lg,
     ...shadows.card,
+  },
+  // Each row holds up to 3 QuickAction tiles. flex:1 on the tiles (set inside
+  // the QuickAction component) gives every column equal width.
+  quickActionsRow: {
+    flexDirection: 'row',
+    gap: spacing.md,
   },
 
   // Chart

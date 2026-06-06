@@ -14,6 +14,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   Plus, Pencil, Star, Archive, ArchiveRestore, Sparkles, CheckCircle2,
   Building2, GraduationCap, UserCog, Layers, Crown, Tag, X,
+  Clock, Percent,
 } from 'lucide-react';
 import { api } from '../../lib/api';
 import { Button } from '../../components/ui/Button';
@@ -33,6 +34,11 @@ interface Plan {
   features: string[];
   is_popular: boolean;
   is_active: boolean;
+  // Trial + discount fields added by migration 020.
+  trial_days?: number;
+  grace_days?: number;
+  discount_enabled?: boolean;
+  discount_percent?: number | string;
   created_at?: string;
 }
 
@@ -46,6 +52,10 @@ type Draft = {
   features: string;
   is_popular: boolean;
   is_active: boolean;
+  trial_days: string;
+  grace_days: string;
+  discount_enabled: boolean;
+  discount_percent: string;
 };
 
 const BLANK: Draft = {
@@ -58,7 +68,20 @@ const BLANK: Draft = {
   features: '',
   is_popular: false,
   is_active: true,
+  trial_days: '30',
+  grace_days: '3',
+  discount_enabled: false,
+  discount_percent: '',
 };
+
+// Effective price after discount, in rupees.
+function effectivePrice(p: Plan | Draft): number {
+  const price = typeof p === 'object' && 'price' in p ? Number(p.price) || 0 : 0;
+  const enabled = (p as any).discount_enabled;
+  const pct = Number((p as any).discount_percent) || 0;
+  if (!enabled || pct <= 0) return price;
+  return Math.round(price * (1 - pct / 100));
+}
 
 const BILLING_CYCLES = [
   { key: 'monthly',     label: 'Monthly',      short: 'mo' },
@@ -186,6 +209,10 @@ export function Plans() {
       features:      normaliseFeatures(plan.features).join('\n'),
       is_popular:    !!plan.is_popular,
       is_active:     !!plan.is_active,
+      trial_days:    String(plan.trial_days ?? 0),
+      grace_days:    String(plan.grace_days ?? 0),
+      discount_enabled: !!plan.discount_enabled,
+      discount_percent: plan.discount_percent != null ? String(plan.discount_percent) : '',
     });
     setEditing(plan);
   };
@@ -208,6 +235,12 @@ export function Plans() {
         features:      draft.features.split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
         is_popular:    draft.is_popular,
         is_active:     draft.is_active,
+        trial_days:    Math.max(0, parseInt(draft.trial_days, 10) || 0),
+        grace_days:    Math.max(0, parseInt(draft.grace_days, 10) || 0),
+        discount_enabled: draft.discount_enabled,
+        discount_percent: draft.discount_enabled
+          ? Math.max(0, Math.min(100, parseFloat(draft.discount_percent) || 0))
+          : 0,
       };
       if (editing === 'new') await api.post('/plans', body);
       else if (editing)      await api.put(`/plans/${editing.id}`, body);
@@ -387,6 +420,90 @@ export function Plans() {
             </div>
           </FormSection>
 
+          {/* Section: Trial + Discount */}
+          <FormSection title="Trial & Discount" icon={Clock}>
+            <div className="grid grid-cols-2 gap-3 mb-4">
+              <div>
+                <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5 block">
+                  Trial days
+                </label>
+                <Input
+                  type="number"
+                  min="0"
+                  value={draft.trial_days}
+                  onChange={(e) => setDraft({ ...draft, trial_days: e.target.value.replace(/[^0-9]/g, '') })}
+                  placeholder="30"
+                />
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Institution gets all features free for this many days.
+                </p>
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5 block">
+                  Grace period (days)
+                </label>
+                <Input
+                  type="number"
+                  min="0"
+                  value={draft.grace_days}
+                  onChange={(e) => setDraft({ ...draft, grace_days: e.target.value.replace(/[^0-9]/g, '') })}
+                  placeholder="3"
+                />
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Window after trial ends to pay before access locks.
+                </p>
+              </div>
+            </div>
+
+            {/* Discount toggle */}
+            <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4 bg-slate-50 dark:bg-slate-900/40">
+              <Toggle
+                label="Discount"
+                description="Apply a percentage discount on the listed price."
+                checked={draft.discount_enabled}
+                onChange={(v) => setDraft({ ...draft, discount_enabled: v })}
+              />
+
+              {draft.discount_enabled && (
+                <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-700">
+                  <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5 block">
+                    Discount percent
+                  </label>
+                  <div className="relative">
+                    <Input
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="0.5"
+                      value={draft.discount_percent}
+                      onChange={(e) => setDraft({ ...draft, discount_percent: e.target.value })}
+                      placeholder="10"
+                    />
+                    <Percent
+                      className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none"
+                    />
+                  </div>
+
+                  {/* Effective price preview */}
+                  {draft.price && draft.discount_percent ? (
+                    <div className="mt-3 flex items-baseline gap-2 text-sm">
+                      <span className="text-xs text-slate-500">Effective price:</span>
+                      <span className="line-through text-slate-400 font-mono">
+                        ₹{Number(draft.price).toLocaleString('en-IN')}
+                      </span>
+                      <span className="font-mono font-bold text-emerald-600">
+                        ₹{Math.round(Number(draft.price) * (1 - Number(draft.discount_percent) / 100)).toLocaleString('en-IN')}
+                      </span>
+                      <span className="text-[11px] text-emerald-600 font-semibold">
+                        ({draft.discount_percent}% off)
+                      </span>
+                    </div>
+                  ) : null}
+                </div>
+              )}
+            </div>
+          </FormSection>
+
           {/* Section: Features */}
           <FormSection title="What's included" icon={CheckCircle2}>
             <Textarea
@@ -510,6 +627,15 @@ function PlanCard({
 
   const featureList = normaliseFeatures(plan.features);
 
+  // Trial / discount derived data.
+  const trialDays = Number(plan.trial_days) || 0;
+  const graceDays = Number(plan.grace_days) || 0;
+  const discountOn = !!plan.discount_enabled;
+  const discountPct = Number(plan.discount_percent) || 0;
+  const effectivePriceVal = discountOn && discountPct > 0
+    ? Math.round(price * (1 - discountPct / 100))
+    : price;
+
   return (
     <div
       className={cn(
@@ -552,11 +678,46 @@ function PlanCard({
         </div>
 
         {/* Price */}
-        <div className="mb-5 flex items-baseline gap-1">
-          <span className="text-4xl font-extrabold text-slate-900 dark:text-white tabular-nums">
-            {formatCurrency(price)}
-          </span>
-          <span className="text-sm text-slate-500 dark:text-slate-400">/{billing}</span>
+        <div className="mb-3">
+          <div className="flex items-baseline gap-1.5 flex-wrap">
+            {discountOn && discountPct > 0 ? (
+              <>
+                <span className="text-2xl font-bold text-slate-400 line-through tabular-nums">
+                  {formatCurrency(price)}
+                </span>
+                <span className="text-4xl font-extrabold text-emerald-600 dark:text-emerald-400 tabular-nums">
+                  {formatCurrency(effectivePriceVal)}
+                </span>
+              </>
+            ) : (
+              <span className="text-4xl font-extrabold text-slate-900 dark:text-white tabular-nums">
+                {formatCurrency(price)}
+              </span>
+            )}
+            <span className="text-sm text-slate-500 dark:text-slate-400">/{billing}</span>
+            {discountOn && discountPct > 0 ? (
+              <span className="ml-1 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300">
+                {discountPct}% off
+              </span>
+            ) : null}
+          </div>
+
+          {/* Trial + Grace pills */}
+          {(trialDays > 0 || graceDays > 0) ? (
+            <div className="flex flex-wrap gap-1.5 mt-2">
+              {trialDays > 0 ? (
+                <span className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 dark:bg-blue-500/20 dark:text-blue-300">
+                  <Clock className="w-3 h-3" />
+                  {trialDays}-day free trial
+                </span>
+              ) : null}
+              {graceDays > 0 ? (
+                <span className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300">
+                  +{graceDays}-day grace
+                </span>
+              ) : null}
+            </div>
+          ) : null}
         </div>
 
         {/* Limits row */}

@@ -1,16 +1,41 @@
 import React, { useState, useEffect } from 'react';
 import {
-  View, Text, ScrollView, TouchableOpacity, 
-  StyleSheet, ActivityIndicator, Alert
+  View, Text, ScrollView, TouchableOpacity, TextInput,
+  StyleSheet, ActivityIndicator, Alert,
 } from 'react-native';
+import { Gift, ChevronDown, ChevronUp, LogOut } from 'lucide-react-native';
 import apiClient from '../../api/client';
 import { colors } from '../../utils/styles';
+import { useAuth } from '../../context/AuthContext';
 
 export default function PlanSelectionScreen({ navigation }) {
+  const { logout } = useAuth();
+
   const [plans, setPlans] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selecting, setSelecting] = useState(false);
   const [selectedPlanId, setSelectedPlanId] = useState(null);
+
+  // Optional referral code — collapsible because most new admins won't have
+  // one. The value is sent alongside plan_id to /onboarding/select-plan; the
+  // backend resolves it to the referrer and inserts a pending referrals row.
+  const [referralOpen, setReferralOpen] = useState(false);
+  const [referralCode, setReferralCode] = useState('');
+
+  // PlanSelection is the admin's initial route after registration, so we
+  // need an explicit escape valve — without it there's literally no way
+  // out of this screen once you land here, since the native back button is
+  // hidden and there's no other navigation.
+  const confirmSignOut = () => {
+    Alert.alert(
+      'Sign out?',
+      'You\'ll need to log back in to pick a plan and finish setting up your academy.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Sign out', style: 'destructive', onPress: () => logout() },
+      ],
+    );
+  };
 
   useEffect(() => {
     loadPlans();
@@ -31,7 +56,10 @@ export default function PlanSelectionScreen({ navigation }) {
     setSelecting(true);
     setSelectedPlanId(plan.id);
     try {
-      await apiClient.post('/onboarding/select-plan', { plan_id: plan.id });
+      const body = { plan_id: plan.id };
+      const code = referralCode.trim().toUpperCase();
+      if (code) body.referral_code = code;
+      await apiClient.post('/onboarding/select-plan', body);
       navigation.navigate('SetupInstitution');
     } catch (err) {
       Alert.alert('Error', err.response?.data?.message || 'Failed to select plan');
@@ -81,6 +109,44 @@ export default function PlanSelectionScreen({ navigation }) {
         </Text>
       </View>
 
+      {/* Referral code — collapsed by default. Tap to reveal a single
+          input. If filled, it's submitted with the plan choice. */}
+      <View style={styles.referralCard}>
+        <TouchableOpacity
+          onPress={() => setReferralOpen((v) => !v)}
+          style={styles.referralHeader}
+          activeOpacity={0.85}
+        >
+          <Gift size={16} color={colors.primary} strokeWidth={2.4} />
+          <Text style={styles.referralHeaderText}>
+            {referralCode.trim()
+              ? `Referral code: ${referralCode.trim().toUpperCase()}`
+              : 'Have a referral code?'}
+          </Text>
+          {referralOpen
+            ? <ChevronUp size={16} color={colors.textLight} />
+            : <ChevronDown size={16} color={colors.textLight} />}
+        </TouchableOpacity>
+        {referralOpen ? (
+          <View style={styles.referralBody}>
+            <Text style={styles.referralHint}>
+              Paste the code shared by another institution to earn them rewards
+              when you complete your first subscription.
+            </Text>
+            <TextInput
+              value={referralCode}
+              onChangeText={setReferralCode}
+              placeholder="VEER-XXXXXX"
+              placeholderTextColor={colors.textLight}
+              autoCapitalize="characters"
+              autoCorrect={false}
+              style={styles.referralInput}
+              maxLength={20}
+            />
+          </View>
+        ) : null}
+      </View>
+
       {/* Plan cards */}
       {plans.map((plan) => (
         <View
@@ -100,10 +166,60 @@ export default function PlanSelectionScreen({ navigation }) {
           {/* Plan header */}
           <View style={styles.planHeader}>
             <Text style={styles.planName}>{plan.name}</Text>
-            <View style={styles.planPriceRow}>
-              <Text style={styles.planPrice}>₹{parseInt(plan.price).toLocaleString()}</Text>
-              <Text style={styles.planCycle}>/month</Text>
-            </View>
+            {(() => {
+              const price = Number(plan.price) || 0;
+              const discountOn = !!plan.discount_enabled;
+              const discountPct = Number(plan.discount_percent) || 0;
+              const effective = discountOn && discountPct > 0
+                ? Math.round(price * (1 - discountPct / 100))
+                : price;
+              return (
+                <View style={styles.planPriceRow}>
+                  {discountOn && discountPct > 0 ? (
+                    <>
+                      <Text style={styles.planPriceStruck}>
+                        ₹{price.toLocaleString('en-IN')}
+                      </Text>
+                      <Text style={styles.planPriceDiscounted}>
+                        ₹{effective.toLocaleString('en-IN')}
+                      </Text>
+                    </>
+                  ) : (
+                    <Text style={styles.planPrice}>
+                      ₹{price.toLocaleString('en-IN')}
+                    </Text>
+                  )}
+                  <Text style={styles.planCycle}>/month</Text>
+                  {discountOn && discountPct > 0 ? (
+                    <View style={styles.discountPill}>
+                      <Text style={styles.discountPillText}>
+                        {discountPct}% OFF
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
+              );
+            })()}
+
+            {/* Trial + grace period pills */}
+            {(Number(plan.trial_days) > 0 || Number(plan.grace_days) > 0) ? (
+              <View style={styles.trialRow}>
+                {Number(plan.trial_days) > 0 ? (
+                  <View style={[styles.trialPill, styles.trialPillBlue]}>
+                    <Text style={styles.trialPillText}>
+                      🎁 {plan.trial_days}-day free trial
+                    </Text>
+                  </View>
+                ) : null}
+                {Number(plan.grace_days) > 0 ? (
+                  <View style={[styles.trialPill, styles.trialPillAmber]}>
+                    <Text style={styles.trialPillTextAmber}>
+                      +{plan.grace_days}-day grace
+                    </Text>
+                  </View>
+                ) : null}
+              </View>
+            ) : null}
           </View>
 
           {/* Divider */}
@@ -169,6 +285,54 @@ const styles = StyleSheet.create({
     textAlign: 'center', lineHeight: 20
   },
 
+  // Referral code card (collapsible)
+  referralCard: {
+    backgroundColor: colors.white,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.lightGray,
+    marginBottom: 16,
+    overflow: 'hidden',
+  },
+  referralHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 14,
+    paddingHorizontal: 14,
+  },
+  referralHeaderText: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '700',
+    color: colors.dark,
+  },
+  referralBody: {
+    paddingHorizontal: 14,
+    paddingBottom: 14,
+    gap: 8,
+    borderTopWidth: 1,
+    borderTopColor: colors.lightGray,
+    paddingTop: 12,
+  },
+  referralHint: {
+    fontSize: 11,
+    color: colors.textLight,
+    lineHeight: 16,
+  },
+  referralInput: {
+    borderWidth: 1,
+    borderColor: colors.lightGray,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 14,
+    color: colors.dark,
+    backgroundColor: '#fafafa',
+    letterSpacing: 1.2,
+    fontWeight: '700',
+  },
+
   planCard: {
     backgroundColor: colors.white,
     borderRadius: 16,
@@ -197,31 +361,90 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
 
+  // Stack the plan name on top of the price row. With the discount layout
+  // (struck-through + discounted + cycle + %OFF pill) the price block can
+  // be wider than the card column, so we let it have the full width below
+  // the name instead of competing for horizontal space with it.
   planHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
     marginBottom: 12,
   },
   planName: {
     fontSize: 22,
     fontWeight: '700',
     color: colors.dark,
+    marginBottom: 6,
   },
   planPriceRow: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    gap: 2,
+    flexWrap: 'wrap',
+    gap: 4,
   },
   planPrice: {
     fontSize: 26,
     fontWeight: '700',
     color: colors.primary,
   },
+  planPriceStruck: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: colors.textLight,
+    textDecorationLine: 'line-through',
+    marginBottom: 2,
+  },
+  planPriceDiscounted: {
+    fontSize: 26,
+    fontWeight: '700',
+    color: '#10B981', // emerald — signals savings
+    marginLeft: 4,
+  },
   planCycle: {
     fontSize: 13,
     color: colors.textLight,
     marginBottom: 4,
+  },
+  discountPill: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+    backgroundColor: '#DCFCE7',
+    marginLeft: 4,
+    marginBottom: 4,
+  },
+  discountPillText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#166534',
+    letterSpacing: 0.5,
+  },
+
+  // Trial / grace pills below the price.
+  trialRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 8,
+  },
+  trialPill: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+  },
+  trialPillBlue: {
+    backgroundColor: '#DBEAFE',
+  },
+  trialPillAmber: {
+    backgroundColor: '#FEF3C7',
+  },
+  trialPillText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#1E40AF',
+  },
+  trialPillTextAmber: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#92400E',
   },
 
   divider: {

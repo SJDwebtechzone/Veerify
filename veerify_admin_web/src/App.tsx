@@ -1,9 +1,6 @@
 import { Routes, Route } from 'react-router-dom';
 import {
-  GraduationCap,
-  UserCog,
   BookOpen,
-  CalendarRange,
   Wallet,
   Bell,
   Star,
@@ -21,7 +18,14 @@ import { Events } from './pages/cms/Events';
 import { InstitutionsPending } from './pages/institutions/InstitutionsPending';
 import { InstitutionDetail } from './pages/institutions/InstitutionDetail';
 import { InstitutionsList } from './pages/institutions/InstitutionsList';
+import { Broadcasts } from './pages/notifications/Broadcasts';
+import { TrainersList } from './pages/trainers/TrainersList';
+import { StudentsList } from './pages/students/StudentsList';
+import { InstitutionMarketplaceSettings } from './pages/settings/InstitutionMarketplaceSettings';
+import { MarketplaceSettings } from './pages/settings/MarketplaceSettings';
 import { Plans } from './pages/settings/Plans';
+import { InstitutionPayouts } from './pages/payments/InstitutionPayouts';
+import { ReferralSettings } from './pages/settings/ReferralSettings';
 
 export default function App() {
   return (
@@ -46,17 +50,14 @@ export default function App() {
         <Route path="/institutions/expired" element={<InstitutionsList presetFilter="expired" pageTitle="Expired Plans" pageSubtitle="Subscriptions past their end date." />} />
         <Route path="/institutions/pending" element={<InstitutionsPending />} />
         <Route path="/institutions/:id" element={<InstitutionDetail />} />
+        <Route path="/institutions/:id/marketplace" element={<InstitutionMarketplaceSettings />} />
 
 
         {/* Students */}
-        <Route path="/students" element={<PlaceholderPage title="All Students" icon={GraduationCap} />} />
-        <Route path="/students/attendance" element={<PlaceholderPage title="Attendance" icon={GraduationCap} />} />
-        <Route path="/students/enrollments" element={<PlaceholderPage title="Enrollments" icon={GraduationCap} />} />
+        <Route path="/students" element={<StudentsList />} />
 
         {/* Trainers */}
-        <Route path="/trainers" element={<PlaceholderPage title="Trainers List" icon={UserCog} />} />
-        <Route path="/trainers/skills" element={<PlaceholderPage title="Skills" icon={UserCog} />} />
-        <Route path="/trainers/availability" element={<PlaceholderPage title="Availability" icon={UserCog} />} />
+        <Route path="/trainers" element={<TrainersList />} />
 
         {/* Courses */}
         <Route path="/courses" element={<PlaceholderPage title="Courses" icon={BookOpen} />} />
@@ -69,18 +70,13 @@ export default function App() {
         <Route path="/mobile/videos" element={<Videos />} />
         <Route path="/mobile/events" element={<Events />} />
 
-        {/* Batches */}
-        <Route path="/batches" element={<PlaceholderPage title="Active Batches" icon={CalendarRange} />} />
-        <Route path="/batches/assign" element={<PlaceholderPage title="Assign Trainers" icon={CalendarRange} />} />
-        <Route path="/batches/capacity" element={<PlaceholderPage title="Capacity" icon={CalendarRange} />} />
-
         {/* Payments */}
-        <Route path="/payments" element={<PlaceholderPage title="Revenue Analytics" icon={Wallet} />} />
+        <Route path="/payments" element={<InstitutionPayouts />} />
         <Route path="/payments/subscriptions" element={<PlaceholderPage title="Subscription Payments" icon={Wallet} />} />
         <Route path="/payments/pending" element={<PlaceholderPage title="Pending Payments" icon={Wallet} />} />
 
         {/* Notifications */}
-        <Route path="/notifications" element={<PlaceholderPage title="Announcements" icon={Bell} />} />
+        <Route path="/notifications" element={<Broadcasts />} />
         <Route path="/notifications/push" element={<PlaceholderPage title="Push Notifications" icon={Bell} />} />
         <Route path="/notifications/emails" element={<PlaceholderPage title="Email Templates" icon={Bell} />} />
 
@@ -91,7 +87,8 @@ export default function App() {
         {/* Settings */}
         <Route path="/settings" element={<PlaceholderPage title="General Settings" icon={Settings} />} />
         <Route path="/settings/plans" element={<Plans />} />
-        <Route path="/settings/roles" element={<PlaceholderPage title="Roles & Permissions" icon={Settings} />} />
+        <Route path="/settings/marketplace" element={<MarketplaceSettings />} />
+        <Route path="/settings/referral" element={<ReferralSettings />} />
 
         {/* Fallback */}
         <Route path="*" element={<PlaceholderPage title="Page not found" description="The page you're looking for doesn't exist." />} />

@@ -16,12 +16,12 @@
 import React, { useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView, Alert,
-  ActivityIndicator, StyleSheet, Switch, Image,
+  ActivityIndicator, StyleSheet, Switch, Image, Modal, FlatList,
 } from 'react-native';
 import {
   BookOpen, Globe, MapPin, Clock, IndianRupee, Award, Tag,
   Image as ImageIcon, ChevronDown, Film, ListChecks, Plus, Trash2,
-  Camera, Upload, X,
+  Camera, Upload, X, Check,
 } from 'lucide-react-native';
 import { launchImageLibrary, launchCamera } from 'react-native-image-picker';
 
@@ -54,6 +54,23 @@ const BADGE_OPTIONS = [
   { key: 'kids_special', label: 'Kids Special' },
 ];
 
+const DAYS_ORDER = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+const TIME_OPTIONS = (() => {
+  const list = [];
+  const periods = ['AM', 'PM'];
+  for (const period of periods) {
+    list.push(`12:00 ${period}`);
+    list.push(`12:30 ${period}`);
+    for (let h = 1; h <= 11; h++) {
+      const hrStr = String(h).padStart(2, '0');
+      list.push(`${hrStr}:00 ${period}`);
+      list.push(`${hrStr}:30 ${period}`);
+    }
+  }
+  return list;
+})();
+
 export default function CreateCourseScreen({ navigation, route }) {
   // Edit mode → route.params.course is the existing row from CoursesListScreen.
   // When present we pre-fill every field and switch the submit to PUT.
@@ -62,6 +79,8 @@ export default function CreateCourseScreen({ navigation, route }) {
   const isEdit = !!editingId;
 
   const [loading, setLoading] = useState(false);
+  const [timeModalVisible, setTimeModalVisible] = useState(false);
+  const [activeTimeField, setActiveTimeField] = useState(null); // 'class_start_time' | 'class_end_time'
   const [form, setForm] = useState({
     // basic
     name:                  existing?.name              || '',
@@ -210,12 +229,13 @@ export default function CreateCourseScreen({ navigation, route }) {
   };
 
   return (
-    <ScrollView
-      style={styles.screen}
-      contentContainerStyle={styles.scrollContent}
-      showsVerticalScrollIndicator={false}
-      keyboardShouldPersistTaps="handled"
-    >
+    <View style={{ flex: 1 }}>
+      <ScrollView
+        style={styles.screen}
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+      >
       {/* ── Section 1: Basic info ── */}
       <Section title="Basic Info" icon={BookOpen} accent={palette.purple}>
         <Field label="Course Name *" value={form.name} onChange={(v) => update('name', v)} placeholder="e.g., Karate — Beginner" />
@@ -267,16 +287,72 @@ export default function CreateCourseScreen({ navigation, route }) {
 
       {/* ── Section 4: Schedule ── */}
       <Section title="Schedule" icon={Clock} accent={palette.orange}>
-        <Field label="Days" value={form.days_of_week} onChange={(v) => update('days_of_week', v)} placeholder="Mon, Wed, Fri" />
+        <Text style={styles.label}>Days *</Text>
+        <View style={styles.daysContainer}>
+          {DAYS_ORDER.map((day) => {
+            const selectedDays = form.days_of_week ? form.days_of_week.split(',').map((d) => d.trim()).filter(Boolean) : [];
+            const isSelected = selectedDays.includes(day);
+            return (
+              <TouchableOpacity
+                key={day}
+                style={styles.checkboxRow}
+                activeOpacity={0.8}
+                onPress={() => {
+                  let nextDays;
+                  if (isSelected) {
+                    nextDays = selectedDays.filter((d) => d !== day);
+                  } else {
+                    nextDays = [...selectedDays, day];
+                  }
+                  nextDays.sort((a, b) => DAYS_ORDER.indexOf(a) - DAYS_ORDER.indexOf(b));
+                  update('days_of_week', nextDays.join(', '));
+                }}
+              >
+                <View style={[styles.checkbox, isSelected && styles.checkboxSelected]}>
+                  {isSelected && <Check size={10} color="#fff" strokeWidth={3} />}
+                </View>
+                <Text style={styles.checkboxLabel}>{day}</Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+
         <View style={styles.row}>
           <View style={{ flex: 1 }}>
-            <Field label="Start time" value={form.class_start_time} onChange={(v) => update('class_start_time', v)} placeholder="06:00 PM" />
+            <Text style={styles.label}>Start time</Text>
+            <TouchableOpacity
+              style={styles.dropdownTrigger}
+              onPress={() => {
+                setActiveTimeField('class_start_time');
+                setTimeModalVisible(true);
+              }}
+              activeOpacity={0.85}
+            >
+              <Text style={[styles.dropdownTriggerText, !form.class_start_time && styles.dropdownPlaceholder]}>
+                {form.class_start_time || 'Select Start Time'}
+              </Text>
+              <ChevronDown size={16} color={palette.textMuted} strokeWidth={2.4} />
+            </TouchableOpacity>
           </View>
           <View style={{ width: spacing.md }} />
           <View style={{ flex: 1 }}>
-            <Field label="End time" value={form.class_end_time} onChange={(v) => update('class_end_time', v)} placeholder="07:00 PM" />
+            <Text style={styles.label}>End time</Text>
+            <TouchableOpacity
+              style={styles.dropdownTrigger}
+              onPress={() => {
+                setActiveTimeField('class_end_time');
+                setTimeModalVisible(true);
+              }}
+              activeOpacity={0.85}
+            >
+              <Text style={[styles.dropdownTriggerText, !form.class_end_time && styles.dropdownPlaceholder]}>
+                {form.class_end_time || 'Select End Time'}
+              </Text>
+              <ChevronDown size={16} color={palette.textMuted} strokeWidth={2.4} />
+            </TouchableOpacity>
           </View>
         </View>
+
         <View style={styles.row}>
           <View style={{ flex: 1 }}>
             <Field label="Duration (months)" value={form.duration_months} onChange={(v) => update('duration_months', v)} placeholder="6" keyboardType="number-pad" />
@@ -501,7 +577,24 @@ export default function CreateCourseScreen({ navigation, route }) {
       </TouchableOpacity>
 
       <View style={{ height: 80 }} />
-    </ScrollView>
+      </ScrollView>
+
+      <DropdownModal
+        visible={timeModalVisible}
+        title={activeTimeField === 'class_start_time' ? 'Select Start Time' : 'Select End Time'}
+        options={TIME_OPTIONS}
+        selectedValue={activeTimeField ? form[activeTimeField] : ''}
+        onSelect={(val) => {
+          if (activeTimeField) {
+            update(activeTimeField, val);
+          }
+        }}
+        onClose={() => {
+          setTimeModalVisible(false);
+          setActiveTimeField(null);
+        }}
+      />
+    </View>
   );
 }
 
@@ -551,6 +644,55 @@ function Toggle({ label, hint, value, onChange }) {
         thumbColor="#fff"
       />
     </View>
+  );
+}
+
+function DropdownModal({ visible, title, options, selectedValue, onSelect, onClose }) {
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType="slide"
+      onRequestClose={onClose}
+    >
+      <TouchableOpacity
+        style={styles.modalOverlay}
+        activeOpacity={1}
+        onPress={onClose}
+      >
+        <View style={styles.modalContent}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>{title}</Text>
+            <TouchableOpacity onPress={onClose} style={styles.modalCloseBtn}>
+              <X size={18} color={palette.text} strokeWidth={2.4} />
+            </TouchableOpacity>
+          </View>
+          <FlatList
+            data={options}
+            keyExtractor={(item) => item}
+            renderItem={({ item }) => {
+              const active = item === selectedValue;
+              return (
+                <TouchableOpacity
+                  style={[styles.modalItem, active && styles.modalItemActive]}
+                  onPress={() => {
+                    onSelect(item);
+                    onClose();
+                  }}
+                >
+                  <Text style={[styles.modalItemText, active && styles.modalItemTextActive]}>
+                    {item}
+                  </Text>
+                  {active && <Check size={16} color={palette.purple.vivid} strokeWidth={2.5} />}
+                </TouchableOpacity>
+              );
+            }}
+            style={styles.modalList}
+            contentContainerStyle={styles.modalListContent}
+          />
+        </View>
+      </TouchableOpacity>
+    </Modal>
   );
 }
 
@@ -738,4 +880,112 @@ const styles = StyleSheet.create({
     marginTop: spacing.sm,
   },
   submitText: { ...type.bodyBold, color: '#fff', fontWeight: '700' },
+
+  // Days checkbox container
+  daysContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    marginBottom: spacing.md,
+    marginTop: 4,
+  },
+  checkboxRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: palette.bg,
+    borderWidth: 1,
+    borderColor: palette.borderSoft,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs + 2,
+    minWidth: 70,
+    justifyContent: 'center',
+    gap: 6,
+  },
+  checkbox: {
+    width: 14,
+    height: 14,
+    borderRadius: 3,
+    borderWidth: 1.5,
+    borderColor: palette.textMuted,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  checkboxSelected: {
+    backgroundColor: palette.purple.vivid,
+    borderColor: palette.purple.vivid,
+  },
+  checkboxLabel: {
+    ...type.caption,
+    color: palette.text,
+    fontWeight: '600',
+  },
+
+  // Dropdown time trigger
+  dropdownTrigger: {
+    backgroundColor: palette.bg,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: palette.borderSoft,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    minHeight: 42,
+    marginBottom: spacing.sm,
+  },
+  dropdownTriggerText: {
+    ...type.body,
+    color: palette.text,
+  },
+  dropdownPlaceholder: {
+    color: palette.textLight,
+  },
+
+  // Modal styles
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.4)',
+    justifyContent: 'flex-end',
+  },
+  modalContent: {
+    backgroundColor: palette.surface,
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    maxHeight: '50%',
+    paddingBottom: spacing.xl,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    borderBottomWidth: 1,
+    borderColor: palette.borderSoft,
+  },
+  modalTitle: { ...type.bodyBold, color: palette.text, fontSize: 16 },
+  modalCloseBtn: {
+    padding: 4,
+  },
+  modalList: {
+    paddingHorizontal: spacing.md,
+  },
+  modalListContent: {
+    paddingVertical: spacing.sm,
+  },
+  modalItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.md,
+    borderRadius: radius.md,
+  },
+  modalItemActive: {
+    backgroundColor: palette.purple.soft,
+  },
+  modalItemText: { ...type.body, color: palette.text },
+  modalItemTextActive: { color: palette.purple.on, fontWeight: '700' },
 });

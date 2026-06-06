@@ -109,16 +109,20 @@ interface ToggleProps {
   checked: boolean;
   onChange: (checked: boolean) => void;
   label?: string;
+  // Optional helper line shown under the label. Used on forms where the
+  // toggle needs more context than a single word can give (e.g. discount,
+  // visibility flags).
+  description?: string;
 }
 
-export function Toggle({ checked, onChange, label }: ToggleProps) {
+export function Toggle({ checked, onChange, label, description }: ToggleProps) {
   return (
-    <label className="flex items-center gap-3 cursor-pointer select-none">
+    <label className="flex items-start gap-3 cursor-pointer select-none">
       <button
         type="button"
         onClick={() => onChange(!checked)}
         className={cn(
-          'relative inline-flex h-5 w-9 items-center rounded-full transition-colors',
+          'relative inline-flex h-5 w-9 items-center rounded-full transition-colors mt-0.5 shrink-0',
           checked ? 'bg-brand-600' : 'bg-slate-300 dark:bg-slate-700',
         )}
         role="switch"
@@ -131,7 +135,18 @@ export function Toggle({ checked, onChange, label }: ToggleProps) {
           )}
         />
       </button>
-      {label && <span className="text-sm text-slate-700 dark:text-slate-300">{label}</span>}
+      {(label || description) && (
+        <span className="flex-1 min-w-0">
+          {label && (
+            <span className="block text-sm text-slate-700 dark:text-slate-300">{label}</span>
+          )}
+          {description && (
+            <span className="block text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              {description}
+            </span>
+          )}
+        </span>
+      )}
     </label>
   );
 }

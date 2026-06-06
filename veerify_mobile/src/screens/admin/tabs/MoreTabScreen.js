@@ -51,6 +51,7 @@ export default function MoreTabScreen({ navigation }) {
   const TILE_ROUTES = {
     courses:  'CoursesList',
     trainers: 'TrainersList',
+    settings: 'Settings',
     branches: null, // not built yet — keep placeholder
   };
   const handleTile = (key, label) => {

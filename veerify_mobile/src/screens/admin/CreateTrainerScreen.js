@@ -69,32 +69,41 @@ function ageFromDob(iso) {
   return age >= 0 ? age : null;
 }
 
-export default function CreateTrainerScreen({ navigation }) {
+export default function CreateTrainerScreen({ navigation, route }) {
+  // Edit mode is triggered by passing { trainer } in the route params.
+  // When present we pre-fill the form, hide the password block, swap
+  // the title + CTA copy, and PUT instead of POST on submit.
+  const editingTrainer = route?.params?.trainer || null;
+  const isEditing = !!editingTrainer;
+
   const [academyName, setAcademyName] = useState('');
   const [academyLoading, setAcademyLoading] = useState(true);
 
   const [form, setForm] = useState({
     // Account
-    name: '',
-    email: '',
-    phone: '',
-    password: '',
+    name:  editingTrainer?.name  || '',
+    email: editingTrainer?.email || '',
+    phone: editingTrainer?.phone || '',
+    password: '', // never pre-filled; only used in create mode
     // Personal
-    gender: '',
-    date_of_birth: '',
+    gender:        editingTrainer?.gender || '',
+    date_of_birth: editingTrainer?.date_of_birth
+      ? String(editingTrainer.date_of_birth).slice(0, 10)
+      : '',
     // Profile
-    specialization: '',
-    belt_level: '',
-    experience_years: '',
-    bio: '',
-    // Documents
-    photo_url: '',
-    photo_uri: '',         // local preview only
-    certificate_url: '',
-    certificate_name: '',
+    specialization:   editingTrainer?.specialization || '',
+    belt_level:       editingTrainer?.belt_level || '',
+    experience_years: editingTrainer?.experience_years != null
+      ? String(editingTrainer.experience_years) : '',
+    bio:              editingTrainer?.bio || '',
+    // Documents - URL only (no local URI for previously-saved uploads)
+    photo_url:        editingTrainer?.photo_url || '',
+    photo_uri:        '',
+    certificate_url:  editingTrainer?.certificate_url || '',
+    certificate_name: editingTrainer?.certificate_url ? 'Certificate on file' : '',
     // Identity
-    govt_proof_type: '',
-    govt_proof_number: '',
+    govt_proof_type:   editingTrainer?.govt_proof_type   || '',
+    govt_proof_number: editingTrainer?.govt_proof_number || '',
   });
   const [submitting, setSubmitting] = useState(false);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
@@ -203,10 +212,14 @@ export default function CreateTrainerScreen({ navigation }) {
   // ── Validation ───────────────────────────────────────────────────────
   const validate = () => {
     if (!form.name?.trim()) return 'Trainer name is required';
-    if (!form.email?.trim()) return 'Email is required';
-    if (!/\S+@\S+\.\S+/.test(form.email)) return 'Please enter a valid email';
-    if (!form.password) return 'Temporary password is required';
-    if (form.password.length < 6) return 'Password must be at least 6 characters';
+    if (!isEditing) {
+      // Email + password are only collected on creation. In edit mode the
+      // login id and password stay untouched.
+      if (!form.email?.trim()) return 'Email is required';
+      if (!/\S+@\S+\.\S+/.test(form.email)) return 'Please enter a valid email';
+      if (!form.password) return 'Temporary password is required';
+      if (form.password.length < 6) return 'Password must be at least 6 characters';
+    }
     if (form.phone && form.phone.length < 10) {
       return 'Please enter a valid phone number (or leave it blank)';
     }
@@ -222,34 +235,75 @@ export default function CreateTrainerScreen({ navigation }) {
 
     setSubmitting(true);
     try {
-      await apiClient.post('/trainers', {
-        // Account
-        name: form.name.trim(),
-        email: form.email.trim(),
-        phone: form.phone.trim() || null,
-        password: form.password,
-        // Profile
-        specialization: form.specialization.trim() || null,
-        belt_level: form.belt_level.trim() || null,
-        experience_years: Number(form.experience_years) || 0,
-        bio: form.bio.trim() || null,
-        // Personal
-        gender: form.gender || null,
-        date_of_birth: form.date_of_birth || null,
-        // Identity
-        govt_proof_type: form.govt_proof_type || null,
-        govt_proof_number: form.govt_proof_number.trim() || null,
-        // Documents
-        photo_url: form.photo_url || null,
-        certificate_url: form.certificate_url || null,
-      });
-      Alert.alert(
-        'Trainer added',
-        `${form.name.trim()} has been enrolled. Share the email + temporary password so they can sign in.`,
-        [{ text: 'OK', onPress: () => navigation.goBack() }],
-      );
+      if (isEditing) {
+        // PUT /trainers/:id - omits email + password (handled separately)
+        await apiClient.put(`/trainers/${editingTrainer.id}`, {
+          name: form.name.trim(),
+          phone: form.phone.trim() || null,
+          specialization: form.specialization.trim() || null,
+          belt_level: form.belt_level.trim() || null,
+          experience_years: Number(form.experience_years) || 0,
+          bio: form.bio.trim() || null,
+          gender: form.gender || null,
+          date_of_birth: form.date_of_birth || null,
+          govt_proof_type: form.govt_proof_type || null,
+          govt_proof_number: form.govt_proof_number.trim() || null,
+          photo_url: form.photo_url || null,
+          certificate_url: form.certificate_url || null,
+        });
+        Alert.alert(
+          'Changes saved',
+          `${form.name.trim()}'s profile has been updated.`,
+          [{ text: 'OK', onPress: () => navigation.goBack() }],
+        );
+      } else {
+        // POST /trainers - creates user + trainer in one transaction
+        await apiClient.post('/trainers', {
+          name: form.name.trim(),
+          email: form.email.trim(),
+          phone: form.phone.trim() || null,
+          password: form.password,
+          specialization: form.specialization.trim() || null,
+          belt_level: form.belt_level.trim() || null,
+          experience_years: Number(form.experience_years) || 0,
+          bio: form.bio.trim() || null,
+          gender: form.gender || null,
+          date_of_birth: form.date_of_birth || null,
+          govt_proof_type: form.govt_proof_type || null,
+          govt_proof_number: form.govt_proof_number.trim() || null,
+          photo_url: form.photo_url || null,
+          certificate_url: form.certificate_url || null,
+        });
+        Alert.alert(
+          'Trainer added',
+          `${form.name.trim()} has been enrolled. Share the email + temporary password so they can sign in.`,
+          [{ text: 'OK', onPress: () => navigation.goBack() }],
+        );
+      }
     } catch (e) {
-      Alert.alert('Error', e.response?.data?.message || 'Failed to create trainer');
+      // Plan-limit reached? Show a richer prompt with a direct path to the
+      // plan-selection / upgrade screen so the admin can act immediately
+      // instead of being told a generic 'Error'.
+      const body = e?.response?.data;
+      if (e?.response?.status === 402 && body?.code === 'PLAN_LIMIT_REACHED') {
+        Alert.alert(
+          'Upgrade plan to add more trainers',
+          `Your ${body.plan_name || 'current'} plan allows ${body.limit} trainer${body.limit === 1 ? '' : 's'}, ` +
+          `and you already have ${body.current}. Upgrade to add more.`,
+          [
+            { text: 'Not now', style: 'cancel' },
+            { text: 'View plans', onPress: () => {
+                try { navigation.navigate('PlanSelection'); }
+                catch { navigation.goBack(); }
+              } },
+          ],
+        );
+      } else {
+        Alert.alert(
+          'Error',
+          body?.message || `Failed to ${isEditing ? 'save changes' : 'create trainer'}`,
+        );
+      }
     } finally {
       setSubmitting(false);
     }
@@ -277,9 +331,13 @@ export default function CreateTrainerScreen({ navigation }) {
           <ArrowLeft size={20} color={TEXT} strokeWidth={2.2} />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
-          <Text style={styles.headerTitle}>Enroll Staff</Text>
+          <Text style={styles.headerTitle}>
+            {isEditing ? 'Edit Trainer' : 'Enroll Staff'}
+          </Text>
           <Text style={styles.headerSub}>
-            Adds a trainer to {academyLoading ? '…' : (academyName || 'your academy')}
+            {isEditing
+              ? `Update ${editingTrainer?.name || 'trainer'}\'s profile`
+              : `Adds a trainer to ${academyLoading ? '…' : (academyName || 'your academy')}`}
           </Text>
         </View>
       </View>
@@ -369,29 +427,44 @@ export default function CreateTrainerScreen({ navigation }) {
           />
         </Field>
 
-        <Field label="Email" required hint="Trainer signs in with this email.">
-          <TextInput
-            style={styles.input}
-            placeholder="trainer@example.com"
-            placeholderTextColor={TEXT_LIGHT}
-            value={form.email}
-            onChangeText={(v) => set('email', v)}
-            keyboardType="email-address"
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
-        </Field>
+        {isEditing ? (
+          // Show the email as a read-only label in edit mode so the admin can
+          // see (but not edit) the login id. The same applies to password -
+          // changing the login credentials post-creation is a separate flow.
+          <Field label="Email" hint="Login email cannot be changed here.">
+            <View style={[styles.input, { backgroundColor: BG }]}>
+              <Text style={{ fontSize: 14, color: TEXT_MUTED, fontWeight: '700' }} numberOfLines={1}>
+                {form.email || editingTrainer?.email || '—'}
+              </Text>
+            </View>
+          </Field>
+        ) : (
+          <>
+            <Field label="Email" required hint="Trainer signs in with this email.">
+              <TextInput
+                style={styles.input}
+                placeholder="trainer@example.com"
+                placeholderTextColor={TEXT_LIGHT}
+                value={form.email}
+                onChangeText={(v) => set('email', v)}
+                keyboardType="email-address"
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+            </Field>
 
-        <Field label="Temporary Password" required hint="At least 6 characters. Share securely with the trainer.">
-          <TextInput
-            style={styles.input}
-            placeholder="••••••"
-            placeholderTextColor={TEXT_LIGHT}
-            value={form.password}
-            onChangeText={(v) => set('password', v)}
-            secureTextEntry
-          />
-        </Field>
+            <Field label="Temporary Password" required hint="At least 6 characters. Share securely with the trainer.">
+              <TextInput
+                style={styles.input}
+                placeholder="••••••"
+                placeholderTextColor={TEXT_LIGHT}
+                value={form.password}
+                onChangeText={(v) => set('password', v)}
+                secureTextEntry
+              />
+            </Field>
+          </>
+        )}
 
         {/* ── Section 3: Academy + Skill ── */}
         <SectionTitle icon={Award} title="Skill & Academy" />
@@ -550,7 +623,9 @@ export default function CreateTrainerScreen({ navigation }) {
           {submitting ? (
             <ActivityIndicator color="#fff" />
           ) : (
-            <Text style={styles.btnPrimaryText}>Enroll Trainer</Text>
+            <Text style={styles.btnPrimaryText}>
+              {isEditing ? 'Save Changes' : 'Enroll Trainer'}
+            </Text>
           )}
         </TouchableOpacity>
       </View>

@@ -8,6 +8,7 @@ const { requireRole } = require('../middleware/role.middleware');
 router.post('/select-plan',     verifyToken, requireRole('admin'), onboardingController.selectPlan);
 router.post('/setup',           verifyToken, requireRole('admin'), onboardingController.setupAcademy);
 router.get('/my-status',        verifyToken, requireRole('admin'), onboardingController.getMyStatus);
+router.get('/subscription-status', verifyToken, requireRole('admin'), onboardingController.getSubscriptionStatus);
 router.post('/mock-payment',    verifyToken, requireRole('admin'), onboardingController.mockPayment);
 
 // Owner self-delete + restore + start-over (mounted under /me so they don't
@@ -21,6 +22,12 @@ router.post('/me/start-over',   verifyToken, requireRole('admin'), onboardingCon
 router.get('/all',     verifyToken, onboardingController.getAllInstitutions);
 router.get('/pending', verifyToken, onboardingController.getPendingInstitutions);
 router.get('/counts',  verifyToken, onboardingController.getOnboardingCounts);
+// Subscription payments made by institutions (recent first). Static path -
+// must come before /:id below.
+router.get('/recent-payments', verifyToken, onboardingController.getRecentInstitutionPayments);
+// Broadcast notification across many institutions (also a static path - must
+// come before /:id below).
+router.post('/notify-bulk', verifyToken, onboardingController.notifyInstitutionsBulk);
 router.get('/:id',     verifyToken, onboardingController.getInstitutionById);
 
 router.post('/approve/:id',             verifyToken, onboardingController.approveInstitution);
@@ -29,6 +36,8 @@ router.post('/activate/:id',            verifyToken, onboardingController.activa
 router.post('/resend-payment-link/:id', verifyToken, onboardingController.resendPaymentLink);
 router.post('/toggle-active/:id',       verifyToken, onboardingController.toggleInstitutionActive);
 router.post('/:id/restore',             verifyToken, onboardingController.restoreInstitution);
+// Super admin -> institution owner notification (lands in the owner's mobile inbox).
+router.post('/:id/notify',              verifyToken, onboardingController.notifyInstitution);
 router.delete('/:id',                   verifyToken, onboardingController.deleteInstitution);
 
 module.exports = router;

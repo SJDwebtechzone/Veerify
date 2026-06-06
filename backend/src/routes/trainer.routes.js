@@ -7,6 +7,10 @@ const { requireRole } = require('../middleware/role.middleware');
 // Trainer's own profile (must come before /:id so it's not captured as an id).
 router.get('/me', verifyToken, requireRole('trainer'), trainerController.getMe);
 
+// Super admin - platform-wide trainers roster (also a static path - must
+// come before /:id).
+router.get('/all', verifyToken, trainerController.getAllTrainers);
+
 // All other trainer routes are admin-only
 router.post('/', verifyToken, requireRole('admin'), trainerController.createTrainer);
 router.get('/', verifyToken, requireRole('admin'), trainerController.getMyTrainers);

@@ -31,6 +31,7 @@ import apiClient from '../../../api/client';
 import { useAuth } from '../../../context/AuthContext';
 import { useInstitution } from '../../../context/InstitutionContext';
 import { palette, spacing, radius, shadows, type } from '../../../theme';
+import MyDashboard from '../MyDashboard';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const ASSET_HOST = (apiClient.defaults.baseURL || '').replace(/\/api\/?$/, '');
@@ -65,6 +66,32 @@ export default function HomeTabScreen({ navigation }) {
   const [featuredPrograms, setFeaturedPrograms] = useState([]);
   const [events, setEvents] = useState([]);
   const [nearbyAcademies, setNearbyAcademies] = useState([]);
+
+  // ── Personalized home pivot ──
+  // After a logged-in student has at least one PAID enrollment we switch
+  // the entire Home tab over to MyDashboard (banner + My Courses + videos)
+  // instead of the browse-academies view. This effect probes the
+  // enrollments endpoint on every focus and flips the flag. Guests and
+  // students with only pending enrollments still see the browse content.
+  const [hasPaidEnrollment, setHasPaidEnrollment] = useState(null); // null = unknown
+  useFocusEffect(useCallback(() => {
+    let cancelled = false;
+    if (!user) {
+      setHasPaidEnrollment(false);
+      return undefined;
+    }
+    apiClient
+      .get('/enrollments/my')
+      .then((r) => {
+        if (cancelled) return;
+        const enrolls = r.data?.enrollments || [];
+        setHasPaidEnrollment(enrolls.some((e) => e.payment_status === 'paid'));
+      })
+      .catch(() => {
+        if (!cancelled) setHasPaidEnrollment(false);
+      });
+    return () => { cancelled = true; };
+  }, [user]));
 
   const isGuest = !user;
   // Subscription state will land in Phase 2; for now assume non-paid.
@@ -126,6 +153,15 @@ export default function HomeTabScreen({ navigation }) {
   // the institution-scoped sections (Featured Programs, Events) hide themselves
   // and a soft inline banner near the top nudges them to pick one.
   const noInstitution = !instLoading && !selectedInstitution;
+
+  // ── Personalized dashboard pivot ──
+  // Logged-in students with at least one paid enrollment skip the entire
+  // browse view and get MyDashboard instead. We wait for the probe to
+  // settle (hasPaidEnrollment !== null) before deciding, so the screen
+  // doesn't flicker between the two layouts.
+  if (hasPaidEnrollment === true) {
+    return <MyDashboard navigation={navigation} />;
+  }
 
   if (loading && featuredPrograms.length === 0 && banners.length === 0) {
     return (

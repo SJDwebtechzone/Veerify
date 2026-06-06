@@ -21,7 +21,7 @@ export default function BatchDetailScreen({ route, navigation }) {
     })();
   }, [batchId]);
 
-  const handleEnroll = async () => {
+  const handleEnroll = () => {
     if (!user) {
       Alert.alert('Login Required', 'Please log in or create an account to enroll', [
         { text: 'Cancel', style: 'cancel' },
@@ -29,30 +29,17 @@ export default function BatchDetailScreen({ route, navigation }) {
       ]);
       return;
     }
-
-    Alert.alert(
-      'Confirm Enrollment',
-      `Enroll in "${batch.name}" for ₹${batch.course_price}?`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Enroll',
-          onPress: async () => {
-            setEnrolling(true);
-            try {
-              await apiClient.post('/enrollments', { batch_id: batch.id });
-              Alert.alert('Success! 🎉', 'You are enrolled. Complete payment to confirm.', [
-                { text: 'View My Enrollments', onPress: () => navigation.navigate('MyEnrollments') }
-              ]);
-            } catch (err) {
-              Alert.alert('Error', err.response?.data?.message || 'Enrollment failed');
-            } finally {
-              setEnrolling(false);
-            }
-          }
-        }
-      ]
-    );
+    // Open the 14-field enrollment form. On submit it posts to /enrollments
+    // and replaces itself with the payment screen.
+    navigation.navigate('EnrollmentForm', {
+      batch,
+      course: {
+        id: batch.course_id,
+        name: batch.course_name,
+        price: batch.course_price,
+        institution_name: batch.institution_name,
+      },
+    });
   };
 
   if (loading) return <View style={[commonStyles.screen, { justifyContent: 'center' }]}><ActivityIndicator size="large" color={colors.primary} /></View>;

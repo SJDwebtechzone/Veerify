@@ -270,7 +270,15 @@ export default function SetupInstitutionScreen({ navigation }) {
 
   const goBack = () => {
     if (stepIdx === 0) {
-      navigation.goBack();
+      // SetupInstitution is mounted as the initial route after plan-select,
+      // so the stack often has no entry behind us. Prefer goBack() when
+      // available; otherwise jump to PlanSelection so the admin can change
+      // their plan choice instead of being stranded with a dead button.
+      if (navigation.canGoBack()) {
+        navigation.goBack();
+      } else {
+        try { navigation.navigate('PlanSelection'); } catch { /* no-op */ }
+      }
     } else {
       setStepIdx(stepIdx - 1);
     }
@@ -313,9 +321,7 @@ export default function SetupInstitutionScreen({ navigation }) {
         website_url: form.website_url.trim() || null,
 
         // accreditation
-        affiliation_or_board: form.affiliation_or_board === 'Other'
-          ? form.affiliation_or_board_custom.trim() || null
-          : (form.affiliation_or_board || null),
+        affiliation_or_board: (form.affiliation_or_board || '').trim() || null,
         accreditation_body_name: form.accreditation_body_name.trim() || null,
         accreditation_expiry_date: form.accreditation_expiry_date || null,
         accreditation_certificate_url: form.accreditation_certificate_url || null,
@@ -758,23 +764,21 @@ function StepAccreditation({ form, set, pickCert, uploading }) {
         sub="Optional. Helps students see that your academy is officially recognised."
       />
 
-      <PillSelect
+      {/* Free-text affiliation/board: martial-arts federations vary so much
+          that a fixed pill list never quite fits. Admins can type whatever
+          best describes their accreditation. */}
+      <Field
         label="Affiliation or Board"
-        options={BOARDS}
-        value={form.affiliation_or_board}
-        onChange={(v) => set('affiliation_or_board', v)}
-      />
-      {form.affiliation_or_board === 'Other' && (
-        <Field label="Custom Affiliation">
-          <TextInput
-            style={styles.input}
-            placeholder="e.g. World Karate Federation"
-            placeholderTextColor={TEXT_LIGHT}
-            value={form.affiliation_or_board_custom}
-            onChangeText={(v) => set('affiliation_or_board_custom', v)}
-          />
-        </Field>
-      )}
+        hint="e.g. World Karate Federation, Khelo India, Sports Authority of India, your state board."
+      >
+        <TextInput
+          style={styles.input}
+          placeholder="Type your affiliation"
+          placeholderTextColor={TEXT_LIGHT}
+          value={form.affiliation_or_board}
+          onChangeText={(v) => set('affiliation_or_board', v)}
+        />
+      </Field>
 
       <Field label="Accreditation Body Name">
         <TextInput

@@ -1,4 +1,27 @@
 const pool = require('../config/db');
+const { getUsage } = require('../utils/planLimits');
+
+// GET /api/plans/usage — institution-admin scoped.
+// Returns the calling admin's current students/trainers counts against
+// their plan caps. Feeds the mobile Upgrade prompt + dashboard pills.
+exports.getUsage = async (req, res) => {
+  try {
+    const u = await pool.query(
+      `SELECT institution_id FROM users WHERE id = $1`, [req.user.id],
+    );
+    const institutionId = u.rows[0]?.institution_id;
+    if (!institutionId) return res.status(403).json({ message: 'No institution linked' });
+
+    const [students, trainers] = await Promise.all([
+      getUsage(institutionId, 'students'),
+      getUsage(institutionId, 'trainers'),
+    ]);
+    res.json({ students, trainers });
+  } catch (err) {
+    console.error('Plan usage error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Subscription plans
@@ -28,6 +51,17 @@ function sanitizePayload(body) {
   // Each feature should be a string. Coerce defensively.
   features = features.map((f) => String(f).trim()).filter(Boolean);
 
+  // Discount math: if disabled we force discount_percent to 0 so the
+  // stored value doesn't get out of sync with the toggle.
+  const discountEnabled = !!body.discount_enabled;
+  let discountPercent = 0;
+  if (discountEnabled && body.discount_percent !== undefined && body.discount_percent !== '') {
+    discountPercent = parseFloat(body.discount_percent);
+    if (isNaN(discountPercent)) discountPercent = 0;
+    if (discountPercent < 0) discountPercent = 0;
+    if (discountPercent > 100) discountPercent = 100;
+  }
+
   return {
     name:          (body.name || '').trim() || null,
     price:         body.price !== undefined && body.price !== '' ? parseFloat(body.price) : null,
@@ -38,6 +72,10 @@ function sanitizePayload(body) {
     features,
     is_popular:    !!body.is_popular,
     is_active:     body.is_active === undefined ? true : !!body.is_active,
+    trial_days:    body.trial_days !== undefined && body.trial_days !== '' ? Math.max(0, parseInt(body.trial_days, 10) || 0) : 0,
+    grace_days:    body.grace_days !== undefined && body.grace_days !== '' ? Math.max(0, parseInt(body.grace_days, 10) || 0) : 0,
+    discount_enabled: discountEnabled,
+    discount_percent: discountPercent,
   };
 }
 
@@ -82,14 +120,17 @@ exports.createPlan = async (req, res) => {
     }
     const result = await pool.query(
       `INSERT INTO subscription_plans
-         (name, price, billing_cycle, max_branches, max_students, max_trainers, features, is_popular, is_active)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
+         (name, price, billing_cycle, max_branches, max_students, max_trainers,
+          features, is_popular, is_active,
+          trial_days, grace_days, discount_enabled, discount_percent)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13)
        RETURNING *`,
       [
         p.name, p.price, p.billing_cycle,
         p.max_branches, p.max_students, p.max_trainers,
         JSON.stringify(p.features),
         p.is_popular, p.is_active,
+        p.trial_days, p.grace_days, p.discount_enabled, p.discount_percent,
       ],
     );
     res.status(201).json({ message: 'Plan created', plan: result.rows[0] });
@@ -114,27 +155,35 @@ exports.updatePlan = async (req, res) => {
 
     const result = await pool.query(
       `UPDATE subscription_plans SET
-         name          = COALESCE($1, name),
-         price         = COALESCE($2, price),
-         billing_cycle = COALESCE($3, billing_cycle),
-         max_branches  = COALESCE($4, max_branches),
-         max_students  = COALESCE($5, max_students),
-         max_trainers  = COALESCE($6, max_trainers),
-         features      = COALESCE($7::jsonb, features),
-         is_popular    = COALESCE($8, is_popular),
-         is_active     = COALESCE($9, is_active)
-       WHERE id = $10
+         name             = COALESCE($1, name),
+         price            = COALESCE($2, price),
+         billing_cycle    = COALESCE($3, billing_cycle),
+         max_branches     = COALESCE($4, max_branches),
+         max_students     = COALESCE($5, max_students),
+         max_trainers     = COALESCE($6, max_trainers),
+         features         = COALESCE($7::jsonb, features),
+         is_popular       = COALESCE($8, is_popular),
+         is_active        = COALESCE($9, is_active),
+         trial_days       = COALESCE($10, trial_days),
+         grace_days       = COALESCE($11, grace_days),
+         discount_enabled = COALESCE($12, discount_enabled),
+         discount_percent = COALESCE($13, discount_percent)
+       WHERE id = $14
        RETURNING *`,
       [
-        has('name')          ? p.name          : null,
-        has('price')         ? p.price         : null,
-        has('billing_cycle') ? p.billing_cycle : null,
-        has('max_branches')  ? p.max_branches  : null,
-        has('max_students')  ? p.max_students  : null,
-        has('max_trainers')  ? p.max_trainers  : null,
+        has('name')             ? p.name             : null,
+        has('price')            ? p.price            : null,
+        has('billing_cycle')    ? p.billing_cycle    : null,
+        has('max_branches')     ? p.max_branches     : null,
+        has('max_students')     ? p.max_students     : null,
+        has('max_trainers')     ? p.max_trainers     : null,
         featuresOrNull,
-        has('is_popular')    ? p.is_popular    : null,
-        has('is_active')     ? p.is_active     : null,
+        has('is_popular')       ? p.is_popular       : null,
+        has('is_active')        ? p.is_active        : null,
+        has('trial_days')       ? p.trial_days       : null,
+        has('grace_days')       ? p.grace_days       : null,
+        has('discount_enabled') ? p.discount_enabled : null,
+        has('discount_percent') ? p.discount_percent : null,
         id,
       ],
     );

@@ -92,7 +92,14 @@ export default function StaffNotificationsScreen({ navigation }) {
     await markRead(n);
     const screen = n.data?.screen;
     if (screen) {
-      try { navigation.navigate(screen, n.data || {}); } catch {}
+      // Strip the reserved `screen` key — React Navigation v7 treats it as a
+      // nested-navigator hint and can mis-route silently when we pass it as
+      // params for a top-level Stack.Screen. Everything else in n.data is
+      // safe to forward as route.params.
+      const { screen: _drop, ...params } = n.data || {};
+      try { navigation.navigate(screen, params); } catch (err) {
+        console.log('[notif] navigate failed:', screen, err?.message);
+      }
     }
   };
 

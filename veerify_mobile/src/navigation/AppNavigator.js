@@ -8,6 +8,7 @@ import { useAuth } from '../context/AuthContext';
 import WelcomeScreen from '../screens/WelcomeScreen';
 import LoginScreen from '../screens/LoginScreen';
 import RegisterScreen from '../screens/RegisterScreen';
+import ForgotPasswordScreen from '../screens/ForgotPasswordScreen';
 import SelectInstitutionScreen from '../screens/SelectInstitutionScreen';
 
 // Admin — onboarding
@@ -27,6 +28,10 @@ import BatchesListScreen from '../screens/admin/BatchesListScreen';
 import CreateBatchScreen from '../screens/admin/CreateBatchScreen';
 import TrainersListScreen from '../screens/admin/TrainersListScreen';
 import CreateTrainerScreen from '../screens/admin/CreateTrainerScreen';
+import SendAnnouncementScreen from '../screens/admin/SendAnnouncementScreen';
+import AdminTrainerLeavesScreen from '../screens/admin/AdminTrainerLeavesScreen';
+import AdminReferEarnScreen from '../screens/admin/AdminReferEarnScreen';
+import SettingsScreen from '../screens/admin/SettingsScreen';
 
 // Student
 import StudentTabNavigator from './StudentTabNavigator';
@@ -35,7 +40,11 @@ import AllInstitutionsScreen from '../screens/student/AllInstitutionsScreen';
 import CourseDetailScreen from '../screens/student/CourseDetailScreen';
 import BatchDetailScreen from '../screens/student/BatchDetailScreen';
 import MyAttendanceScreen from '../screens/student/MyAttendanceScreen';
+import MyEnrollmentsScreen from '../screens/student/MyEnrollmentsScreen';
 import ParentRequestsScreen from '../screens/student/ParentRequestsScreen';
+import EnrollmentFormScreen from '../screens/student/EnrollmentFormScreen';
+import EnrollmentPaymentScreen from '../screens/student/EnrollmentPaymentScreen';
+import EnrolledCourseScreen from '../screens/student/EnrolledCourseScreen';
 
 // Trainer / Staff
 import StaffTabNavigator from './StaffTabNavigator';
@@ -44,6 +53,15 @@ import StaffAttendanceHistoryScreen from '../screens/staff/StaffAttendanceHistor
 import StaffStudentDetailScreen from '../screens/staff/StaffStudentDetailScreen';
 import StaffLeaveRequestsScreen from '../screens/staff/StaffLeaveRequestsScreen';
 import StaffSalaryScreen from '../screens/staff/StaffSalaryScreen';
+import StaffVideosScreen from '../screens/staff/StaffVideosScreen';
+import TrainerRequestLeaveScreen from '../screens/staff/TrainerRequestLeaveScreen';
+import StaffPerformanceReportsScreen from '../screens/staff/StaffPerformanceReportsScreen';
+import StaffPerformanceReportFormScreen from '../screens/staff/StaffPerformanceReportFormScreen';
+import StudentPerformanceReportsScreen from '../screens/student/StudentPerformanceReportsScreen';
+import StudentPerformanceReportDetailScreen from '../screens/student/StudentPerformanceReportDetailScreen';
+import StudentBeltJourneyScreen from '../screens/student/StudentBeltJourneyScreen';
+import CertificateDetailScreen from '../screens/student/CertificateDetailScreen';
+import StaffPromoteStudentScreen from '../screens/staff/StaffPromoteStudentScreen';
 import BatchStudentsScreen from '../screens/trainer/BatchStudentsScreen';
 import AttendanceHistoryScreen from '../screens/trainer/AttendanceHistoryScreen';
 
@@ -109,6 +127,10 @@ export default function AppNavigator() {
           <Stack.Screen name="Welcome" component={WelcomeScreen} />
           <Stack.Screen name="Login" component={LoginScreen} />
           <Stack.Screen name="Register" component={RegisterScreen} />
+          {/* ForgotPasswordScreen renders its own header, so the stack hides
+              the native bar to avoid stacking two. */}
+          <Stack.Screen name="ForgotPassword" component={ForgotPasswordScreen}
+            options={{ headerShown: false }} />
           <Stack.Screen name="GuestHome" component={StudentTabNavigator} />
           <Stack.Screen name="SelectInstitution" component={SelectInstitutionScreen}
             options={{ headerShown: true, title: 'Choose Academy' }} />
@@ -187,9 +209,23 @@ export default function AppNavigator() {
               native stack header to avoid stacking two bars. */}
           <Stack.Screen name="CreateTrainer" component={CreateTrainerScreen}
             options={{ headerShown: false }} />
+          {/* SendAnnouncement renders its own header. */}
+          <Stack.Screen name="SendAnnouncement" component={SendAnnouncementScreen}
+            options={{ headerShown: false }} />
+          {/* AdminTrainerLeavesScreen renders its own header. */}
+          <Stack.Screen name="AdminTrainerLeaves" component={AdminTrainerLeavesScreen}
+            options={{ headerShown: false }} />
+          {/* AdminReferEarnScreen renders its own header. */}
+          <Stack.Screen name="AdminReferEarn" component={AdminReferEarnScreen}
+            options={{ headerShown: false }} />
           {/* Admins reuse the same Notifications inbox as staff/parent —
               it scopes to the calling user via JWT, so it works for every role. */}
           <Stack.Screen name="StaffNotifications" component={StaffNotificationsScreen} />
+          <Stack.Screen
+            name="Settings"
+            component={SettingsScreen}
+            options={{ headerShown: true, title: 'Marketplace Settings' }}
+          />
         </Stack.Navigator>
       </NavigationContainer>
     );
@@ -213,11 +249,36 @@ export default function AppNavigator() {
             options={{ headerShown: true, title: '' }} />
           <Stack.Screen name="MyAttendance" component={MyAttendanceScreen}
             options={{ headerShown: true, title: 'My Attendance' }} />
+          <Stack.Screen name="MyEnrollments" component={MyEnrollmentsScreen}
+            options={{ headerShown: true, title: 'My Courses' }} />
           <Stack.Screen name="ParentRequests" component={ParentRequestsScreen}
             options={{ headerShown: true, title: 'Parent Requests' }} />
+          {/* Enrollment flow: form -> payment -> back to MyEnrollments. Both
+              screens render their own headers so we hide the native stack bar. */}
+          <Stack.Screen name="EnrollmentForm" component={EnrollmentFormScreen}
+            options={{ headerShown: false }} />
+          <Stack.Screen name="EnrollmentPayment" component={EnrollmentPaymentScreen}
+            options={{ headerShown: false }} />
+          {/* EnrolledCourseScreen renders its own image hero + back button. */}
+          <Stack.Screen name="EnrolledCourse" component={EnrolledCourseScreen}
+            options={{ headerShown: false }} />
           {/* Students reuse the same Notifications screen the staff module uses —
               the inbox is per-user via the JWT, so it works for every role. */}
           <Stack.Screen name="StaffNotifications" component={StaffNotificationsScreen} />
+          {/* Performance reports — list + detail, both render their own headers. */}
+          <Stack.Screen name="StudentPerformanceReports"
+            component={StudentPerformanceReportsScreen}
+            options={{ headerShown: false }} />
+          <Stack.Screen name="StudentPerformanceReportDetail"
+            component={StudentPerformanceReportDetailScreen}
+            options={{ headerShown: false }} />
+          {/* Belt Badges & Certifications */}
+          <Stack.Screen name="StudentBeltJourney"
+            component={StudentBeltJourneyScreen}
+            options={{ headerShown: false }} />
+          <Stack.Screen name="CertificateDetail"
+            component={CertificateDetailScreen}
+            options={{ headerShown: false }} />
         </Stack.Navigator>
       </NavigationContainer>
     );
@@ -241,6 +302,24 @@ export default function AppNavigator() {
           <Stack.Screen name="StaffStudentDetail" component={StaffStudentDetailScreen} />
           <Stack.Screen name="StaffLeaveRequests" component={StaffLeaveRequestsScreen} />
           <Stack.Screen name="StaffSalary" component={StaffSalaryScreen} />
+          {/* StaffVideosScreen renders its own header. */}
+          <Stack.Screen name="StaffVideos" component={StaffVideosScreen}
+            options={{ headerShown: false }} />
+          {/* TrainerRequestLeaveScreen renders its own header. */}
+          <Stack.Screen name="TrainerRequestLeave" component={TrainerRequestLeaveScreen}
+            options={{ headerShown: false }} />
+          {/* Performance report screens render their own headers. */}
+          <Stack.Screen name="StaffPerformanceReports" component={StaffPerformanceReportsScreen}
+            options={{ headerShown: false }} />
+          <Stack.Screen name="StaffPerformanceReportForm" component={StaffPerformanceReportFormScreen}
+            options={{ headerShown: false }} />
+          {/* Promote student → belt + certificate. */}
+          <Stack.Screen name="StaffPromoteStudent" component={StaffPromoteStudentScreen}
+            options={{ headerShown: false }} />
+          <Stack.Screen name="StudentBeltJourney" component={StudentBeltJourneyScreen}
+            options={{ headerShown: false }} />
+          <Stack.Screen name="CertificateDetail" component={CertificateDetailScreen}
+            options={{ headerShown: false }} />
           <Stack.Screen name="BatchStudents" component={BatchStudentsScreen}
             options={{ headerShown: true, title: 'Mark Attendance' }} />
           <Stack.Screen name="AttendanceHistory" component={AttendanceHistoryScreen}

@@ -2,7 +2,7 @@
 //
 // Bottom tab bar for institution admins (the academy owner / "institution login"
 // experience in the mobile app). Five tabs: Dashboard, Students, Batches,
-// Payments, More. Only Dashboard is fully built — the rest render the
+// Earnings, More. Only Dashboard is fully built — the rest render the
 // placeholder until we get to them.
 //
 // Styled as a modern rounded card sitting above the system insets. Active tab
@@ -85,11 +85,11 @@ export default function AdminTabNavigator() {
         }}
       />
       <Tab.Screen
-        name="Payments"
+        name="Earnings"
         component={PaymentsTabScreen}
         options={{
           tabBarIcon: makeIcon(Wallet),
-          tabBarLabel: ({ focused }) => <TabLabel focused={focused}>Payments</TabLabel>,
+          tabBarLabel: ({ focused }) => <TabLabel focused={focused}>Earnings</TabLabel>,
         }}
       />
       <Tab.Screen
@@ -109,7 +109,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: spacing.lg,
     right: spacing.lg,
-    bottom: Platform.OS === 'ios' ? 24 : 14,
+    bottom: 0,
     height: 64,
     borderRadius: 22,
     backgroundColor: palette.surface,

@@ -28,8 +28,8 @@ import {
 import { useFocusEffect } from '@react-navigation/native';
 import {
   Bell, ClipboardCheck, Users, CalendarClock, Percent,
-  UserCheck, MessageSquare, BookOpen, Clock, ChevronRight,
-  GraduationCap,
+  UserCheck, MessageSquare, BookOpen, Clock, ChevronRight, Video,
+  GraduationCap, CalendarOff, Star, Award,
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
@@ -53,16 +53,22 @@ export default function StaffDashboardScreen({ navigation }) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
-  const [leaveCounts, setLeaveCounts] = useState({ pending: 0 });
+  // `myLeaves` is the trainer's OWN leave history (from /trainer-leave-requests/my,
+  // backed by the trainer_leave_requests table). We compute how many days
+  // this trainer has been on leave during the current calendar month from
+  // every approved request and surface that as the "Leave this month" stat.
+  // (Previously this card read /leave-requests/trainer/my, which is the
+  // STUDENT leave review queue — not the trainer's own time off.)
+  const [myLeaves, setMyLeaves] = useState([]);
 
   const load = useCallback(async () => {
     try {
       const [batchRes, leaveRes] = await Promise.all([
         apiClient.get('/batches/trainer/my').catch(() => ({ data: { batches: [] } })),
-        apiClient.get('/leave-requests/trainer/my?status=pending').catch(() => ({ data: { counts: { pending: 0 } } })),
+        apiClient.get('/trainer-leave-requests/my').catch(() => ({ data: { leave_requests: [] } })),
       ]);
       setBatches(batchRes.data?.batches || []);
-      setLeaveCounts(leaveRes.data?.counts || { pending: 0 });
+      setMyLeaves(leaveRes.data?.leave_requests || []);
     } catch (err) {
       console.log('[StaffDashboard] load error:', err?.message);
     } finally {
@@ -79,9 +85,29 @@ export default function StaffDashboardScreen({ navigation }) {
     [batches],
   );
 
-  // Real pending leave count (Step 6 endpoint). Attendance % remains a
-  // synthetic baseline until we add an aggregate endpoint.
-  const pendingLeave = leaveCounts.pending || 0;
+  // Leave days this month — sum the day count of every APPROVED leave
+  // request whose range intersects the current calendar month. Handles
+  // requests that span across month boundaries by clamping start/end to
+  // the month window before counting.
+  const leaveDaysThisMonth = useMemo(() => {
+    const now    = new Date();
+    const mStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const mEnd   = new Date(now.getFullYear(), now.getMonth() + 1, 0); // inclusive
+    let total = 0;
+    myLeaves.forEach((lr) => {
+      if (lr.status !== 'approved') return;
+      const s = new Date(lr.start_date);
+      const e = new Date(lr.end_date);
+      if (Number.isNaN(s.getTime()) || Number.isNaN(e.getTime())) return;
+      const clampedStart = s < mStart ? mStart : s;
+      const clampedEnd   = e > mEnd   ? mEnd   : e;
+      if (clampedEnd < clampedStart) return;
+      // +1 because both endpoints are inclusive.
+      total += Math.round((clampedEnd - clampedStart) / 86400000) + 1;
+    });
+    return total;
+  }, [myLeaves]);
+
   const attendancePct = batches.length ? 92 : 0;
 
   const initials = (user?.name || 'S')
@@ -163,8 +189,8 @@ export default function StaffDashboardScreen({ navigation }) {
         />
         <StatCard
           icon={ClipboardCheck}
-          label="Pending Leave"
-          value={pendingLeave}
+          label="My Leave (mo)"
+          value={leaveDaysThisMonth}
           accent={palette.orange}
         />
         <StatCard
@@ -201,6 +227,30 @@ export default function StaffDashboardScreen({ navigation }) {
           label="Send Announcement"
           accent={palette.green}
           onPress={() => navigation.navigate('StaffNotifications')}
+        />
+        <ActionButton
+          icon={Video}
+          label="Share Videos"
+          accent={palette.rose}
+          onPress={() => navigation.navigate('StaffVideos')}
+        />
+        <ActionButton
+          icon={CalendarOff}
+          label="Request Leave"
+          accent={palette.teal}
+          onPress={() => navigation.navigate('TrainerRequestLeave')}
+        />
+        <ActionButton
+          icon={Star}
+          label="Performance"
+          accent={palette.pink}
+          onPress={() => navigation.navigate('StaffPerformanceReports')}
+        />
+        <ActionButton
+          icon={Award}
+          label="Promote Belt"
+          accent={palette.purple}
+          onPress={() => navigation.navigate('StaffPromoteStudent')}
         />
       </View>
 
