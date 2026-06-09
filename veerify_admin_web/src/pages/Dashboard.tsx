@@ -77,6 +77,8 @@ interface RecentEnrollmentRow {
 // Subscription payment made by an institution. Backed by
 // GET /api/onboarding/recent-payments.
 interface RecentPaymentRow {
+    id: number;
+
   institution_id: number;
   institution_name: string;
   payment_link_id: string | null;
@@ -476,10 +478,10 @@ function RecentPaymentsTable() {
         let variant: 'success' | 'warning' | 'danger' | 'neutral' = 'neutral';
         let label = s;
         switch (s) {
-          case 'paid':      variant = 'success'; label = 'Paid';      break;
-          case 'pending':   variant = 'warning'; label = 'Pending';   break;
-          case 'expired':   variant = 'danger';  label = 'Expired';   break;
-          case 'cancelled': variant = 'danger';  label = 'Cancelled'; break;
+          case 'paid':      variant = 'success'; label = 'paid';      break;
+          case 'pending':   variant = 'warning'; label = 'pending';   break;
+          case 'expired':   variant = 'danger';  label = 'expired';   break;
+          case 'cancelled': variant = 'danger';  label = 'cancelled'; break;
           default:          variant = 'neutral'; label = s;
         }
         return (
