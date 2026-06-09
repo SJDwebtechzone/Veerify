@@ -100,6 +100,20 @@ export default function PlanSelectionScreen({ navigation }) {
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
+      {/* Top-right Sign out pill — the only escape valve from this screen
+          since the native back button is hidden. Tapping calls logout(),
+          which clears the JWT and bounces us back to Welcome. */}
+      <View style={styles.topRightRow}>
+        <TouchableOpacity
+          onPress={confirmSignOut}
+          style={styles.signOutBtn}
+          activeOpacity={0.85}
+        >
+          <LogOut size={13} color={colors.textLight} strokeWidth={2.4} />
+          <Text style={styles.signOutText}>Sign out</Text>
+        </TouchableOpacity>
+      </View>
+
       {/* Header */}
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Choose Your Plan</Text>
@@ -274,6 +288,28 @@ export default function PlanSelectionScreen({ navigation }) {
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#f4f4f8' },
   content: { padding: 20 },
+
+  topRightRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    marginBottom: 8,
+  },
+  signOutBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: colors.lightGray,
+  },
+  signOutText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.textLight,
+  },
 
   header: { marginBottom: 24, alignItems: 'center' },
   headerTitle: {

@@ -263,7 +263,7 @@ function LoggedInView({ user, subscription, selectedInstitution, onLogout, navig
         <Tile icon={Award}          label="Belts & Certs"     accent={palette.teal}   onPress={() => navigation.navigate('StudentBeltJourney')} />
         <Tile icon={Wallet}         label="Payments"          accent={palette.blue}   onPress={() => placeholder('Payment History')} />
         <Tile icon={Gift}           label="Refer & Earn"      accent={palette.pink}   onPress={handleReferral} />
-        <Tile icon={Settings}       label="Settings"          accent={palette.teal}   onPress={() => placeholder('Settings')} />
+        {/* <Tile icon={Settings}       label="Settings"          accent={palette.teal}   onPress={() => placeholder('Settings')} /> */}
       </View>
 
       {/* List shortcuts */}

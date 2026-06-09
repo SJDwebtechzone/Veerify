@@ -151,6 +151,83 @@ exports.getAllStudents = async (req, res) => {
 // banner, trainer name, institution name) to render a card without
 // further round-trips. Ordered newest first.
 // ─────────────────────────────────────────────────────────────────────────
+// GET /api/students/me/summary
+// One-shot card payload for the student home screen — attendance % and
+// performance % computed from the live tables. Used to render the two
+// circular rings under the hero.
+//
+//   attendance_pct = present / (present + absent + late + leave) * 100
+//   performance_pct = avg of all 6 rating fields across PUBLISHED reports,
+//                     scaled from 1-5 → 0-100
+//
+// Both default to null when there's no data yet (the UI shows a "—" ring
+// instead of misleading 0%).
+exports.getMySummary = async (req, res) => {
+  try {
+    const studentId = req.user.id;
+
+    const [attRes, perfRes] = await Promise.all([
+      pool.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE status = 'present')::int AS present,
+           COUNT(*) FILTER (WHERE status IN ('present', 'absent', 'late', 'leave'))::int AS total
+           FROM attendance
+          WHERE student_id = $1`,
+        [studentId],
+      ),
+      pool.query(
+        `SELECT
+           AVG(
+             (COALESCE(discipline_rating, 0) +
+              COALESCE(attendance_rating, 0) +
+              COALESCE(technique_rating,  0) +
+              COALESCE(fitness_rating,    0) +
+              COALESCE(sparring_rating,   0) +
+              COALESCE(behaviour_rating,  0))
+             / NULLIF(
+                (CASE WHEN discipline_rating IS NULL THEN 0 ELSE 1 END +
+                 CASE WHEN attendance_rating IS NULL THEN 0 ELSE 1 END +
+                 CASE WHEN technique_rating  IS NULL THEN 0 ELSE 1 END +
+                 CASE WHEN fitness_rating    IS NULL THEN 0 ELSE 1 END +
+                 CASE WHEN sparring_rating   IS NULL THEN 0 ELSE 1 END +
+                 CASE WHEN behaviour_rating  IS NULL THEN 0 ELSE 1 END), 0)
+           ) AS avg_rating,
+           COUNT(*)::int AS report_count
+           FROM performance_reports
+          WHERE student_id = $1 AND status = 'published'`,
+        [studentId],
+      ),
+    ]);
+
+    const att = attRes.rows[0] || { present: 0, total: 0 };
+    const attendance_pct = att.total > 0
+      ? Math.round((Number(att.present) / Number(att.total)) * 100)
+      : null;
+
+    const perf = perfRes.rows[0] || {};
+    const avg = Number(perf.avg_rating);
+    const performance_pct = Number.isFinite(avg) && avg > 0
+      ? Math.round((avg / 5) * 100)
+      : null;
+
+    res.json({
+      attendance: {
+        percentage: attendance_pct,
+        present:    Number(att.present) || 0,
+        total:      Number(att.total)   || 0,
+      },
+      performance: {
+        percentage:   performance_pct,
+        report_count: Number(perf.report_count) || 0,
+        avg_rating:   Number.isFinite(avg) ? Number(avg.toFixed(2)) : null,
+      },
+    });
+  } catch (err) {
+    console.error('Get my summary error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
 exports.getMyVideos = async (req, res) => {
   try {
     const studentId = req.user.id;

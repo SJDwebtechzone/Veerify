@@ -40,10 +40,16 @@ export default function LoginScreen({ navigation }) {
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
-        {/* Custom back button */}
-        <TouchableOpacity 
+        {/* Custom back button — if there's no entry behind us in the stack
+            (e.g. when navigated to with a route reset), fall back to the
+            Welcome screen so the user is never stranded with a dead
+            arrow. */}
+        <TouchableOpacity
           style={styles.backButton}
-          onPress={() => navigation.goBack()}
+          onPress={() => {
+            if (navigation.canGoBack()) navigation.goBack();
+            else navigation.navigate('Welcome');
+          }}
           activeOpacity={0.6}
         >
           <Text style={styles.backArrow}>←</Text>

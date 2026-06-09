@@ -83,6 +83,15 @@ export default function CourseDetailScreen({ navigation, route }) {
 
   useEffect(() => { load(); }, [load]);
 
+  // Guest stack mounts Login as a sibling of CourseDetail under a single
+  // Stack.Navigator (no parent navigator above it), so getParent() returned
+  // undefined and the original `.navigate('Login')` chain silently no-op'd.
+  // Navigate directly, with a defensive try/catch so we never silently fail.
+  const goToLogin = () => {
+    try { navigation.navigate('Login'); return; } catch { /* fall through */ }
+    try { navigation.getParent()?.navigate('Login'); } catch {}
+  };
+
   const triggerPaywall = (action) => {
     if (isGuest) {
       Alert.alert(
@@ -90,7 +99,7 @@ export default function CourseDetailScreen({ navigation, route }) {
         `Sign in to ${action.toLowerCase()} and unlock your training.`,
         [
           { text: 'Not now', style: 'cancel' },
-          { text: 'Login', onPress: () => navigation.getParent()?.navigate('Login') },
+          { text: 'Login', onPress: goToLogin },
         ],
       );
       return true;
@@ -117,7 +126,7 @@ export default function CourseDetailScreen({ navigation, route }) {
         'Sign in to enroll in this program.',
         [
           { text: 'Not now', style: 'cancel' },
-          { text: 'Login', onPress: () => navigation.getParent()?.navigate('Login') },
+          { text: 'Login', onPress: goToLogin },
         ],
       );
       return;

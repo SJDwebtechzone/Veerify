@@ -47,9 +47,12 @@ export default function RegisterScreen({ navigation }) {
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
-        <TouchableOpacity 
+        <TouchableOpacity
           style={styles.backButton}
-          onPress={() => navigation.goBack()}
+          onPress={() => {
+            if (navigation.canGoBack()) navigation.goBack();
+            else navigation.navigate('Welcome');
+          }}
           activeOpacity={0.6}
         >
           <Text style={styles.backArrow}>←</Text>
