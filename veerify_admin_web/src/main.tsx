@@ -12,9 +12,9 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <ThemeProvider>
       <AuthProvider>
         <NotificationsProvider>
-          <BrowserRouter>
-            <App />
-          </BrowserRouter>
+         <BrowserRouter basename="/admin">
+  <App />
+</BrowserRouter>
         </NotificationsProvider>
       </AuthProvider>
     </ThemeProvider>

@@ -23,8 +23,6 @@ import { getToken } from '../utils/storage';
 //     PRODUCTION_API_BASE → your deployed backend (https preferred).
 //     DEV_LAN_IP          → your dev laptop's LAN IP for testing on phone.
 
-const DEV_LAN_IP = '192.168.1.5';
-const DEV_PORT = 5000;
 
 function detectDevHost() {
   if (Platform.OS !== 'android' && Platform.OS !== 'ios') return DEV_LAN_IP;
@@ -47,7 +45,7 @@ function detectDevHost() {
 const _detectUnused = detectDevHost;
 const API_BASE_URL = __DEV__
   ? 'http://10.0.2.2:5000/api'
-  : PRODUCTION_API_BASE;
+  : 'https://veerifyapp.com/api';
 
 // eslint-disable-next-line no-console
 console.log('[API] base URL =', API_BASE_URL);

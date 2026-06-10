@@ -14,66 +14,44 @@ export const AuthProvider = ({ children }) => {
   // wipe it, and fall back to the Welcome screen.
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const token = await getToken();
-        if (!token) {
-          // No stored session — start at Welcome.
-          if (!cancelled) setLoading(false);
-          return;
-        }
+useEffect(() => {
+  let cancelled = false;
 
-        // Try to resume the session. The api client auto-attaches the token
-        // via the interceptor in client.js, so we can just call /auth/me.
-        try {
-          const meRes = await apiClient.get('/auth/me');
-          const userData = meRes.data?.user;
-          if (!userData) throw new Error('No user in /auth/me response');
+  (async () => {
+    try {
+      const token = await getToken();
 
-          console.log('[AUTH] session resumed → user id=', userData.id,
-            'role=', userData.role, 'email=', userData.email);
-
-          // Admins need onboardingStatus + institution loaded before the
-          // navigator mounts (same race fix as login()).
-          if (userData.role === 'admin') {
-            try {
-              const onb = await apiClient.get('/onboarding/my-status');
-              if (!cancelled) {
-                setOnboardingStatus(onb.data?.status || 'registered');
-                setInstitution(onb.data?.institution || null);
-              }
-            } catch (err) {
-              console.log('[AUTH] my-status failed during resume:', err?.message);
-              if (!cancelled) {
-                setOnboardingStatus('registered');
-                setInstitution(null);
-              }
-            }
-          }
-
-          if (!cancelled) setUser(userData);
-        } catch (err) {
-          // 401 means the token is expired or invalid - wipe it so the
-          // next request doesn't keep sending a zombie Authorization
-          // header. Anything else (offline, server down) leaves the token
-          // alone so the next launch can try again.
-          const status = err?.response?.status;
-          if (status === 401) {
-            console.log('[AUTH] stored token rejected (401) — wiping');
-            try { await deleteToken(); } catch {}
-          } else {
-            console.log('[AUTH] resume failed (non-401):', err?.message);
-          }
-        }
-      } finally {
-        if (!cancelled) setLoading(false);
+      if (!token) {
+        setUser(null);
+        setLoading(false);
+        return;
       }
-    })();
-    return () => { cancelled = true; };
-  }, []);
 
+      try {
+        const meRes = await apiClient.get('/auth/me');
+
+        const userData = meRes?.data?.user ?? null;
+
+       if (!cancelled) {
+  setUser(userData ?? null);
+}
+      } catch (err) {
+        console.log('[AUTH] /auth/me failed safely:', err?.message);
+
+        try {
+          await deleteToken();
+        } catch {}
+      }
+
+    } catch (err) {
+      console.log('[AUTH] startup fatal prevented:', err?.message);
+    } finally {
+      if (!cancelled) setLoading(false);
+    }
+  })();
+
+  return () => { cancelled = true; };
+}, []);
   const checkOnboardingStatus = async () => {
     try {
       const res = await apiClient.get('/onboarding/my-status');

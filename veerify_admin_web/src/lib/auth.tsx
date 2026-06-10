@@ -12,6 +12,7 @@ interface AdminUser {
 interface AuthContextValue {
   user: AdminUser | null;
   isAuthenticated: boolean;
+  isLoading: boolean;
   login: (email: string, password: string) => Promise<{ ok: true } | { ok: false; error: string }>;
   logout: () => void;
 }
@@ -30,6 +31,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return null;
     }
   });
+    const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     if (user) {
@@ -82,7 +84,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, isAuthenticated: !!user, login, logout }}>
+    <AuthContext.Provider value={{ user,  isLoading,isAuthenticated: !!user, login, logout }}>
       {children}
     </AuthContext.Provider>
   );
