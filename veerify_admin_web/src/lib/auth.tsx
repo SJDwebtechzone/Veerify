@@ -31,7 +31,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return null;
     }
   });
-    const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    async function checkAuth() {
+      const token = localStorage.getItem(TOKEN_KEY);
+      if (token && user) {
+        try {
+          const res = await api.get('/auth/me');
+          const userData = res.data.user || res.data;
+          if (userData.role === 'super_admin') {
+            setUser({
+              id: userData.id,
+              email: userData.email,
+              name: userData.name,
+              role: 'super_admin',
+            });
+          } else {
+            setUser(null);
+          }
+        } catch (err) {
+          console.error('Failed to verify token', err);
+          setUser(null);
+        }
+      } else {
+        setUser(null);
+      }
+      setIsLoading(false);
+    }
+    checkAuth();
+  }, []);
 
   useEffect(() => {
     if (user) {
