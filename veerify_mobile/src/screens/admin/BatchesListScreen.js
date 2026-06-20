@@ -45,7 +45,17 @@ export default function BatchesListScreen({ navigation }) {
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
         ListEmptyComponent={<View style={commonStyles.emptyState}><Text style={{ fontSize: 60 }}>📅</Text><Text style={commonStyles.emptyText}>No batches yet.{'\n'}Create a course first, then add batches.</Text></View>}
         renderItem={({ item }) => (
-          <View style={commonStyles.card}>
+          // Tap anywhere on the card → drill into the batch's enrolled
+          // students. The two inline action buttons below stopPropagation
+          // so they still work independently.
+          <TouchableOpacity
+            style={commonStyles.card}
+            activeOpacity={0.85}
+            onPress={() => navigation.navigate('AdminBatchStudents', {
+              batchId: item.id,
+              batch: item,
+            })}
+          >
             <Text style={commonStyles.cardTitle}>{item.name}</Text>
             <Text style={commonStyles.cardSubtitle}>{item.course_name}</Text>
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginTop: 8, gap: 8 }}>
@@ -54,10 +64,39 @@ export default function BatchesListScreen({ navigation }) {
             </View>
             <Text style={{ fontSize: 12, marginTop: 6, color: colors.textLight }}>👨‍🏫 {item.trainer_name || 'No trainer assigned'}</Text>
             <Text style={{ fontSize: 12, marginTop: 2, color: colors.textLight }}>👥 Capacity: {item.capacity} | Mode: {item.mode}</Text>
-            <TouchableOpacity onPress={() => onDelete(item)} style={{ marginTop: 8 }}>
-              <Text style={{ color: colors.danger, fontWeight: '600' }}>Delete</Text>
-            </TouchableOpacity>
-          </View>
+
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 10 }}>
+              {/* Add Student — opens the enrollment form pre-bound to this
+                  batch. Lets the institution admin register a student
+                  directly into the picked batch in one tap. */}
+              <TouchableOpacity
+                onPress={(e) => {
+                  e.stopPropagation?.();
+                  navigation.navigate('EnrollmentForm', {
+                    batchId: item.id,
+                    batch: item,
+                    course: { id: item.course_id, name: item.course_name },
+                  });
+                }}
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 4,
+                  paddingHorizontal: 10,
+                  paddingVertical: 6,
+                  borderRadius: 999,
+                  backgroundColor: '#E63946',
+                }}
+                activeOpacity={0.85}
+              >
+                <Text style={{ color: '#fff', fontWeight: '700', fontSize: 12 }}>+ Add Student</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity onPress={(e) => { e.stopPropagation?.(); onDelete(item); }}>
+                <Text style={{ color: colors.danger, fontWeight: '600' }}>Delete</Text>
+              </TouchableOpacity>
+            </View>
+          </TouchableOpacity>
         )}
       />
 

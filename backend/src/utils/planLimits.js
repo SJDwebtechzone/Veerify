@@ -17,13 +17,35 @@ const pool = require('../config/db');
 // kind: 'students' | 'trainers' | 'branches'
 async function getUsage(institutionId, kind) {
   const planRow = await pool.query(
-    `SELECT sp.id, sp.name, sp.max_students, sp.max_trainers, sp.max_branches
+    `SELECT i.plan_id AS institution_plan_id,
+            sp.id, sp.name, sp.max_students, sp.max_trainers, sp.max_branches
        FROM institutions i
        LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
       WHERE i.id = $1`,
     [institutionId],
   );
-  const plan = planRow.rows[0] || {};
+  let plan = planRow.rows[0] || {};
+
+  // Defensive fallback: when the institution doesn't have a plan linked
+  // yet (e.g. legacy row, mid-trial signup) we shouldn't silently treat
+  // them as "unlimited" — that defeats the cap. Pin them to the cheapest
+  // active plan so the basic caps apply until they actually upgrade.
+  if (!plan.id) {
+    const fallback = await pool.query(
+      `SELECT id, name, max_students, max_trainers, max_branches
+         FROM subscription_plans
+        WHERE is_active = TRUE
+        ORDER BY price ASC
+        LIMIT 1`,
+    );
+    if (fallback.rows[0]) {
+      plan = { ...fallback.rows[0], institution_plan_id: null };
+      // eslint-disable-next-line no-console
+      console.log(
+        `[planLimits] institution=${institutionId} has no plan_id; falling back to "${plan.name}" caps`,
+      );
+    }
+  }
 
   let limitCol;
   let currentSql;

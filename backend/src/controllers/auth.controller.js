@@ -249,7 +249,9 @@ exports.getMe = async (req, res) => {
 exports.forgotPassword = async (req, res) => {
   try {
     const rawEmail = (req.body?.email || '').trim().toLowerCase();
+    console.log('[forgotPassword] Request received for email:', rawEmail);
     if (!rawEmail || !/\S+@\S+\.\S+/.test(rawEmail)) {
+      console.warn('[forgotPassword] Invalid email format:', rawEmail);
       return res.status(400).json({ message: 'A valid email is required' });
     }
 
@@ -258,20 +260,26 @@ exports.forgotPassword = async (req, res) => {
     };
 
     // Look the user up. If they don't exist, we still pretend we sent.
+    console.log('[forgotPassword] Querying database for:', rawEmail);
     const u = await pool.query(
       'SELECT id, name, email FROM users WHERE LOWER(email) = $1 AND COALESCE(is_deleted, false) = false',
       [rawEmail],
     );
+    console.log('[forgotPassword] Query result rows count:', u.rows.length);
     if (u.rows.length === 0) {
+      console.warn('[forgotPassword] Email not found in DB or user is deleted:', rawEmail);
       return res.json(ok);
     }
     const user = u.rows[0];
+    console.log('[forgotPassword] Found user:', user.name, 'with ID:', user.id);
 
     // Generate a cryptographically random 6-digit OTP.
     const otp = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
+    console.log('[forgotPassword] Generated OTP:', otp);
     const otpHash = await bcrypt.hash(otp, 10);
     const expiresAt = new Date(Date.now() + RESET_OTP_TTL_MINUTES * 60_000);
 
+    console.log('[forgotPassword] Updating OTP hash in database...');
     await pool.query(
       `UPDATE users SET
          reset_otp_hash     = $1,
@@ -280,10 +288,12 @@ exports.forgotPassword = async (req, res) => {
        WHERE id = $3`,
       [otpHash, expiresAt, user.id],
     );
+    console.log('[forgotPassword] Database updated successfully.');
 
     // Best-effort email send. If SMTP isn't configured the OTP still lives
     // in the DB so an admin could retrieve it manually; in normal operation
     // this just works.
+    console.log('[forgotPassword] Sending password reset email via mailer...');
     const mail = await sendPasswordResetEmail({
       to:              user.email,
       name:            user.name,
@@ -291,7 +301,9 @@ exports.forgotPassword = async (req, res) => {
       expiresMinutes:  RESET_OTP_TTL_MINUTES,
     });
     if (!mail.ok) {
-      console.warn('[forgotPassword] email send failed:', mail.error);
+      console.error('[forgotPassword] email send failed:', mail.error);
+    } else {
+      console.log('[forgotPassword] Email sent successfully! MessageID:', mail.messageId);
     }
 
     return res.json(ok);

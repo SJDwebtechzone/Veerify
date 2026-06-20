@@ -13,7 +13,7 @@
 //   7. Branding            — image URL, badge, trainer name, branch name
 //   8. Publish             — status (active / draft) and submit button
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView, Alert,
   ActivityIndicator, StyleSheet, Switch, Image, Modal, FlatList,
@@ -42,16 +42,42 @@ function resolveAssetUrl(src) {
 const MODE_OPTIONS = [
   { key: 'offline', label: 'Offline',  hint: 'In-person at academy' },
   { key: 'online',  label: 'Online',   hint: 'Live virtual class'   },
-  { key: 'hybrid',  label: 'Hybrid',   hint: 'Mix of both'          },
 ];
 
 const LEVEL_OPTIONS = ['Beginner', 'Intermediate', 'Advanced'];
 
+// Selectable ages for the Min Age / Max Age dropdowns. Covers the
+// realistic martial-arts student range from young children to seniors.
+const AGE_OPTIONS = Array.from({ length: 78 }, (_, i) => i + 3); // 3..80
+
+// Parse the legacy free-text `age_group` value (e.g. "5-12 Years",
+// "7+ Years", "All ages") back into { min, max } numbers so existing
+// rows round-trip into the new dropdowns cleanly.
+function parseAgeGroup(raw) {
+  if (!raw || typeof raw !== 'string') return { min: '', max: '' };
+  const s = raw.trim();
+  const range = s.match(/(\d+)\s*[-–to]+\s*(\d+)/i);
+  if (range) {
+    return { min: String(Number(range[1])), max: String(Number(range[2])) };
+  }
+  const open = s.match(/(\d+)\s*\+/);
+  if (open) {
+    return { min: String(Number(open[1])), max: '' };
+  }
+  const single = s.match(/(\d+)/);
+  if (single) {
+    return { min: String(Number(single[1])), max: String(Number(single[1])) };
+  }
+  return { min: '', max: '' };
+}
+
+// Badge pills shown on the course card. Default is 'new'; users can
+// switch to Popular, Kids Special, or Other (with a free-text override).
 const BADGE_OPTIONS = [
-  { key: '',             label: 'None'         },
-  { key: 'popular',      label: 'Popular'      },
   { key: 'new',          label: 'New'          },
+  { key: 'popular',      label: 'Popular'      },
   { key: 'kids_special', label: 'Kids Special' },
+  { key: 'other',        label: 'Other'        },
 ];
 
 const DAYS_ORDER = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -90,7 +116,14 @@ export default function CreateCourseScreen({ navigation, route }) {
     // mode + level
     mode:                  existing?.mode              || 'offline',
     level:                 existing?.level             || 'Beginner',
-    age_group:             existing?.age_group         || '',
+    // Age range — split into Min/Max dropdowns. We parse the legacy
+    // free-text `age_group` value so existing courses round-trip.
+    min_age:               (existing?.min_age != null && existing.min_age !== '')
+                            ? String(existing.min_age)
+                            : parseAgeGroup(existing?.age_group).min,
+    max_age:               (existing?.max_age != null && existing.max_age !== '')
+                            ? String(existing.max_age)
+                            : parseAgeGroup(existing?.age_group).max,
     // schedule
     days_of_week:          existing?.days_of_week      || '',
     class_start_time:      existing?.class_start_time  || '',
@@ -100,7 +133,24 @@ export default function CreateCourseScreen({ navigation, route }) {
     batch_size_max:        existing?.batch_size_max ? String(existing.batch_size_max) : '',
     // pricing
     price:                 existing?.price ? String(existing.price) : '',
+    // Legacy single admission-fee field — kept in state for back-compat
+    // with rows saved before the new fee-list UI. Stays in sync with the
+    // first Admission Fee entry of additional_fees on save.
     admission_fee:         existing?.admission_fee ? String(existing.admission_fee) : '',
+    // Dynamic list of additional fees beyond the monthly fee. Each item:
+    //   { type: 'Admission Fee'|'Uniform Fee'|'Others',
+    //     custom_title: '' (only used when type === 'Others'),
+    //     amount: '' }
+    additional_fees:
+      Array.isArray(existing?.additional_fees) && existing.additional_fees.length
+        ? existing.additional_fees.map((f) => ({
+            type:         f.type || 'Admission Fee',
+            custom_title: f.custom_title || '',
+            amount:       f.amount != null ? String(f.amount) : '',
+          }))
+        : (existing?.admission_fee
+            ? [{ type: 'Admission Fee', custom_title: '', amount: String(existing.admission_fee) }]
+            : []),
     // perks
     belt_system:           !!existing?.belt_system,
     certificate_available: existing?.certificate_available === undefined ? true : !!existing.certificate_available,
@@ -108,8 +158,14 @@ export default function CreateCourseScreen({ navigation, route }) {
     // branding
     image_url:             existing?.image_url         || '',
     intro_video_url:       existing?.intro_video_url   || '',
-    badge:                 existing?.badge             || '',
+    // New courses default to the "New" badge; existing courses keep
+    // whatever was saved. The "Other" tab in the picker reveals a
+    // free-text input stored in badge_custom.
+    badge:                 existing?.badge             || 'new',
+    badge_custom:          existing?.badge_custom      || '',
     trainer_name:          existing?.trainer_name      || '',
+    // Branch name is prefilled from the academy's institution name on
+    // first open via a useEffect below; existing courses keep their own.
     branch_name:           existing?.branch_name       || '',
     // publish
     status:                existing?.status            || 'active',
@@ -185,6 +241,29 @@ export default function CreateCourseScreen({ navigation, route }) {
 
   const update = (k, v) => setForm((p) => ({ ...p, [k]: v }));
 
+  // On first open of a NEW course form, prefill the branch name with the
+  // institution's own name from the academy setup so the admin doesn't
+  // have to retype it. Editing an existing course leaves whatever was
+  // saved alone.
+  useEffect(() => {
+    if (existing) return;            // edit mode → don't override saved value
+    if (form.branch_name) return;    // user already typed something
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiClient.get('/onboarding/my-status');
+        const instName = res?.data?.institution?.name;
+        if (!cancelled && instName) {
+          setForm((prev) => prev.branch_name ? prev : { ...prev, branch_name: instName });
+        }
+      } catch (err) {
+        console.warn('[CreateCourse] could not load institution name:', err?.message);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const submit = async () => {
     if (!form.name.trim()) {
       Alert.alert('Required', 'Course name is required.');
@@ -192,19 +271,59 @@ export default function CreateCourseScreen({ navigation, route }) {
     }
     setLoading(true);
     try {
+      // Compose the legacy `age_group` text from the dropdowns so any
+      // back-end / read-side code that still reads the string column
+      // keeps working without changes.
+      const minA = parseInt(form.min_age, 10);
+      const maxA = parseInt(form.max_age, 10);
+      const ageGroupText = (() => {
+        if (Number.isFinite(minA) && Number.isFinite(maxA)) return `${minA}-${maxA} Years`;
+        if (Number.isFinite(minA)) return `${minA}+ Years`;
+        if (Number.isFinite(maxA)) return `Up to ${maxA} Years`;
+        return '';
+      })();
+
+      // Normalise the additional-fees list. Drop blank rows and resolve
+      // the title (use custom_title when type is 'Others').
+      const cleanFees = (form.additional_fees || [])
+        .map((f) => ({
+          type: f.type || 'Admission Fee',
+          title: (f.type === 'Others' ? (f.custom_title || '').trim() : f.type) || null,
+          amount: f.amount ? parseFloat(f.amount) : 0,
+        }))
+        .filter((f) => f.title && f.amount > 0);
+
+      // Back-compat: keep `admission_fee` populated from the first
+      // "Admission Fee" entry so anything that still reads that column
+      // continues to work.
+      const admissionFromList = cleanFees.find((f) => f.type === 'Admission Fee');
+      const admissionFeeVal = admissionFromList
+        ? admissionFromList.amount
+        : (form.admission_fee ? parseFloat(form.admission_fee) : 0);
+
       const payload = {
         ...form,
+        min_age:         Number.isFinite(minA) ? minA : null,
+        max_age:         Number.isFinite(maxA) ? maxA : null,
+        age_group:       ageGroupText || null,
         duration_months: parseInt(form.duration_months, 10) || 1,
         batch_size_min:  form.batch_size_min ? parseInt(form.batch_size_min, 10) : null,
         batch_size_max:  form.batch_size_max ? parseInt(form.batch_size_max, 10) : null,
         price:           form.price ? parseFloat(form.price) : 0,
-        admission_fee:   form.admission_fee ? parseFloat(form.admission_fee) : 0,
-        badge:           form.badge || null,
+        admission_fee:   admissionFeeVal,
+        additional_fees: cleanFees,
+        // Resolve the badge: when "Other" is picked we send the custom
+        // text the admin typed; otherwise the canonical key (new /
+        // popular / kids_special).
+        badge:           form.badge === 'other'
+          ? (form.badge_custom || '').trim() || null
+          : (form.badge || null),
+        // Curriculum no longer captures duration — only the lesson
+        // title and the optional Free flag.
         curriculum:      curriculum
           .filter((l) => l.title.trim())                          // drop blank rows
           .map((l) => ({
             title:    l.title.trim(),
-            duration: l.duration.trim(),
             is_free:  !!l.is_free,
           })),
       };
@@ -282,103 +401,105 @@ export default function CreateCourseScreen({ navigation, route }) {
             );
           })}
         </View>
-        <Field label="Age Group" value={form.age_group} onChange={(v) => update('age_group', v)} placeholder="7+ Years, 5-12 Years..." />
+        {/* Age range — two dropdowns side-by-side. The picker is a
+            scrollable list of years 3–80 so the admin doesn't have to
+            type or remember a format. */}
+        <Text style={styles.label}>Age Range</Text>
+        <View style={styles.row}>
+          <View style={{ flex: 1, marginRight: 6 }}>
+            <AgeDropdown
+              label="Min Age"
+              value={form.min_age}
+              onChange={(v) => {
+                // If a max was set and the new min is greater, bump max
+                // up so the range stays valid.
+                update('min_age', v);
+                const minN = parseInt(v, 10);
+                const maxN = parseInt(form.max_age, 10);
+                if (Number.isFinite(minN) && Number.isFinite(maxN) && maxN < minN) {
+                  update('max_age', v);
+                }
+              }}
+              options={AGE_OPTIONS}
+            />
+          </View>
+          <View style={{ flex: 1, marginLeft: 6 }}>
+            <AgeDropdown
+              label="Max Age"
+              value={form.max_age}
+              onChange={(v) => update('max_age', v)}
+              // Disable values below min_age so the admin can't pick an
+              // invalid range.
+              options={AGE_OPTIONS}
+              minAllowed={parseInt(form.min_age, 10) || undefined}
+            />
+          </View>
+        </View>
       </Section>
 
-      {/* ── Section 4: Schedule ── */}
-      <Section title="Schedule" icon={Clock} accent={palette.orange}>
-        <Text style={styles.label}>Days *</Text>
-        <View style={styles.daysContainer}>
-          {DAYS_ORDER.map((day) => {
-            const selectedDays = form.days_of_week ? form.days_of_week.split(',').map((d) => d.trim()).filter(Boolean) : [];
-            const isSelected = selectedDays.includes(day);
-            return (
-              <TouchableOpacity
-                key={day}
-                style={styles.checkboxRow}
-                activeOpacity={0.8}
-                onPress={() => {
-                  let nextDays;
-                  if (isSelected) {
-                    nextDays = selectedDays.filter((d) => d !== day);
-                  } else {
-                    nextDays = [...selectedDays, day];
-                  }
-                  nextDays.sort((a, b) => DAYS_ORDER.indexOf(a) - DAYS_ORDER.indexOf(b));
-                  update('days_of_week', nextDays.join(', '));
-                }}
-              >
-                <View style={[styles.checkbox, isSelected && styles.checkboxSelected]}>
-                  {isSelected && <Check size={10} color="#fff" strokeWidth={3} />}
-                </View>
-                <Text style={styles.checkboxLabel}>{day}</Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-
-        <View style={styles.row}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.label}>Start time</Text>
-            <TouchableOpacity
-              style={styles.dropdownTrigger}
-              onPress={() => {
-                setActiveTimeField('class_start_time');
-                setTimeModalVisible(true);
-              }}
-              activeOpacity={0.85}
-            >
-              <Text style={[styles.dropdownTriggerText, !form.class_start_time && styles.dropdownPlaceholder]}>
-                {form.class_start_time || 'Select Start Time'}
-              </Text>
-              <ChevronDown size={16} color={palette.textMuted} strokeWidth={2.4} />
-            </TouchableOpacity>
-          </View>
-          <View style={{ width: spacing.md }} />
-          <View style={{ flex: 1 }}>
-            <Text style={styles.label}>End time</Text>
-            <TouchableOpacity
-              style={styles.dropdownTrigger}
-              onPress={() => {
-                setActiveTimeField('class_end_time');
-                setTimeModalVisible(true);
-              }}
-              activeOpacity={0.85}
-            >
-              <Text style={[styles.dropdownTriggerText, !form.class_end_time && styles.dropdownPlaceholder]}>
-                {form.class_end_time || 'Select End Time'}
-              </Text>
-              <ChevronDown size={16} color={palette.textMuted} strokeWidth={2.4} />
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        <View style={styles.row}>
-          <View style={{ flex: 1 }}>
-            <Field label="Duration (months)" value={form.duration_months} onChange={(v) => update('duration_months', v)} placeholder="6" keyboardType="number-pad" />
-          </View>
-          <View style={{ width: spacing.md }} />
-          <View style={{ flex: 1 }}>
-            <Field label="Min batch" value={form.batch_size_min} onChange={(v) => update('batch_size_min', v)} placeholder="20" keyboardType="number-pad" />
-          </View>
-          <View style={{ width: spacing.md }} />
-          <View style={{ flex: 1 }}>
-            <Field label="Max batch" value={form.batch_size_max} onChange={(v) => update('batch_size_max', v)} placeholder="25" keyboardType="number-pad" />
-          </View>
-        </View>
+      {/* ── Section 4: Course Duration ──
+          Days, class start/end times and batch-size min/max were removed
+          per spec — those live on the per-batch screen, not on the course
+          template itself. The course only needs to declare how many
+          months long the program is. */}
+      <Section title="Course Duration" icon={Clock} accent={palette.orange}>
+        <Field
+          label="Duration (months)"
+          value={form.duration_months}
+          onChange={(v) => update('duration_months', v.replace(/[^0-9]/g, ''))}
+          placeholder="6"
+          keyboardType="number-pad"
+        />
       </Section>
 
       {/* ── Section 5: Pricing ── */}
       <Section title="Pricing (₹)" icon={IndianRupee} accent={palette.pink}>
-        <View style={styles.row}>
-          <View style={{ flex: 1 }}>
-            <Field label="Monthly Fee" value={form.price} onChange={(v) => update('price', v)} placeholder="1500" keyboardType="decimal-pad" />
-          </View>
-          <View style={{ width: spacing.md }} />
-          <View style={{ flex: 1 }}>
-            <Field label="Admission Fee" value={form.admission_fee} onChange={(v) => update('admission_fee', v)} placeholder="500" keyboardType="decimal-pad" />
-          </View>
-        </View>
+        <Field
+          label="Monthly Fee"
+          value={form.price}
+          onChange={(v) => update('price', v)}
+          placeholder="1500"
+          keyboardType="decimal-pad"
+        />
+
+        <Text style={[styles.label, { marginTop: spacing.md }]}>
+          Other Fees (optional)
+        </Text>
+        <Text style={styles.helperText}>
+          Add admission, uniform, or any one-off charge. Choose "Others" to type a custom title.
+        </Text>
+
+        {form.additional_fees.map((fee, idx) => (
+          <FeeRow
+            key={idx}
+            fee={fee}
+            onChange={(patch) => {
+              const next = [...form.additional_fees];
+              next[idx] = { ...next[idx], ...patch };
+              update('additional_fees', next);
+            }}
+            onRemove={() => {
+              update(
+                'additional_fees',
+                form.additional_fees.filter((_, i) => i !== idx),
+              );
+            }}
+          />
+        ))}
+
+        <TouchableOpacity
+          style={styles.addFeeBtn}
+          onPress={() => {
+            update('additional_fees', [
+              ...form.additional_fees,
+              { type: 'Admission Fee', custom_title: '', amount: '' },
+            ]);
+          }}
+          activeOpacity={0.85}
+        >
+          <Plus size={14} color={palette.pink.vivid} strokeWidth={2.6} />
+          <Text style={styles.addFeeBtnText}>Add fee</Text>
+        </TouchableOpacity>
       </Section>
 
       {/* ── Section 6: Perks ── */}
@@ -499,13 +620,9 @@ export default function CreateCourseScreen({ navigation, route }) {
                 placeholderTextColor={palette.textLight}
               />
               <View style={styles.lessonMetaRow}>
-                <TextInput
-                  style={[styles.input, styles.lessonDurationInput]}
-                  value={lesson.duration}
-                  onChangeText={(v) => updateLesson(lesson.id, 'duration', v)}
-                  placeholder="12 min"
-                  placeholderTextColor={palette.textLight}
-                />
+                {/* Duration input removed per spec — only the lesson
+                    title is captured. Free toggle still on the right. */}
+                <View style={{ flex: 1 }} />
                 <View style={styles.freeToggleRow}>
                   <Text style={styles.freeToggleLabel}>Free</Text>
                   <Switch
@@ -539,14 +656,47 @@ export default function CreateCourseScreen({ navigation, route }) {
           {BADGE_OPTIONS.map((b) => {
             const active = form.badge === b.key;
             return (
-              <TouchableOpacity key={b.key || 'none'} style={[styles.pill, active && styles.pillActive]} onPress={() => update('badge', b.key)}>
+              <TouchableOpacity key={b.key} style={[styles.pill, active && styles.pillActive]} onPress={() => update('badge', b.key)}>
                 <Text style={[styles.pillText, active && styles.pillTextActive]}>{b.label}</Text>
               </TouchableOpacity>
             );
           })}
         </View>
+
+        {/* Free-text override for the "Other" badge. Only shown when
+            the Other pill is active so the form stays compact for the
+            common case. */}
+        {form.badge === 'other' ? (
+          <Field
+            label="Custom badge label"
+            value={form.badge_custom}
+            onChange={(v) => update('badge_custom', v)}
+            placeholder="e.g. Limited Seats"
+          />
+        ) : null}
+
         <Field label="Trainer name" value={form.trainer_name} onChange={(v) => update('trainer_name', v)} placeholder="Sensei Arun" />
-        <Field label="Branch name" value={form.branch_name} onChange={(v) => update('branch_name', v)} placeholder="Chennai Main Branch" />
+
+        {/* Branch name — read-only display. The value is pulled from the
+            academy setup so admins don't have to retype it and can't
+            accidentally drift from the institution's official name. */}
+        <View style={styles.fieldWrap}>
+          <Text style={styles.label}>Branch name</Text>
+          <View style={[styles.input, styles.branchReadOnly]}>
+            <Text
+              style={[
+                styles.branchReadOnlyText,
+                !form.branch_name && { color: palette.textLight, fontWeight: '500' },
+              ]}
+              numberOfLines={1}
+            >
+              {form.branch_name || 'Loading academy name…'}
+            </Text>
+          </View>
+          <Text style={styles.helperText}>
+            Auto-filled from your academy profile.
+          </Text>
+        </View>
       </Section>
 
       {/* ── Section 8: Publish ── */}
@@ -609,6 +759,130 @@ function Section({ title, icon: Icon, accent, children }) {
         <Text style={styles.sectionTitle}>{title}</Text>
       </View>
       <View style={styles.sectionBody}>{children}</View>
+    </View>
+  );
+}
+
+// Compact tap target that opens a DropdownModal listing the supplied
+// ages (rendered as "<n> Years" strings since the existing
+// DropdownModal works with plain strings). `minAllowed` filters the
+// list so the Max Age picker can't accept values below Min Age.
+function AgeDropdown({ label, value, onChange, options, minAllowed }) {
+  const [open, setOpen] = useState(false);
+  const items = (options || [])
+    .filter((n) => minAllowed == null || n >= minAllowed)
+    .map((n) => `${n} Years`);
+  const displayValue = value ? `${value} Years` : '';
+  return (
+    <View style={styles.fieldWrap}>
+      <Text style={styles.label}>{label}</Text>
+      <TouchableOpacity
+        style={styles.input}
+        onPress={() => setOpen(true)}
+        activeOpacity={0.85}
+      >
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          <Text
+            style={{
+              flex: 1,
+              color: value ? palette.text : palette.textLight,
+              fontSize: 14,
+              fontWeight: '600',
+            }}
+          >
+            {displayValue || 'Select age'}
+          </Text>
+          <ChevronDown size={14} color={palette.textMuted} strokeWidth={2.2} />
+        </View>
+      </TouchableOpacity>
+      <DropdownModal
+        visible={open}
+        title={label}
+        options={items}
+        selectedValue={displayValue}
+        onSelect={(picked) => {
+          // Picked is e.g. "12 Years" — strip the suffix and store the number.
+          const n = parseInt(String(picked).replace(/\D/g, ''), 10);
+          if (Number.isFinite(n)) onChange(String(n));
+        }}
+        onClose={() => setOpen(false)}
+      />
+    </View>
+  );
+}
+
+// ─── FeeRow ────────────────────────────────────────────────────────────
+// One row in the dynamic "Other Fees" list. Type dropdown +
+// (Others-only) custom title input + amount input + trash button.
+const FEE_TYPES = ['Admission Fee', 'Uniform Fee', 'Others'];
+function FeeRow({ fee, onChange, onRemove }) {
+  const [typePickerOpen, setTypePickerOpen] = useState(false);
+  const isOthers = fee.type === 'Others';
+  return (
+    <View style={styles.feeRow}>
+      <View style={styles.feeRowTop}>
+        {/* Type dropdown */}
+        <TouchableOpacity
+          style={styles.feeTypeBtn}
+          onPress={() => setTypePickerOpen(true)}
+          activeOpacity={0.85}
+        >
+          <Text style={styles.feeTypeText} numberOfLines={1}>
+            {fee.type || 'Select type'}
+          </Text>
+          <ChevronDown size={14} color={palette.textMuted} strokeWidth={2.4} />
+        </TouchableOpacity>
+
+        {/* Trash */}
+        <TouchableOpacity
+          style={styles.feeRemoveBtn}
+          onPress={onRemove}
+          hitSlop={6}
+          activeOpacity={0.7}
+        >
+          <Trash2 size={14} color={palette.pink.vivid} strokeWidth={2.4} />
+        </TouchableOpacity>
+      </View>
+
+      {/* Custom title shows only when type === 'Others' */}
+      {isOthers ? (
+        <TextInput
+          style={[styles.input, { marginTop: 8 }]}
+          placeholder="Fee name (e.g. Tournament Fee)"
+          placeholderTextColor={palette.textLight}
+          value={fee.custom_title}
+          onChangeText={(v) => onChange({ custom_title: v })}
+          maxLength={60}
+        />
+      ) : null}
+
+      {/* Amount */}
+      <View style={styles.feeAmountWrap}>
+        <Text style={styles.feeAmountPrefix}>₹</Text>
+        <TextInput
+          style={styles.feeAmountInput}
+          placeholder="500"
+          placeholderTextColor={palette.textLight}
+          value={fee.amount}
+          onChangeText={(v) => onChange({ amount: v.replace(/[^0-9.]/g, '') })}
+          keyboardType="decimal-pad"
+        />
+      </View>
+
+      <DropdownModal
+        visible={typePickerOpen}
+        title="Fee type"
+        options={FEE_TYPES}
+        selectedValue={fee.type}
+        onSelect={(val) => {
+          // When switching away from Others, clear the custom title so it
+          // doesn't linger as an unused value on the row.
+          const patch = { type: val };
+          if (val !== 'Others') patch.custom_title = '';
+          onChange(patch);
+        }}
+        onClose={() => setTypePickerOpen(false)}
+      />
     </View>
   );
 }
@@ -719,6 +993,108 @@ const styles = StyleSheet.create({
   // Field
   fieldWrap: { marginBottom: spacing.sm },
   label: { ...type.micro, color: palette.textMuted, fontWeight: '700', marginBottom: 4, textTransform: 'uppercase' },
+  helperText: {
+    ...type.micro,
+    color: palette.textLight,
+    marginBottom: spacing.sm,
+  },
+
+  // Read-only display variant of the input — soft grey background with
+  // no border focus + cursor since the value is non-editable.
+  branchReadOnly: {
+    justifyContent: 'center',
+    backgroundColor: palette.bg,
+  },
+  branchReadOnlyText: {
+    ...type.body,
+    color: palette.text,
+    fontWeight: '700',
+  },
+
+  // ── Dynamic "Other Fees" list ─────────────────────────────────────
+  feeRow: {
+    backgroundColor: palette.surface,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: palette.divider || '#E5E7EB',
+    padding: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  feeRowTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  feeTypeBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: palette.bg,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: palette.divider || '#E5E7EB',
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+  },
+  feeTypeText: {
+    flex: 1,
+    ...type.body,
+    color: palette.text,
+    fontWeight: '600',
+  },
+  feeRemoveBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#FEE2E2',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  feeAmountWrap: {
+    marginTop: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: palette.bg,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: palette.divider || '#E5E7EB',
+    paddingHorizontal: 12,
+  },
+  feeAmountPrefix: {
+    ...type.body,
+    color: palette.textMuted,
+    fontWeight: '700',
+    marginRight: 4,
+  },
+  feeAmountInput: {
+    flex: 1,
+    paddingVertical: 9,
+    ...type.body,
+    color: palette.text,
+    fontWeight: '600',
+  },
+
+  // "+ Add fee" button at the bottom of the list
+  addFeeBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    alignSelf: 'flex-start',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: palette.pink.vivid,
+    borderStyle: 'dashed',
+    backgroundColor: palette.pink.soft,
+    marginTop: 4,
+  },
+  addFeeBtnText: {
+    ...type.micro,
+    color: palette.pink.vivid,
+    fontWeight: '800',
+    letterSpacing: 0.4,
+  },
   subLabel: { ...type.caption, color: palette.text, fontWeight: '700', marginTop: spacing.xs, marginBottom: 6 },
   input: {
     backgroundColor: palette.bg,

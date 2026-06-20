@@ -14,4 +14,8 @@ router.get('/all', verifyToken, studentController.getAllStudents);
 // Student mobile - recorded videos for batches the caller is paid-enrolled in.
 router.get('/my-videos', verifyToken, requireRole('student'), studentController.getMyVideos);
 
+// Student mobile - the calling student's own profile (name + photo_url
+// from student_profiles). Used by the home header to render the avatar.
+router.get('/me', verifyToken, requireRole('student'), studentController.getMe);
+
 module.exports = router;

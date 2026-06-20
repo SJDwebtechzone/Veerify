@@ -32,6 +32,7 @@ import { useAuth } from '../../../context/AuthContext';
 import { useInstitution } from '../../../context/InstitutionContext';
 import { palette, spacing, radius, shadows, type } from '../../../theme';
 import MyDashboard from '../MyDashboard';
+import NearbyLocationPicker from '../../../components/NearbyLocationPicker';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const ASSET_HOST = (apiClient.defaults.baseURL || '').replace(/\/api\/?$/, '');
@@ -66,6 +67,11 @@ export default function HomeTabScreen({ navigation }) {
   const [featuredPrograms, setFeaturedPrograms] = useState([]);
   const [events, setEvents] = useState([]);
   const [nearbyAcademies, setNearbyAcademies] = useState([]);
+  // Origin the student picked (GPS coords or pincode-resolved coords).
+  // null until the picker hydrates from AsyncStorage or the student
+  // makes a fresh choice. We re-fetch the nearby list whenever it
+  // changes.
+  const [nearbyOrigin, setNearbyOrigin] = useState(null);
 
   // ── Personalized home pivot ──
   // After a logged-in student has at least one PAID enrollment we switch
@@ -109,13 +115,32 @@ export default function HomeTabScreen({ navigation }) {
         // route requires an id. Use 1 as a stub; once events are truly
         // institution-scoped we'll switch back to selectedInstitution.id.
         apiClient.get(`/institutions/${selectedInstitution?.id || 1}/events`).catch(() => ({ data: { events: [] } })),
-        apiClient.get('/institutions/nearby?limit=8').catch(() => ({ data: { institutions: [] } })),
+        // Hybrid academies/nearby — accepts either GPS coords or a
+        // pincode-derived origin from NearbyLocationPicker. When no
+        // origin is set yet the backend falls back to a "newest first"
+        // list so the section is never empty.
+        apiClient.get('/academies/nearby?' + new URLSearchParams(
+          nearbyOrigin
+            ? (nearbyOrigin.source === 'pincode'
+                ? { pincode: nearbyOrigin.pincode, limit: 8 }
+                : { lat: nearbyOrigin.lat, lng: nearbyOrigin.lng, limit: 8 })
+            : { limit: 8 },
+        ).toString()).catch(() => ({ data: { results: [] } })),
       ]);
       setBanners(bannersRes.data.items || []);
       setCategories(catsRes.data.items || []);
       setEvents(evtRes.data.events || []);
+      // /academies/nearby returns { results: [{ id, name, kind,
+      // institution_id, distance_km, ... }] }. We still drop the
+      // currently-picked academy from the list so it doesn't appear
+      // in "Other Academies Near You". Branches keep their own
+      // institution_id, so the filter applies to both.
+      const rows = nearbyRes.data?.results || nearbyRes.data?.institutions || [];
       setNearbyAcademies(
-        (nearbyRes.data.institutions || []).filter((i) => i.id !== selectedInstitution?.id),
+        rows.filter((r) => {
+          const instId = r.kind === 'branch' ? r.institution_id : r.id;
+          return instId !== selectedInstitution?.id;
+        }),
       );
 
       // ── Institution-scoped (only when one is picked) ──
@@ -141,12 +166,12 @@ export default function HomeTabScreen({ navigation }) {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [selectedInstitution?.id]);
+  }, [selectedInstitution?.id, nearbyOrigin]);
 
   // Re-load whenever the screen comes back into focus OR the selected
-  // institution changes.
+  // institution / picked origin changes.
   useFocusEffect(useCallback(() => { setLoading(true); load(); }, [load]));
-  useEffect(() => { setLoading(true); load(); }, [selectedInstitution?.id, load]);
+  useEffect(() => { setLoading(true); load(); }, [selectedInstitution?.id, nearbyOrigin, load]);
 
   // We no longer block the entire Home tab when no institution is picked.
   // The user can still browse banners, categories and nearby academies; only
@@ -310,21 +335,34 @@ export default function HomeTabScreen({ navigation }) {
           <EmptyInline icon={Radio} text="No live classes scheduled — check back soon" />
         </Section>
 
-        {/* ── Nearby Branches ─────────────────────────────────── */}
-        {nearbyAcademies.length > 0 && (
-          <Section title="Other Academies Near You">
+        {/* ── Nearby Academies — hybrid (GPS or pincode) ──────── */}
+        <Section title="Other Academies Near You">
+          <NearbyLocationPicker
+            origin={nearbyOrigin}
+            onChange={setNearbyOrigin}
+          />
+          {nearbyAcademies.length > 0 ? (
             <View style={{ paddingHorizontal: spacing.xl, gap: spacing.sm }}>
-              {nearbyAcademies.slice(0, 3).map((a, i) => (
+              {nearbyAcademies.slice(0, 5).map((a, i) => (
                 <NearbyAcademyRow
-                  key={a.id}
+                  key={`${a.kind || 'inst'}-${a.id}`}
                   academy={a}
                   accent={cycleAccent(i)}
                   onPress={() => navigation.navigate('SelectInstitution')}
                 />
               ))}
             </View>
-          </Section>
-        )}
+          ) : (
+            <EmptyInline
+              icon={Building2}
+              text={
+                nearbyOrigin
+                  ? 'No academies in this area yet — check back as more sign up.'
+                  : 'Pick GPS or enter a pincode above to see academies near you.'
+              }
+            />
+          )}
+        </Section>
 
         {/* ── Continue Learning (paid users only) ─────────────── */}
         {isPaid && (
@@ -481,22 +519,40 @@ function ProgramCard({ program, accent, onPress }) {
 
 function NearbyAcademyRow({ academy, accent, onPress }) {
   const logo = resolveAssetUrl(academy.logo_url);
+  const isBranch = academy.kind === 'branch';
+  // For a branch row, the user-facing card title reads "Parent Academy
+  // · Branch Name", which is more useful than the bare branch name.
+  const titleLine = isBranch && academy.institution_name
+    ? `${academy.institution_name} · ${academy.name}`
+    : academy.name;
   return (
     <TouchableOpacity onPress={onPress} activeOpacity={0.85} style={styles.nearbyRow}>
       {logo ? (
         <Image source={{ uri: logo }} style={styles.nearbyLogo} resizeMode="cover" />
       ) : (
         <View style={[styles.nearbyLogo, { backgroundColor: accent.soft, alignItems: 'center', justifyContent: 'center' }]}>
-          <Text style={{ ...type.h3, color: accent.on }}>{academy.name?.charAt(0)}</Text>
+          <Text style={{ ...type.h3, color: accent.on }}>{(academy.institution_name || academy.name || '?').charAt(0)}</Text>
         </View>
       )}
       <View style={{ flex: 1 }}>
-        <Text style={styles.nearbyName} numberOfLines={1}>{academy.name}</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <Text style={styles.nearbyName} numberOfLines={1}>{titleLine}</Text>
+          {isBranch ? (
+            <View style={{
+              paddingHorizontal: 6, paddingVertical: 1,
+              borderRadius: 999, backgroundColor: '#FFE4E6',
+            }}>
+              <Text style={{ fontSize: 9, fontWeight: '800', color: '#E63946', letterSpacing: 0.4 }}>
+                BRANCH
+              </Text>
+            </View>
+          ) : null}
+        </View>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 }}>
           <MapPin size={12} color={palette.textMuted} strokeWidth={2.2} />
           <Text style={styles.nearbyMeta} numberOfLines={1}>
-            {academy.city || 'India'}
-            {Number.isFinite(academy.distance_km) ? ` • ${academy.distance_km.toFixed(1)} km` : ''}
+            {academy.city || academy.pincode || 'India'}
+            {Number.isFinite(Number(academy.distance_km)) ? ` • ${Number(academy.distance_km).toFixed(1)} km` : ''}
           </Text>
         </View>
       </View>

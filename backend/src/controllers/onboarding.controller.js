@@ -230,8 +230,18 @@ exports.setupAcademy = async (req, res) => {
 
       // ── Operations ──
       total_student_capacity,
-      medium_of_instruction,   // array of strings
-      operating_hours,
+      current_enrollment,                  // new — students currently enrolled
+      medium_of_instruction,               // array of strings
+      operating_hours,                     // legacy human-readable summary
+      operating_hours_weekday,             // new — structured Mon–Fri slots
+      operating_hours_weekend,             // new — structured Sat–Sun slots
+
+      // ── Skills (Core step) — new TEXT[] of martial-arts disciplines.
+      skills,
+
+      // ── Geographic coordinates of the head office (new) ──
+      latitude,
+      longitude,
 
       // ── Point of Contact (Master) ──
       master_name,
@@ -289,6 +299,49 @@ exports.setupAcademy = async (req, res) => {
       ? medium_of_instruction
       : (medium_of_instruction ? [String(medium_of_instruction)] : null);
 
+    // Skills — TEXT[]. Same cleanup as institution_types.
+    const safeSkills = Array.isArray(skills)
+      ? skills
+          .map((s) => (typeof s === 'string' ? s.trim() : ''))
+          .filter(Boolean)
+          .filter((s, i, a) => a.indexOf(s) === i)
+      : null;
+
+    // Operating-hours slot arrays — jsonb. Drop anything that doesn't
+    // have both start AND end so we never persist half-typed rows.
+    const sanitiseSlots = (raw) => {
+      if (!Array.isArray(raw)) return null;
+      const cleaned = raw
+        .map((s) => ({
+          start: typeof s?.start === 'string' ? s.start.trim() : '',
+          end:   typeof s?.end   === 'string' ? s.end.trim()   : '',
+        }))
+        .filter((s) => s.start && s.end);
+      return cleaned.length ? JSON.stringify(cleaned) : null;
+    };
+    const safeHoursWeekday = sanitiseSlots(operating_hours_weekday);
+    const safeHoursWeekend = sanitiseSlots(operating_hours_weekend);
+
+    // Numeric coordinates — coerce + validate. Out-of-range values are
+    // silently dropped to NULL instead of failing the whole save.
+    const toLatLng = (v, kind) => {
+      if (v === '' || v == null) return null;
+      const n = Number(v);
+      if (!Number.isFinite(n)) return null;
+      if (kind === 'lat' && (n < -90  || n > 90))  return null;
+      if (kind === 'lng' && (n < -180 || n > 180)) return null;
+      return n;
+    };
+    const safeLatitude  = toLatLng(latitude,  'lat');
+    const safeLongitude = toLatLng(longitude, 'lng');
+
+    // current_enrollment — non-negative integer or null.
+    const safeCurrentEnrollment = (() => {
+      if (current_enrollment === '' || current_enrollment == null) return null;
+      const n = Number(current_enrollment);
+      return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
+    })();
+
     // Update institution with all details. Order of $-params matters; keep
     // grouped by category for sanity when reading SQL. `institution_types`
     // holds the canonical array; `institution_type` mirrors the first entry
@@ -303,33 +356,39 @@ exports.setupAcademy = async (req, res) => {
          registration_number           = $5,
          date_of_establishment         = $6,
          logo_url                      = $7,
+         skills                        = $8,
          -- contact & location
-         address                       = $8,
-         city                          = $9,
-         pincode                       = $10,
-         no_of_branches                = $11,
-         branches                      = $12::jsonb,
-         email                         = $13,
-         phone                         = $14,
-         website_url                   = $15,
+         address                       = $9,
+         city                          = $10,
+         pincode                       = $11,
+         no_of_branches                = $12,
+         branches                      = $13::jsonb,
+         email                         = $14,
+         phone                         = $15,
+         website_url                   = $16,
+         latitude                      = $17,
+         longitude                     = $18,
          -- accreditation
-         affiliation_or_board          = $16,
-         accreditation_body_name       = $17,
-         accreditation_expiry_date     = $18,
-         accreditation_certificate_url = $19,
+         affiliation_or_board          = $19,
+         accreditation_body_name       = $20,
+         accreditation_expiry_date     = $21,
+         accreditation_certificate_url = $22,
          -- operations
-         total_student_capacity        = $20,
-         medium_of_instruction         = $21,
-         operating_hours               = $22,
+         total_student_capacity        = $23,
+         current_enrollment            = $24,
+         medium_of_instruction         = $25,
+         operating_hours               = $26,
+         operating_hours_weekday       = $27::jsonb,
+         operating_hours_weekend       = $28::jsonb,
          -- point of contact
-         master_name                   = $23,
-         master_role                   = $24,
-         master_email                  = $25,
-         master_phone_number           = $26,
+         master_name                   = $29,
+         master_role                   = $30,
+         master_email                  = $31,
+         master_phone_number           = $32,
          -- lifecycle
          onboarding_status             = 'pending_approval',
          status                        = 'pending'
-       WHERE owner_user_id = $27
+       WHERE owner_user_id = $33
        RETURNING *`,
       [
         name,
@@ -339,6 +398,7 @@ exports.setupAcademy = async (req, res) => {
         registration_number,
         date_of_establishment || null,
         logo_url || null,
+        safeSkills,
 
         address,
         city || null,
@@ -348,6 +408,8 @@ exports.setupAcademy = async (req, res) => {
         email,
         phone,
         website_url || null,
+        safeLatitude,
+        safeLongitude,
 
         affiliation_or_board || null,
         accreditation_body_name || null,
@@ -355,8 +417,11 @@ exports.setupAcademy = async (req, res) => {
         accreditation_certificate_url || null,
 
         total_student_capacity != null ? Number(total_student_capacity) : null,
+        safeCurrentEnrollment,
         safeMedium,
         operating_hours || null,
+        safeHoursWeekday,
+        safeHoursWeekend,
 
         master_name,
         master_role || null,

@@ -4,6 +4,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import { useAuth } from '../../context/AuthContext';
 import apiClient from '../../api/client';
 import { colors } from '../../utils/styles';
+import { confirm } from '../../components/ConfirmDialog';
 
 export default function PendingApprovalScreen({ navigation }) {
   const { logout } = useAuth();
@@ -37,10 +38,29 @@ export default function PendingApprovalScreen({ navigation }) {
   );
 
   const handleLogout = () => {
-    Alert.alert('Logout', 'Are you sure?', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Logout', onPress: logout }
-    ]);
+    confirm({
+      title: 'Log out?',
+      message: 'You can sign back in any time to check your approval status.',
+      variant: 'destructive',
+      confirmText: 'Log out',
+      cancelText: 'Stay signed in',
+      onConfirm: () => {
+        // eslint-disable-next-line no-console
+        console.log('[PendingApproval] Logout confirmed');
+        try {
+          const result = logout && logout();
+          if (result && typeof result.catch === 'function') {
+            result.catch((e) =>
+              // eslint-disable-next-line no-console
+              console.warn('[PendingApproval] logout error', e?.message),
+            );
+          }
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.warn('[PendingApproval] logout threw', e?.message);
+        }
+      },
+    });
   };
 
   if (status === 'rejected') {
@@ -125,7 +145,18 @@ export default function PendingApprovalScreen({ navigation }) {
           </Text>
         </View>
 
-        <TouchableOpacity onPress={handleLogout} style={{ marginTop: 24 }}>
+        {/* Edit details — admin can still tweak the submitted form
+            until the super admin approves it. Tapping reopens the
+            5-step wizard with the previously-submitted values prefilled. */}
+        <TouchableOpacity
+          style={styles.editButton}
+          onPress={() => navigation.replace('SetupInstitution')}
+          activeOpacity={0.85}
+        >
+          <Text style={styles.editButtonText}>Edit my details</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity onPress={handleLogout} style={{ marginTop: 16 }}>
           <Text style={styles.logoutText}>Logout</Text>
         </TouchableOpacity>
       </View>
@@ -192,6 +223,25 @@ const styles = StyleSheet.create({
   contactEmail: { fontWeight: '700' },
 
   logoutText: { fontSize: 14, color: colors.danger },
+
+  // "Edit my details" CTA on the pending screen — visible while the
+  // institution is still waiting on super-admin approval.
+  editButton: {
+    marginTop: 16,
+    paddingVertical: 12,
+    paddingHorizontal: 28,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: colors.primary,
+    width: '100%',
+    alignItems: 'center',
+    backgroundColor: '#fff',
+  },
+  editButtonText: {
+    color: colors.primary,
+    fontSize: 14,
+    fontWeight: '700',
+  },
 
   // Rejected styles
   rejectedEmoji: { fontSize: 56, marginBottom: 16 },

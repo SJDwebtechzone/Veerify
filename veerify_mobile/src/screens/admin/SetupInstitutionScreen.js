@@ -20,44 +20,106 @@
 // phone, address, registration_number, master_name) until the product spec
 // finalises the new required list. Everything else is optional.
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView, Image,
   Alert, ActivityIndicator, StyleSheet, KeyboardAvoidingView, Platform,
+  BackHandler, PermissionsAndroid,
 } from 'react-native';
 import {
   ArrowLeft, ChevronRight, ChevronLeft, Check, Camera, FileText, Plus, Trash2,
-  Building2, MapPin, ShieldCheck, BarChart3, UserSquare, Calendar, X,
+  Building2, MapPin, ShieldCheck, BarChart3, UserSquare, Calendar, X, Clock,
 } from 'lucide-react-native';
 import { launchImageLibrary, launchCamera, } from 'react-native-image-picker';
 
+// Native modules. Metro's babel transform refuses computed-name
+// require() calls, so we use plain string literals. Wrapped in try/catch
+// so a temporarily-missing package surfaces as a runtime "setup required"
+// alert rather than a hard crash on the first call.
+
+let DocumentPicker = null;
+try {
+  // eslint-disable-next-line global-require
+  const mod = require('@react-native-documents/picker');
+  DocumentPicker = (mod && mod.default) || mod || null;
+} catch (e) {
+  DocumentPicker = null;
+}
+
+let Geolocation = null;
+try {
+  // eslint-disable-next-line global-require
+  const mod = require('react-native-geolocation-service');
+  Geolocation = (mod && mod.default) || mod || null;
+} catch (e) {
+  Geolocation = null;
+}
+
 import apiClient from '../../api/client';
+import { confirm } from '../../components/ConfirmDialog';
+
+// Certificate upload rules — PDF only, capped at 2 MB to keep
+// onboarding/upload latency low.
+const CERT_MAX_SIZE_MB = 2;
+const CERT_MAX_SIZE_BYTES = CERT_MAX_SIZE_MB * 1024 * 1024;
 
 // ─── Static lists ──────────────────────────────────────────────────────
 // Institution_Type is now a free-text field with tap-to-fill suggestions
 // (combobox pattern). Owners can pick a common type or type anything custom.
-const INSTITUTION_TYPE_SUGGESTIONS = [
-  'School', 'College', 'Academy', 'Training Center',
-  'Karate', 'Silambam', 'Taekwondo', 'Boxing', 'Muay Thai',
-  'BJJ (Brazilian Jiu-Jitsu)', 'Judo', 'Kung Fu', 'MMA',
-  'Self Defense', 'Kalaripayattu',
+// Institution type is now a single-select from a fixed three-option list.
+// Each entry has a short caption to clarify the distinction at a glance.
+const INSTITUTION_TYPE_OPTIONS = [
+  {
+    value: 'School',
+    caption: 'Affiliated educational institution offering martial arts.',
+  },
+  {
+    value: 'Training Center',
+    caption: 'Dedicated academy or dojo running coaching programs.',
+  },
+  {
+    value: 'Association',
+    caption: 'Federation, club, or governing body for the sport.',
+  },
+];
+
+// Martial-arts skills the academy teaches. Multi-select chips — owners can
+// tick as many as apply. "Other" lets them add a custom one.
+const SKILL_OPTIONS = [
+  'Karate',
+  'Taekwondo',
+  'Kung Fu',
+  'Judo',
+  'Boxing',
+  'Muay Thai',
+  'Brazilian Jiu-Jitsu (BJJ)',
+  'MMA',
+  'Yoga',
+  'Silambam',
+  'Kalaripayattu',
+  'Aikido',
+  'Krav Maga',
+  'Kickboxing',
+  'Self Defense',
 ];
 
 const BOARDS = [
   'CBSE', 'ICSE', 'State Board', 'IB', 'Cambridge (IGCSE)', 'University', 'Other',
 ];
 
+// Affiliation / board scope. Single-select dropdown with two options
+// on the Accreditation step.
+const AFFILIATION_OPTIONS = ['State', 'National'];
+
 const MEDIUMS = [
   'English', 'Tamil', 'Hindi', 'Telugu', 'Kannada', 'Malayalam',
   'Marathi', 'Bengali', 'Gujarati', 'Punjabi',
 ];
 
-const OPERATING_HOURS = [
-  'Morning', 'Afternoon', 'Evening', 'Full Day', 'Weekends Only', 'Custom',
-];
+// (Legacy preset list. Replaced by per-day time-slot editor in StepOperations.)
 
 const MASTER_ROLES = [
-  'Principal', 'Director', 'Admin', 'Head Coach', 'Founder', 'Owner', 'Other',
+   'Director', 'Admin', 'Head Coach', 'Founder',  'Other',
 ];
 
 const STEPS = [
@@ -79,23 +141,221 @@ const SURFACE = '#FFFFFF';
 const BG = '#F4F4F8';
 const BORDER = '#E5E7EB';
 
-const blankBranch = () => ({ name: '', address: '', city: '', pincode: '' });
+// Each branch carries the postal fields the wizard already collected,
+// plus latitude / longitude that the student-side "nearby academies"
+// search needs. lat/lng are filled either by the "Use my current
+// location" button or — if the device denies GPS — left null, in which
+// case the branch still appears in the list but won't surface in the
+// student's distance search until coords are added later from the
+// admin's Branches screen.
+const blankBranch = () => ({
+  name: '', address: '', city: '', pincode: '',
+  latitude: null, longitude: null,
+});
+
+// Anything at or above this threshold counts as "Unlimited" on a plan.
+// Mirrors the convention used by PlanSelectionScreen.
+const UNLIMITED_THRESHOLD = 999;
 
 export default function SetupInstitutionScreen({ navigation }) {
   const [stepIdx, setStepIdx] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [uploading, setUploading] = useState(false);
 
+  // Plan ceiling — looked up at mount so the Operations step can disable
+  // the capacity field on Unlimited and block over-the-limit values on
+  // finite plans. While loading we leave it as null (no constraint), so
+  // a flaky network never blocks the form.
+  // Shape: { name, max_students, is_unlimited } or null.
+  const [planInfo, setPlanInfo] = useState(null);
+
+  // Edit mode — true when the admin already submitted the form and is
+  // re-opening it from the pending-approval screen. Changes the header
+  // copy ("Update Details") and the submit CTA wording.
+  const [isEditMode, setIsEditMode] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        // Pull the institution's selected plan_id and the full plan list
+        // in parallel; pick the matching plan locally.
+        const [statusRes, plansRes] = await Promise.all([
+          apiClient.get('/onboarding/my-status'),
+          apiClient.get('/plans'),
+        ]);
+        const inst = statusRes?.data?.institution;
+        const rawPlanId = inst?.plan_id;
+        const plansList = plansRes?.data?.plans || [];
+        // plan_id can come back as number or string depending on the
+        // serializer — coerce both sides so the find() actually matches.
+        const planId = rawPlanId == null ? null : String(rawPlanId);
+        const plan = plansList.find((p) => String(p.id) === planId);
+
+        // ── Prefill the form from the existing institution row, if any.
+        // This kicks in whenever the wizard is reopened (Edit Details flow
+        // from the Pending Approval screen). Any fields the DB doesn't have
+        // a column for yet (e.g. skills, structured operating-hour slots)
+        // simply fall back to their empty defaults.
+        // Only treat this as edit-mode when the institution has actually
+        // been submitted at least once. 'registered' (just signed up) and
+        // 'plan_selected' (picked a plan but never opened the form) both
+        // count as "fresh" — show a clean form for them.
+        const EDITABLE_STATUSES = ['pending_approval', 'approved', 'active', 'rejected'];
+        if (!cancelled && inst && EDITABLE_STATUSES.includes(inst.onboarding_status)) {
+          setIsEditMode(true);
+          let parsedBranches = [];
+          try {
+            const raw = inst.branches;
+            if (Array.isArray(raw)) parsedBranches = raw;
+            else if (typeof raw === 'string' && raw.trim()) parsedBranches = JSON.parse(raw);
+          } catch (_) { parsedBranches = []; }
+
+          // Institution type — must match one of the 3 single-select
+          // options. If the legacy row carried a free-text value (e.g.
+          // "Karate", "Academy"), leave it blank so the admin picks one.
+          const rawType = Array.isArray(inst.institution_types) && inst.institution_types[0]
+            ? inst.institution_types[0]
+            : (inst.institution_type || '');
+          const VALID_TYPES = ['School', 'Training Center', 'Association'];
+          const primaryType = VALID_TYPES.includes(rawType) ? rawType : '';
+
+          // Skills are the new required Step 1 field. If the row predates
+          // migration 028 the column will be null — fall back to empty
+          // so the validator clearly prompts the admin to pick at least one.
+          const safeSkills = Array.isArray(inst.skills) ? inst.skills : [];
+
+          // Structured operating-hour slots (jsonb). If the row only has
+          // the legacy text summary in `operating_hours`, seed one blank
+          // editable slot per group so the admin sees the editor instead
+          // of an empty area.
+          const safeWeekday = Array.isArray(inst.operating_hours_weekday) && inst.operating_hours_weekday.length
+            ? inst.operating_hours_weekday.map((s) => ({
+                start: s?.start || '', end: s?.end || '',
+              }))
+            : [{ start: '', end: '' }];
+          const safeWeekend = Array.isArray(inst.operating_hours_weekend) && inst.operating_hours_weekend.length
+            ? inst.operating_hours_weekend.map((s) => ({
+                start: s?.start || '', end: s?.end || '',
+              }))
+            : [{ start: '', end: '' }];
+
+          setForm((prev) => ({
+            ...prev,
+            // Core
+            name: inst.name || '',
+            brand_name: inst.brand_name || '',
+            institution_type: primaryType,
+            skills: safeSkills,
+            skills_other: '',
+            registration_number: inst.registration_number || '',
+            date_of_establishment: inst.date_of_establishment
+              ? String(inst.date_of_establishment).slice(0, 10) : '',
+            logo_url: inst.logo_url || '',
+            // Contact
+            address: inst.address || '',
+            city: inst.city || '',
+            pincode: inst.pincode || '',
+            branches: parsedBranches.map((b) => ({
+              name: b?.name || '', address: b?.address || '',
+              city: b?.city || '', pincode: b?.pincode || '',
+            })),
+            email: inst.email || '',
+            phone: inst.phone || '',
+            website_url: inst.website_url || '',
+            latitude:  inst.latitude  != null ? String(inst.latitude)  : '',
+            longitude: inst.longitude != null ? String(inst.longitude) : '',
+            location_accuracy_m: '',
+            // Accreditation
+            affiliation_or_board: inst.affiliation_or_board || '',
+            accreditation_body_name: inst.accreditation_body_name || '',
+            accreditation_expiry_date: inst.accreditation_expiry_date
+              ? String(inst.accreditation_expiry_date).slice(0, 10) : '',
+            accreditation_certificate_url: inst.accreditation_certificate_url || '',
+            accreditation_certificate_name: inst.accreditation_certificate_url
+              ? 'certificate.pdf' : '',
+            // Operations
+            total_student_capacity: inst.total_student_capacity != null
+              ? String(inst.total_student_capacity) : '',
+            current_enrollment: inst.current_enrollment != null
+              ? String(inst.current_enrollment) : '',
+            medium_of_instruction: Array.isArray(inst.medium_of_instruction)
+              ? inst.medium_of_instruction : [],
+            operating_hours_weekday: safeWeekday,
+            operating_hours_weekend: safeWeekend,
+            // Master / Point of contact
+            master_name: inst.master_name || '',
+            master_role: inst.master_role || '',
+            master_email: inst.master_email || '',
+            master_phone_number: inst.master_phone_number || '',
+          }));
+        }
+
+        if (cancelled || !plan) return;
+
+        const maxStudents = Number(plan.max_students);
+        // Treat a missing / zero / negative cap as "no enforceable ceiling"
+        // (likely a misconfigured plan or an Unlimited tier without an
+        // explicit number). Without this the check below would fire for
+        // every non-zero enrollment and force a bogus upgrade prompt.
+        const noCeiling = !Number.isFinite(maxStudents) || maxStudents <= 0;
+        const isUnlimited = noCeiling || maxStudents >= UNLIMITED_THRESHOLD;
+
+        // eslint-disable-next-line no-console
+        console.log('[Setup] plan info →', {
+          plan_id: planId,
+          plan_name: plan.name,
+          max_students_raw: plan.max_students,
+          max_students_parsed: maxStudents,
+          is_unlimited: isUnlimited,
+        });
+
+        setPlanInfo({
+          name: plan.name || 'Selected plan',
+          max_students: isUnlimited ? 0 : maxStudents,
+          is_unlimited: isUnlimited,
+        });
+      } catch (err) {
+        // Silent — Operations step works with no plan info (no ceiling).
+        console.warn('[Setup] plan lookup failed:', err?.message);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Hardware back-button handler. We use a ref so the listener always
+  // calls the latest goBack closure — registered ONCE at mount, no
+  // deps, no re-binding. The ref is updated below after goBack is
+  // defined (effects run after render so this is always populated).
+  const goBackRef = useRef(() => {});
+  useEffect(() => {
+    const handler = () => {
+      try { goBackRef.current && goBackRef.current(); } catch (e) { /* noop */ }
+      return true;
+    };
+    const sub = BackHandler.addEventListener('hardwareBackPress', handler);
+    return () => {
+      if (sub && typeof sub.remove === 'function') {
+        sub.remove();
+      } else if (typeof BackHandler.removeEventListener === 'function') {
+        BackHandler.removeEventListener('hardwareBackPress', handler);
+      }
+    };
+  }, []);
+
   // ── Form state ────────────────────────────────────────────────────────
   const [form, setForm] = useState({
     // Core
     name: '',
     brand_name: '',
-    // institution_types is the canonical multi-select list of types. Owners
-    // can pick any combination of suggested types or type their own (each
-    // entry becomes a removable chip).
-    institution_types: [],
-    institution_type_input: '', // text input draft (not persisted to server)
+    // institution_type is a single-select from the fixed three-option list:
+    // School / Training Center / Association.
+    institution_type: '',
+    // skills is a multi-select list of martial-arts disciplines the
+    // academy teaches (Karate, Kung Fu, BJJ, etc.). Plus an optional
+    // free-text "other" the owner can add.
+    skills: [],
+    skills_other: '',
     registration_number: '',
     date_of_establishment: '', // ISO date string (YYYY-MM-DD), set by the inline calendar
     logo_url: '',
@@ -105,15 +365,24 @@ export default function SetupInstitutionScreen({ navigation }) {
     address: '',
     city: '',
     pincode: '',
-    no_of_branches: '',
+    // Geographic coordinates of the head office, captured via "Use my
+    // current location" on Step 2. Stored as decimal degrees (e.g.
+    // 13.0827 N, 80.2707 E). Powers the student-side nearby search.
+    latitude: '',
+    longitude: '',
+    location_accuracy_m: '',  // metres (informational; not sent to server)
+    // no_of_branches is now derived from `branches.length` at submit time
+    // (always 1 + branches.length). We keep the key for API back-compat
+    // but no longer maintain it as editable state.
     branches: [],
     email: '',
     phone: '',
     website_url: '',
 
     // Accreditation
+    // Affiliation scope — 'State' or 'National'. Replaces the older
+    // free-text field. The legacy *_custom key is gone.
     affiliation_or_board: '',
-    affiliation_or_board_custom: '',
     accreditation_body_name: '',
     accreditation_expiry_date: '',
     accreditation_certificate_url: '',
@@ -123,8 +392,12 @@ export default function SetupInstitutionScreen({ navigation }) {
     total_student_capacity: '',
     current_enrollment: '',
     medium_of_instruction: [],
-    operating_hours: '',
-    operating_hours_custom: '',
+    // Operating hours are now split into two day-groups (Mon–Fri and
+    // Sat–Sun). Each group is an array of `{ start, end }` slots in
+    // 24-hour "HH:MM" form. Admins can add multiple slots per group
+    // (e.g. a morning batch and an evening batch).
+    operating_hours_weekday: [{ start: '', end: '' }],
+    operating_hours_weekend: [{ start: '', end: '' }],
 
     // Point of contact
     master_name: '',
@@ -139,6 +412,12 @@ export default function SetupInstitutionScreen({ navigation }) {
   // ── Logo / certificate uploads ────────────────────────────────────────
   const pickAndUpload = (kind) => {
     // kind: 'logo' | 'cert'
+    if (kind === 'cert') {
+      // Certificate is PDF-only — skip the gallery/camera prompt and open
+      // the system document picker directly.
+      pickCertPdf();
+      return;
+    }
     Alert.alert(
       kind === 'logo' ? 'Upload Brand Logo' : 'Upload Certificate',
       'Choose how to upload:',
@@ -148,6 +427,58 @@ export default function SetupInstitutionScreen({ navigation }) {
         { text: 'Cancel',  style: 'cancel' },
       ],
     );
+  };
+
+  // Native document picker — PDF only, max 2 MB.
+  const pickCertPdf = async () => {
+    if (!DocumentPicker) {
+      Alert.alert(
+        'Setup required',
+        'PDF uploads need the document picker module. Please run:\n\n' +
+        '  npm install @react-native-documents/picker\n\n' +
+        'then rebuild (cd android && ./gradlew clean && cd .. && \n' +
+        'npx react-native run-android). On iOS, also pod install.',
+      );
+      return;
+    }
+    try {
+      const res = await DocumentPicker.pickSingle({
+        type: [DocumentPicker.types.pdf],
+        copyTo: 'cachesDirectory',
+      });
+
+      // Belt-and-braces: extension + mime-type check (some Android pickers
+      // ignore the type filter and surface non-PDF files).
+      const name = res.name || '';
+      const looksLikePdf =
+        /\.pdf$/i.test(name) ||
+        (res.type || '').toLowerCase() === 'application/pdf';
+      if (!looksLikePdf) {
+        Alert.alert('PDF only', 'Please pick a .pdf file for your certificate.');
+        return;
+      }
+      if (typeof res.size === 'number' && res.size > CERT_MAX_SIZE_BYTES) {
+        Alert.alert(
+          'File too large',
+          `Maximum allowed size is ${CERT_MAX_SIZE_MB} MB. Please pick a smaller PDF.`,
+        );
+        return;
+      }
+
+      await uploadAsset(
+        {
+          uri: res.fileCopyUri || res.uri,
+          type: 'application/pdf',
+          fileName: name || 'certificate.pdf',
+          fileSize: res.size,
+        },
+        'cert',
+      );
+    } catch (err) {
+      if (DocumentPicker.isCancel?.(err)) return;
+      console.warn('pickCertPdf error:', err);
+      Alert.alert('Pick failed', err?.message || 'Could not open the file picker.');
+    }
   };
 
   const fromGallery = (kind) => {
@@ -188,17 +519,17 @@ export default function SetupInstitutionScreen({ navigation }) {
         });
         set('logo_url', resp.data.logo_url);
       } else {
-        // Generic uploader for accreditation certificate (image OR pdf).
+        // PDF-only accreditation certificate.
         fd.append('file', {
           uri: asset.uri,
-          type: asset.type || 'image/jpeg',
-          name: asset.fileName || 'certificate.jpg',
+          type: asset.type || 'application/pdf',
+          name: asset.fileName || 'certificate.pdf',
         });
         const resp = await apiClient.post('/uploads', fd, {
           headers: { 'Content-Type': 'multipart/form-data' },
         });
         set('accreditation_certificate_url', resp.data.url);
-        set('accreditation_certificate_name', asset.fileName || 'certificate');
+        set('accreditation_certificate_name', asset.fileName || 'certificate.pdf');
       }
     } catch (err) {
       console.error('Upload error:', err?.response?.data || err.message);
@@ -224,8 +555,11 @@ export default function SetupInstitutionScreen({ navigation }) {
     switch (idx) {
       case 0: {
         if (!form.name?.trim()) return 'Institution Name is required';
-        if (!form.institution_types?.length) {
-          return 'Add at least one Institution Type';
+        if (!form.institution_type) {
+          return 'Please select an Institution Type';
+        }
+        if (!form.skills?.length) {
+          return 'Please select at least one Skill';
         }
         if (!form.registration_number?.trim()) return 'Registration Number is required';
         return null;
@@ -241,6 +575,19 @@ export default function SetupInstitutionScreen({ navigation }) {
         }
         return null;
       }
+      case 3: {
+        // Only Current Enrollment is plan-bound; Total Student Capacity
+        // is the physical capacity of the institution and not constrained
+        // by the SaaS plan tier.
+        if (planInfo && !planInfo.is_unlimited) {
+          const max = planInfo.max_students;
+          const enr = parseInt(form.current_enrollment || '0', 10) || 0;
+          if (enr > max) {
+            return `Current Enrollment (${enr}) is more than your ${planInfo.name} plan allows (${max}). Upgrade to Unlimited to add more students.`;
+          }
+        }
+        return null;
+      }
       case 4: {
         if (!form.master_name?.trim()) return 'Master Name is required';
         if (form.master_email && !/\S+@\S+\.\S+/.test(form.master_email)) {
@@ -248,14 +595,89 @@ export default function SetupInstitutionScreen({ navigation }) {
         }
         return null;
       }
-      // Steps 2 (accreditation) and 3 (operations) have no required fields
-      // yet — the spec marks them as fill-when-available.
+      // Step 2 (accreditation) has no required fields yet.
       default:
         return null;
     }
   };
 
+  // Friendlier prompt for Step 3 — when the user overshoots the plan
+  // ceiling we want two-button "Edit number" vs "Upgrade plan" choice,
+  // not a flat Alert.
+  const showOverLimitAlert = (label, entered) => {
+    confirm({
+      title: 'Plan limit reached',
+      message:
+        `${label} is ${entered}, but your ${planInfo.name} plan only allows ${planInfo.max_students} students. ` +
+        `Reduce the number, or upgrade to the Unlimited plan.`,
+      variant: 'warning',
+      confirmText: 'Upgrade plan',
+      cancelText: 'Edit number',
+      onConfirm: () => {
+        try { navigation.navigate('PlanSelection'); } catch { /* no-op */ }
+      },
+    });
+  };
+
+  // True if a branch card has no detail filled in at all.
+  const isBranchEmpty = (b) =>
+    !b?.name?.trim() &&
+    !b?.address?.trim() &&
+    !b?.city?.trim() &&
+    !b?.pincode?.trim();
+
+  // Indices (1-based) of branch cards that the user opened but left blank.
+  const getEmptyBranchPositions = () =>
+    form.branches
+      .map((b, i) => (isBranchEmpty(b) ? i + 1 : null))
+      .filter((n) => n !== null);
+
+  // Drop every blank branch card from the array. Useful when the user picks
+  // "Keep count at 1" in the empty-branch prompt.
+  const removeEmptyBranches = () => {
+    set('branches', form.branches.filter((b) => !isBranchEmpty(b)));
+  };
+
   const goNext = () => {
+    // On the Contact step, guard against half-added branches. If the user
+    // tapped "Add branch" but didn't fill anything in, ask whether they
+    // want to fill the details or drop the empty card (so the live count
+    // returns to 1).
+    if (stepIdx === 1) {
+      const emptyPositions = getEmptyBranchPositions();
+      if (emptyPositions.length > 0) {
+        const label = emptyPositions.length === 1
+          ? `Branch ${emptyPositions[0]} is empty.`
+          : `Branches ${emptyPositions.join(', ')} are empty.`;
+        Alert.alert(
+          'Empty branch',
+          `${label} Please enter the details, or remove the empty branch so the count returns to 1.`,
+          [
+            { text: 'Fill in details', style: 'cancel' },
+            {
+              text: emptyPositions.length === 1 ? 'Remove empty branch' : 'Remove empty branches',
+              style: 'destructive',
+              onPress: removeEmptyBranches,
+            },
+          ],
+        );
+        return;
+      }
+    }
+
+    // Step 3 — over-limit guard. We only check Current Enrollment against
+    // the plan ceiling, because that's the actual SaaS record count.
+    // Total Student Capacity is the institution's physical space and
+    // shouldn't be bound by which plan tier they picked.
+    if (stepIdx === 3 && planInfo && !planInfo.is_unlimited) {
+      const max = planInfo.max_students;
+      const enr = parseInt(form.current_enrollment || '0', 10) || 0;
+      if (enr > max) {
+        showOverLimitAlert('Current Enrollment', enr);
+        return;
+      }
+    }
+
     const err = validateStep(stepIdx);
     if (err) {
       Alert.alert('Required', err);
@@ -268,21 +690,45 @@ export default function SetupInstitutionScreen({ navigation }) {
     }
   };
 
+  // Performs the actual back action from Step 0 — either pops the nav
+  // stack or jumps back to PlanSelection if there's nothing behind us.
+  const leaveSetup = () => {
+    if (navigation.canGoBack()) {
+      navigation.goBack();
+    } else {
+      try { navigation.navigate('PlanSelection'); } catch { /* no-op */ }
+    }
+  };
+
   const goBack = () => {
     if (stepIdx === 0) {
-      // SetupInstitution is mounted as the initial route after plan-select,
-      // so the stack often has no entry behind us. Prefer goBack() when
-      // available; otherwise jump to PlanSelection so the admin can change
-      // their plan choice instead of being stranded with a dead button.
-      if (navigation.canGoBack()) {
-        navigation.goBack();
-      } else {
-        try { navigation.navigate('PlanSelection'); } catch { /* no-op */ }
-      }
+      // First step — leaving here exits the entire registration flow, so
+      // confirm before discarding whatever they've typed so far.
+      Alert.alert(
+        isEditMode ? 'Discard changes?' : 'Leave registration?',
+        isEditMode
+          ? 'Any edits you\'ve made will be lost. Your previously-submitted details stay on file until super-admin approval.'
+          : 'You\'re still on the first step. If you go back now, any details you\'ve entered will be discarded and you\'ll return to the plan selection screen.',
+        [
+          { text: 'Stay here', style: 'cancel' },
+          {
+            text: isEditMode ? 'Discard' : 'Leave',
+            style: 'destructive',
+            onPress: leaveSetup,
+          },
+        ],
+        { cancelable: true },
+      );
     } else {
       setStepIdx(stepIdx - 1);
     }
   };
+
+  // Sync the ref so the hardware-back listener always invokes the
+  // latest goBack closure (which sees the current stepIdx). Updating
+  // a ref during render is allowed because no one reads it during
+  // render — only the back-press handler does, asynchronously.
+  goBackRef.current = goBack;
 
   // ── Submit ───────────────────────────────────────────────────────────
   const submit = async () => {
@@ -302,10 +748,19 @@ export default function SetupInstitutionScreen({ navigation }) {
         // core
         name: form.name.trim(),
         brand_name: form.brand_name.trim() || null,
-        // Send the canonical array. Backend also sets the legacy
-        // institution_type column to the first entry for back-compat.
-        institution_types: form.institution_types,
-        institution_type: form.institution_types[0] || null,
+        // Single-select institution type (School / Training Center / Association).
+        // We also send a 1-element institution_types array so the existing
+        // backend code paths (which still read the array column for stats /
+        // filters) keep working without a schema migration.
+        institution_type: form.institution_type || null,
+        institution_types: form.institution_type ? [form.institution_type] : [],
+        // Skills the academy teaches (multi-select). If the owner typed an
+        // additional free-text skill in "other", we fold it into the array
+        // before sending.
+        skills: [
+          ...form.skills,
+          ...(form.skills_other.trim() ? [form.skills_other.trim()] : []),
+        ],
         registration_number: form.registration_number.trim(),
         date_of_establishment: form.date_of_establishment || null,
         logo_url: form.logo_url || null,
@@ -314,11 +769,24 @@ export default function SetupInstitutionScreen({ navigation }) {
         address: form.address.trim(),
         city: form.city.trim() || null,
         pincode: form.pincode.trim() || null,
-        no_of_branches: form.no_of_branches ? Number(form.no_of_branches) : 0,
+        // Head office (+1) plus every branch that has at least one detail
+        // filled in. Empty branch cards (user tapped "Add" but typed
+        // nothing) don't count toward the total or get sent to the API.
+        no_of_branches: 1 + form.branches.filter((b) =>
+          (b?.name?.trim()) ||
+          (b?.address?.trim()) ||
+          (b?.city?.trim()) ||
+          (b?.pincode?.trim())
+        ).length,
         branches: form.branches.filter((b) => b.address?.trim()),
         email: form.email.trim(),
         phone: form.phone.trim(),
         website_url: form.website_url.trim() || null,
+        // Head-office GPS, used by the student-side nearby-academies
+        // search. Empty strings get coerced to nulls so the SQL UPDATE
+        // doesn't choke on the NUMERIC column.
+        latitude:  form.latitude  ? Number(form.latitude)  : null,
+        longitude: form.longitude ? Number(form.longitude) : null,
 
         // accreditation
         affiliation_or_board: (form.affiliation_or_board || '').trim() || null,
@@ -327,12 +795,29 @@ export default function SetupInstitutionScreen({ navigation }) {
         accreditation_certificate_url: form.accreditation_certificate_url || null,
 
         // operations
-        total_student_capacity: form.total_student_capacity
-          ? Number(form.total_student_capacity) : null,
+        // On an Unlimited plan we explicitly send null for capacity — the
+        // field is disabled in the UI, so any stale value left over from
+        // a previous plan choice should be cleared on save.
+        total_student_capacity: planInfo?.is_unlimited
+          ? null
+          : (form.total_student_capacity
+              ? Number(form.total_student_capacity)
+              : null),
         medium_of_instruction: form.medium_of_instruction,
-        operating_hours: form.operating_hours === 'Custom'
-          ? form.operating_hours_custom.trim() || null
-          : (form.operating_hours || null),
+        // Send only fully-filled slots so the backend doesn't get
+        // half-typed entries. We pass both the structured arrays AND a
+        // human-readable summary string for back-compat with anything
+        // that still reads the legacy `operating_hours` field.
+        operating_hours_weekday: form.operating_hours_weekday.filter(
+          (s) => s.start && s.end,
+        ),
+        operating_hours_weekend: form.operating_hours_weekend.filter(
+          (s) => s.start && s.end,
+        ),
+        operating_hours: formatOperatingHoursSummary(
+          form.operating_hours_weekday,
+          form.operating_hours_weekend,
+        ) || null,
 
         // master
         master_name: form.master_name.trim(),
@@ -375,8 +860,11 @@ export default function SetupInstitutionScreen({ navigation }) {
             <ArrowLeft size={20} color={TEXT} strokeWidth={2.2} />
           </TouchableOpacity>
           <View style={{ flex: 1 }}>
-            <Text style={styles.headerTitle}>Academy Setup</Text>
+            <Text style={styles.headerTitle}>
+              {isEditMode ? 'Edit Academy Details' : 'Academy Setup'}
+            </Text>
             <Text style={styles.headerSub}>
+              {isEditMode ? 'Editable until approval · ' : ''}
               Step {stepIdx + 1} of {STEPS.length} · {STEPS[stepIdx].label}
             </Text>
           </View>
@@ -452,7 +940,7 @@ export default function SetupInstitutionScreen({ navigation }) {
           />
         )}
         {stepIdx === 3 && (
-          <StepOperations form={form} set={set} />
+          <StepOperations form={form} set={set} planInfo={planInfo} />
         )}
         {stepIdx === 4 && (
           <StepMaster form={form} set={set} />
@@ -482,7 +970,9 @@ export default function SetupInstitutionScreen({ navigation }) {
           ) : (
             <>
               <Text style={styles.btnPrimaryText}>
-                {stepIdx === STEPS.length - 1 ? 'Submit' : 'Next'}
+                {stepIdx === STEPS.length - 1
+                  ? (isEditMode ? 'Save changes' : 'Submit')
+                  : 'Next'}
               </Text>
               {stepIdx === STEPS.length - 1 ? null : (
                 <ChevronRight size={18} color="#fff" strokeWidth={2.6} />
@@ -557,27 +1047,34 @@ function StepCore({ form, set, pickLogo, uploading }) {
       <Field
         label="Institution Type"
         required
-        hint="Add as many types as fit your institution. Type your own or tap a suggestion."
+        hint="Pick the option that best describes your institution."
       >
-        <MultiTypeInput
-          values={form.institution_types}
-          draft={form.institution_type_input}
-          onDraftChange={(v) => set('institution_type_input', v)}
-          onAdd={(raw) => {
-            const v = (raw || '').trim();
-            if (!v) return;
-            // Case-insensitive de-dupe
-            if (form.institution_types.some((t) => t.toLowerCase() === v.toLowerCase())) {
-              set('institution_type_input', '');
-              return;
-            }
-            set('institution_types', [...form.institution_types, v]);
-            set('institution_type_input', '');
+        <InstitutionTypeSelect
+          value={form.institution_type}
+          onChange={(v) => set('institution_type', v)}
+          options={INSTITUTION_TYPE_OPTIONS}
+        />
+      </Field>
+
+      <Field
+        label="Skills"
+        required
+        hint="Tap every martial-arts discipline you teach. You can add another below if it's not listed."
+      >
+        <SkillsMultiSelect
+          values={form.skills}
+          onToggle={(skill) => {
+            const has = form.skills.includes(skill);
+            set(
+              'skills',
+              has
+                ? form.skills.filter((s) => s !== skill)
+                : [...form.skills, skill],
+            );
           }}
-          onRemove={(idx) => {
-            set('institution_types', form.institution_types.filter((_, i) => i !== idx));
-          }}
-          suggestions={INSTITUTION_TYPE_SUGGESTIONS}
+          options={SKILL_OPTIONS}
+          other={form.skills_other}
+          onOtherChange={(v) => set('skills_other', v)}
         />
       </Field>
 
@@ -648,16 +1145,43 @@ function StepContact({ form, set, addBranch, updateBranch, removeBranch }) {
         </Field>
       </View>
 
-      <Field label="No. of Branches" hint="Total branches you operate, including the head office.">
-        <TextInput
-          style={styles.input}
-          placeholder="0"
-          placeholderTextColor={TEXT_LIGHT}
-          value={form.no_of_branches}
-          onChangeText={(v) => set('no_of_branches', v.replace(/[^0-9]/g, ''))}
-          keyboardType="numeric"
-          maxLength={3}
-        />
+      {/* Location capture — needed so the student-side "nearby academies"
+          search can sort institutions by distance. Stand inside the head
+          office and tap once. */}
+      <Field
+        label="Head Office Location"
+        hint="Tap to capture the GPS coordinates. Stand inside your head office for best accuracy."
+      >
+        <LocationCaptureCard form={form} set={set} />
+      </Field>
+
+      <Field label="No. of Branches" hint="Auto-calculated: 1 (head office) plus every branch with details below.">
+        {(() => {
+          // Only count branch cards that actually have something filled in
+          // — an empty "Add branch" card shouldn't bump the total.
+          const filledCount = form.branches.filter((b) =>
+            (b?.name?.trim()) ||
+            (b?.address?.trim()) ||
+            (b?.city?.trim()) ||
+            (b?.pincode?.trim())
+          ).length;
+          const total = 1 + filledCount;
+          return (
+            <View style={styles.branchCountCard}>
+              <View style={styles.branchCountIconWrap}>
+                <MapPin size={16} color={BRAND} strokeWidth={2.4} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.branchCountValue}>{total}</Text>
+                <Text style={styles.branchCountCaption}>
+                  {filledCount === 0
+                    ? 'Head office only'
+                    : `Head office + ${filledCount} branch${filledCount === 1 ? '' : 'es'}`}
+                </Text>
+              </View>
+            </View>
+          );
+        })()}
       </Field>
 
       <Field label="Branch Addresses" hint="Add any branches beyond your head office. Optional.">
@@ -764,19 +1288,17 @@ function StepAccreditation({ form, set, pickCert, uploading }) {
         sub="Optional. Helps students see that your academy is officially recognised."
       />
 
-      {/* Free-text affiliation/board: martial-arts federations vary so much
-          that a fixed pill list never quite fits. Admins can type whatever
-          best describes their accreditation. */}
+      {/* Affiliation scope dropdown — State or National. The federation /
+          body name goes in the dedicated field below. */}
       <Field
         label="Affiliation or Board"
-        hint="e.g. World Karate Federation, Khelo India, Sports Authority of India, your state board."
+        hint="Choose whether the affiliation is at the State or National level."
       >
-        <TextInput
-          style={styles.input}
-          placeholder="Type your affiliation"
-          placeholderTextColor={TEXT_LIGHT}
+        <SimpleDropdown
           value={form.affiliation_or_board}
-          onChangeText={(v) => set('affiliation_or_board', v)}
+          onChange={(v) => set('affiliation_or_board', v)}
+          options={AFFILIATION_OPTIONS}
+          placeholder="Select affiliation level"
         />
       </Field>
 
@@ -800,7 +1322,10 @@ function StepAccreditation({ form, set, pickCert, uploading }) {
         />
       </Field>
 
-      <Field label="Accreditation Certificate" hint="Upload a PDF or image of your certificate.">
+      <Field
+        label="Accreditation Certificate"
+        hint={`PDF only · Max ${CERT_MAX_SIZE_MB} MB *`}
+      >
         <TouchableOpacity
           style={[styles.upload, form.accreditation_certificate_url && styles.uploadDone]}
           onPress={pickCert}
@@ -820,18 +1345,21 @@ function StepAccreditation({ form, set, pickCert, uploading }) {
           ) : (
             <>
               <FileText size={26} color={BRAND} strokeWidth={2} />
-              <Text style={styles.uploadText}>Upload Certificate</Text>
-              <Text style={styles.uploadHint}>PDF, JPG or PNG · Up to 10MB</Text>
+              <Text style={styles.uploadText}>Upload PDF Certificate</Text>
+              <Text style={styles.uploadHint}>PDF only · Max {CERT_MAX_SIZE_MB} MB</Text>
             </>
           )}
         </TouchableOpacity>
+        <Text style={styles.fileRuleNote}>
+          * Only PDF files up to {CERT_MAX_SIZE_MB} MB are accepted.
+        </Text>
       </Field>
     </>
   );
 }
 
 // ─── Step 4: Operations ─────────────────────────────────────────────────
-function StepOperations({ form, set }) {
+function StepOperations({ form, set, planInfo }) {
   const toggleMedium = (m) => {
     const cur = new Set(form.medium_of_instruction);
     if (cur.has(m)) cur.delete(m);
@@ -846,22 +1374,79 @@ function StepOperations({ form, set }) {
         sub="Tell us about your day-to-day capacity. All optional."
       />
 
+      {/* Definitions note — clarifies the two capacity fields below so the
+          admin doesn't confuse seats-available with students-enrolled. */}
+      <View style={styles.opsNoteCard}>
+        <View style={styles.opsNoteIconWrap}>
+          <BarChart3 size={14} color={BRAND} strokeWidth={2.6} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.opsNoteTitle}>What these numbers mean</Text>
+          <Text style={styles.opsNoteBody}>
+            <Text style={styles.opsNoteLabel}>Total Student Capacity</Text>
+            {' '}— the maximum number of students your institution can
+            accommodate.
+          </Text>
+          <Text style={[styles.opsNoteBody, { marginTop: 4 }]}>
+            <Text style={styles.opsNoteLabel}>Current Enrollment</Text>
+            {' '}— how many students are currently learning at your
+            institution right now.
+          </Text>
+        </View>
+      </View>
+
+      {/* Plan badge — shows the active plan's student ceiling so the
+          admin knows what numbers to type in below. */}
+      {planInfo ? (
+        <View
+          style={[
+            styles.planBadge,
+            planInfo.is_unlimited && styles.planBadgeUnlimited,
+          ]}
+        >
+          <Text style={styles.planBadgeLabel}>{planInfo.name}</Text>
+          <Text style={styles.planBadgeValue}>
+            {planInfo.is_unlimited
+              ? 'Unlimited students'
+              : `Up to ${planInfo.max_students} students`}
+          </Text>
+        </View>
+      ) : null}
+
       <View style={styles.row}>
-        <Field label="Total Student Capacity" style={{ flex: 1, marginRight: 8 }}>
+        <Field
+          label="Total Student Capacity"
+          style={{ flex: 1, marginRight: 8 }}
+          hint={
+            planInfo?.is_unlimited
+              ? 'Disabled on Unlimited plans.'
+              : 'Your building / classroom capacity.'
+          }
+        >
           <TextInput
-            style={styles.input}
-            placeholder="500"
+            style={[
+              styles.input,
+              planInfo?.is_unlimited && styles.inputDisabled,
+            ]}
+            placeholder={planInfo?.is_unlimited ? 'Unlimited' : '500'}
             placeholderTextColor={TEXT_LIGHT}
-            value={form.total_student_capacity}
-            onChangeText={(v) => set('total_student_capacity', v.replace(/[^0-9]/g, ''))}
+            value={planInfo?.is_unlimited ? '' : form.total_student_capacity}
+            onChangeText={(v) =>
+              set('total_student_capacity', v.replace(/[^0-9]/g, ''))
+            }
             keyboardType="numeric"
             maxLength={6}
+            editable={!planInfo?.is_unlimited}
           />
         </Field>
         <Field
           label="Current Enrollment"
-          hint="Display-only snapshot."
           style={{ flex: 1, marginLeft: 8 }}
+          hint={
+            planInfo && !planInfo.is_unlimited
+              ? `Max ${planInfo.max_students}`
+              : undefined
+          }
         >
           <TextInput
             style={styles.input}
@@ -894,23 +1479,24 @@ function StepOperations({ form, set }) {
         </View>
       </Field>
 
-      <PillSelect
+      <Field
         label="Operating Hours"
-        options={OPERATING_HOURS}
-        value={form.operating_hours}
-        onChange={(v) => set('operating_hours', v)}
-      />
-      {form.operating_hours === 'Custom' && (
-        <Field label="Custom Hours">
-          <TextInput
-            style={styles.input}
-            placeholder="e.g. 6 AM - 10 AM and 5 PM - 9 PM"
-            placeholderTextColor={TEXT_LIGHT}
-            value={form.operating_hours_custom}
-            onChangeText={(v) => set('operating_hours_custom', v)}
-          />
-        </Field>
-      )}
+        hint="Add the time windows when classes run. Weekdays and weekends are kept separate. Tap Add slot to add more time windows (e.g. a morning and an evening batch)."
+      >
+        <DaySlotsBlock
+          title="Monday – Friday"
+          subtitle="Weekday hours"
+          slots={form.operating_hours_weekday}
+          onChange={(next) => set('operating_hours_weekday', next)}
+        />
+        <View style={{ height: 12 }} />
+        <DaySlotsBlock
+          title="Saturday – Sunday"
+          subtitle="Weekend hours"
+          slots={form.operating_hours_weekend}
+          onChange={(next) => set('operating_hours_weekend', next)}
+        />
+      </Field>
     </>
   );
 }
@@ -1010,84 +1596,313 @@ function Field({ label, hint, required, children, style }) {
   );
 }
 
-// ─── MultiTypeInput: chips + free-text + suggestions ───────────────────
+// ─── InstitutionTypeSelect: single-select 3-option card picker ─────────
 //
-// Layout:
-//   [Selected chip × ] [Selected chip × ] ...
-//   [____text input____] [Add]
-//   + Suggestion   + Suggestion   ...
-//
-// - Tap × on a chip to remove it
-// - Type in the input and tap Add (or hit return) to push a new chip
-// - Tap a suggestion to push that suggestion (and it disappears from
-//   the suggestion row since it's now selected)
-function MultiTypeInput({ values, draft, onDraftChange, onAdd, onRemove, suggestions }) {
-  const remaining = suggestions.filter(
-    (s) => !values.some((v) => v.toLowerCase() === s.toLowerCase()),
+// Stacked, full-width radio-style cards. Each card shows the option name
+// and a short caption explaining what that type means, with a brand-red
+// border + check badge when selected.
+function InstitutionTypeSelect({ value, onChange, options }) {
+  return (
+    <View style={{ gap: 10 }}>
+      {options.map((opt) => {
+        const selected = value === opt.value;
+        return (
+          <TouchableOpacity
+            key={opt.value}
+            onPress={() => onChange(opt.value)}
+            activeOpacity={0.85}
+            style={[
+              styles.typeOptionCard,
+              selected && styles.typeOptionCardSelected,
+            ]}
+          >
+            <View style={{ flex: 1, paddingRight: 12 }}>
+              <Text
+                style={[
+                  styles.typeOptionLabel,
+                  selected && styles.typeOptionLabelSelected,
+                ]}
+              >
+                {opt.value}
+              </Text>
+              <Text style={styles.typeOptionCaption}>{opt.caption}</Text>
+            </View>
+            <View
+              style={[
+                styles.typeOptionRadio,
+                selected && styles.typeOptionRadioSelected,
+              ]}
+            >
+              {selected ? (
+                <View style={styles.typeOptionRadioDot} />
+              ) : null}
+            </View>
+          </TouchableOpacity>
+        );
+      })}
+    </View>
   );
+}
+
+// ─── SkillsMultiSelect: tappable chips + free-text "other" ─────────────
+//
+// Wrapped row of chips for each skill in SKILL_OPTIONS. Tapping a chip
+// toggles whether it's in `values`. Selected chips are solid red; the
+// rest are soft outlined. Below the grid is a short "Other" text input
+// for any skill not on the list.
+function SkillsMultiSelect({ values, onToggle, options, other, onOtherChange }) {
   return (
     <View>
-      {/* Selected chips */}
-      {values.length > 0 ? (
-        <View style={[styles.chipRow, { marginBottom: 8 }]}>
-          {values.map((t, i) => (
-            <View key={`${t}-${i}`} style={styles.selectedChip}>
-              <Text style={styles.selectedChipText}>{t}</Text>
-              <TouchableOpacity
-                onPress={() => onRemove(i)}
-                style={styles.selectedChipClose}
-                hitSlop={6}
-                activeOpacity={0.7}
+      <View style={styles.chipRow}>
+        {options.map((opt) => {
+          const on = values.includes(opt);
+          return (
+            <TouchableOpacity
+              key={opt}
+              onPress={() => onToggle(opt)}
+              activeOpacity={0.85}
+              style={[styles.skillChip, on && styles.skillChipOn]}
+            >
+              {on ? (
+                <Check
+                  size={12}
+                  color="#fff"
+                  strokeWidth={3}
+                  style={{ marginRight: 4 }}
+                />
+              ) : null}
+              <Text
+                style={[styles.skillChipText, on && styles.skillChipTextOn]}
               >
-                <X size={11} color="#fff" strokeWidth={2.8} />
-              </TouchableOpacity>
-            </View>
-          ))}
+                {opt}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+
+      <View style={{ marginTop: 12 }}>
+        <Text style={styles.skillsOtherLabel}>Other (optional)</Text>
+        <TextInput
+          style={styles.input}
+          placeholder="e.g. Wing Chun, Capoeira…"
+          placeholderTextColor={TEXT_LIGHT}
+          value={other}
+          onChangeText={onOtherChange}
+          maxLength={60}
+        />
+      </View>
+    </View>
+  );
+}
+
+// ─── SimpleDropdown: trigger + inline menu (single-select) ─────────────
+//
+// Drop-in for any short list of choices. Closed: just a tap target showing
+// the current value (or placeholder) with a chevron. Open: an inline card
+// below with each option as a row; tapping picks + closes.
+// ─── LocationCaptureCard: "Use my current location" on Step 2 ──────────
+//
+// Tap once → asks for location permission → reads device GPS once →
+// writes latitude / longitude / accuracy into form state.
+// Tap again to refresh. Already-captured coordinates show a small green
+// confirmation row with the lat/lng and the accuracy estimate.
+function LocationCaptureCard({ form, set }) {
+  const [busy, setBusy] = useState(false);
+
+  const hasCoords = !!(form.latitude && form.longitude);
+  const lat = parseFloat(form.latitude);
+  const lng = parseFloat(form.longitude);
+  const accuracy = parseFloat(form.location_accuracy_m);
+
+  const capture = async () => {
+    if (!Geolocation) {
+      Alert.alert(
+        'Setup required',
+        'Capturing GPS needs the geolocation module. Please run:\n\n' +
+        '  npm install react-native-geolocation-service\n\n' +
+        'then rebuild (cd android && ./gradlew clean && cd .. && \n' +
+        'npx react-native run-android). On iOS, also pod install.\n\n' +
+        'Add this line inside <manifest> in\n' +
+        'android/app/src/main/AndroidManifest.xml:\n\n' +
+        '  <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />',
+      );
+      return;
+    }
+
+    // Android needs explicit runtime permission. iOS uses the Info.plist
+    // string + Geolocation.requestAuthorization('whenInUse').
+    if (Platform.OS === 'android') {
+      try {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+          {
+            title: 'Location permission',
+            message: 'Veerify needs your location to mark the head office position so students can find your academy nearby.',
+            buttonPositive: 'Allow',
+            buttonNegative: 'Deny',
+          },
+        );
+        if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
+          Alert.alert(
+            'Permission denied',
+            'Please grant location permission in Settings, then try again.',
+          );
+          return;
+        }
+      } catch (e) {
+        Alert.alert('Permission error', e?.message || 'Could not request permission.');
+        return;
+      }
+    } else if (typeof Geolocation.requestAuthorization === 'function') {
+      try { await Geolocation.requestAuthorization('whenInUse'); } catch (_) { /* noop */ }
+    }
+
+    setBusy(true);
+    try {
+      Geolocation.getCurrentPosition(
+        (pos) => {
+          const c = pos?.coords || {};
+          if (typeof c.latitude === 'number' && typeof c.longitude === 'number') {
+            set('latitude', String(c.latitude));
+            set('longitude', String(c.longitude));
+            set('location_accuracy_m', c.accuracy != null ? String(Math.round(c.accuracy)) : '');
+          } else {
+            Alert.alert('No location returned', 'The device didn\'t return a valid position. Try again outside or near a window.');
+          }
+          setBusy(false);
+        },
+        (err) => {
+          setBusy(false);
+          const msg = err?.message || 'Could not read GPS.';
+          if (err?.code === 1) {
+            Alert.alert(
+              'Permission denied',
+              'Please grant location permission in Settings, then try again.',
+            );
+          } else {
+            Alert.alert('Location error', msg);
+          }
+        },
+        {
+          enableHighAccuracy: true,
+          timeout: 15000,
+          maximumAge: 60000,
+        },
+      );
+    } catch (e) {
+      setBusy(false);
+      Alert.alert('Location error', e?.message || 'Unexpected error.');
+    }
+  };
+
+  const clear = () => {
+    set('latitude', '');
+    set('longitude', '');
+    set('location_accuracy_m', '');
+  };
+
+  return (
+    <View>
+      {hasCoords ? (
+        <View style={styles.locCard}>
+          <View style={styles.locIconWrap}>
+            <MapPin size={16} color="#10B981" strokeWidth={2.6} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.locTitle}>Location captured</Text>
+            <Text style={styles.locDetail}>
+              {lat.toFixed(5)}, {lng.toFixed(5)}
+              {Number.isFinite(accuracy) ? ` · ±${accuracy} m` : ''}
+            </Text>
+          </View>
+          <TouchableOpacity onPress={clear} hitSlop={8} style={styles.locClearBtn}>
+            <X size={14} color={TEXT_MUTED} strokeWidth={2.4} />
+          </TouchableOpacity>
         </View>
       ) : null}
 
-      {/* Text input + Add button */}
-      <View style={{ flexDirection: 'row', gap: 8 }}>
-        <TextInput
-          style={[styles.input, { flex: 1 }]}
-          placeholder={values.length === 0 ? 'e.g. Martial Arts Academy' : 'Add another type…'}
-          placeholderTextColor={TEXT_LIGHT}
-          value={draft}
-          onChangeText={onDraftChange}
-          onSubmitEditing={() => onAdd(draft)}
-          returnKeyType="done"
-          maxLength={80}
-        />
-        <TouchableOpacity
-          style={[styles.addTypeBtn, !draft?.trim() && { opacity: 0.5 }]}
-          onPress={() => onAdd(draft)}
-          disabled={!draft?.trim()}
-          activeOpacity={0.85}
-        >
-          <Plus size={14} color="#fff" strokeWidth={2.8} />
-          <Text style={styles.addTypeBtnText}>Add</Text>
-        </TouchableOpacity>
-      </View>
+      <TouchableOpacity
+        style={[styles.locBtn, busy && { opacity: 0.7 }]}
+        onPress={capture}
+        disabled={busy}
+        activeOpacity={0.85}
+      >
+        {busy ? (
+          <ActivityIndicator size="small" color="#fff" />
+        ) : (
+          <MapPin size={14} color="#fff" strokeWidth={2.6} />
+        )}
+        <Text style={styles.locBtnText}>
+          {busy
+            ? 'Reading GPS…'
+            : hasCoords
+              ? 'Refresh my location'
+              : 'Use my current location'}
+        </Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
 
-      {/* Suggestion pills */}
-      {remaining.length > 0 ? (
-        <View style={[styles.chipRow, { marginTop: 8 }]}>
-          {remaining.map((opt) => (
-            <TouchableOpacity
-              key={opt}
-              style={styles.suggestChip}
-              onPress={() => onAdd(opt)}
-              activeOpacity={0.85}
-            >
-              <Plus
-                size={11}
-                color={BRAND}
-                strokeWidth={2.6}
-                style={{ marginRight: 3 }}
-              />
-              <Text style={styles.suggestChipText}>{opt}</Text>
-            </TouchableOpacity>
-          ))}
+function SimpleDropdown({ value, onChange, options, placeholder = 'Select…' }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <View>
+      <TouchableOpacity
+        style={styles.dropdownTrigger}
+        onPress={() => setOpen((o) => !o)}
+        activeOpacity={0.85}
+      >
+        <Text
+          style={[
+            styles.dropdownTriggerText,
+            !value && { color: TEXT_LIGHT, fontWeight: '500' },
+          ]}
+        >
+          {value || placeholder}
+        </Text>
+        <ChevronRight
+          size={14}
+          color={TEXT_MUTED}
+          strokeWidth={2.4}
+          style={{ transform: [{ rotate: open ? '90deg' : '0deg' }] }}
+        />
+      </TouchableOpacity>
+
+      {open ? (
+        <View style={styles.dropdownMenu}>
+          {options.map((opt, i) => {
+            const isSel = value === opt;
+            const isLast = i === options.length - 1;
+            return (
+              <TouchableOpacity
+                key={opt}
+                style={[
+                  styles.dropdownItem,
+                  !isLast && styles.dropdownItemDivider,
+                  isSel && styles.dropdownItemSelected,
+                ]}
+                onPress={() => {
+                  onChange(opt);
+                  setOpen(false);
+                }}
+                activeOpacity={0.85}
+              >
+                <Text
+                  style={[
+                    styles.dropdownItemText,
+                    isSel && styles.dropdownItemTextSelected,
+                  ]}
+                >
+                  {opt}
+                </Text>
+                {isSel ? (
+                  <Check size={14} color={BRAND} strokeWidth={2.8} />
+                ) : null}
+              </TouchableOpacity>
+            );
+          })}
         </View>
       ) : null}
     </View>
@@ -1116,19 +1931,19 @@ function PillSelect({ label, options, value, onChange, required }) {
   );
 }
 
-// ─── DateField: trigger button + inline calendar ────────────────────────
+// ─── DateField: trigger button + 3-wheel scroll picker ─────────────────
 //
-// Tap the field to expand a Material-style month grid. Header has < / > to
-// step months and tappable month/year labels that flip the body to a
-// month grid (12 buttons) or year grid (paginated 12 at a time).
+// Replaces the old calendar grid with a Day | Month | Year wheel picker
+// (iOS-style) so that going back ~20 years takes a single flick instead
+// of clicking the year arrow dozens of times. Each column is its own
+// snapping ScrollView; the middle row is highlighted as the current
+// selection. Tap "Done" to commit.
 //
-// `value` and `onChange` use ISO date strings (YYYY-MM-DD) so the parent
-// can store them straight in form state and send to the API as-is.
+// `value` and `onChange` use ISO date strings (YYYY-MM-DD).
 const MONTH_NAMES = [
   'January','February','March','April','May','June',
   'July','August','September','October','November','December',
 ];
-const DAY_HEADERS = ['S','M','T','W','T','F','S'];
 
 function pad2(n) { return String(n).padStart(2, '0'); }
 function isoFor(y, m, d) { return `${y}-${pad2(m + 1)}-${pad2(d)}`; }
@@ -1139,62 +1954,154 @@ function parseIso(s) {
   return { y, m: m - 1, d };
 }
 function daysInMonth(y, m) { return new Date(y, m + 1, 0).getDate(); }
-function firstWeekday(y, m) { return new Date(y, m, 1).getDay(); }
+
+const WHEEL_ITEM_HEIGHT = 44;
+const WHEEL_VISIBLE = 5; // odd number so middle row is the "selected" row
+const WHEEL_PADDING = WHEEL_ITEM_HEIGHT * Math.floor(WHEEL_VISIBLE / 2);
+
+// One scrollable column. Snaps to whole items; the parent decides which
+// index is "selected" based on the final scroll offset.
+function WheelColumn({ items, selectedIndex, onIndexChange, formatter }) {
+  const ref = useRef(null);
+  const lastReportedRef = useRef(selectedIndex);
+
+  // Programmatic scroll when the selection changes from outside.
+  useEffect(() => {
+    if (lastReportedRef.current === selectedIndex) return;
+    lastReportedRef.current = selectedIndex;
+    ref.current?.scrollTo({
+      y: selectedIndex * WHEEL_ITEM_HEIGHT,
+      animated: false,
+    });
+  }, [selectedIndex]);
+
+  // Initial position on mount.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      ref.current?.scrollTo({
+        y: selectedIndex * WHEEL_ITEM_HEIGHT,
+        animated: false,
+      });
+    }, 0);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleEnd = (e) => {
+    const y = e.nativeEvent.contentOffset.y;
+    const raw = Math.round(y / WHEEL_ITEM_HEIGHT);
+    const clamped = Math.max(0, Math.min(items.length - 1, raw));
+    if (clamped !== lastReportedRef.current) {
+      lastReportedRef.current = clamped;
+      onIndexChange(clamped);
+    }
+  };
+
+  return (
+    <View style={styles.wheelCol}>
+      <ScrollView
+        ref={ref}
+        showsVerticalScrollIndicator={false}
+        snapToInterval={WHEEL_ITEM_HEIGHT}
+        decelerationRate="fast"
+        onMomentumScrollEnd={handleEnd}
+        onScrollEndDrag={handleEnd}
+        contentContainerStyle={{ paddingVertical: WHEEL_PADDING }}
+        style={{ height: WHEEL_ITEM_HEIGHT * WHEEL_VISIBLE }}
+        nestedScrollEnabled
+      >
+        {items.map((it, i) => {
+          const active = i === selectedIndex;
+          return (
+            <View key={i} style={styles.wheelItem}>
+              <Text
+                style={[
+                  styles.wheelItemText,
+                  active && styles.wheelItemTextActive,
+                ]}
+              >
+                {formatter ? formatter(it) : String(it)}
+              </Text>
+            </View>
+          );
+        })}
+      </ScrollView>
+    </View>
+  );
+}
 
 function DateField({ value, onChange, minYear, maxYear, placeholder = 'Pick a date' }) {
   const today = new Date();
   const parsed = parseIso(value);
   const [open, setOpen] = useState(false);
-  const [view, setView] = useState('day'); // 'day' | 'month' | 'year'
-  const [cursor, setCursor] = useState({
-    y: parsed?.y || today.getFullYear(),
-    m: parsed?.m ?? today.getMonth(),
-  });
-  // Year grid pagination — anchor each page on the current cursor year.
-  const [yearAnchor, setYearAnchor] = useState(parsed?.y || today.getFullYear());
 
   const yMin = minYear ?? 1900;
   const yMax = maxYear ?? today.getFullYear() + 10;
+
+  // Default working selection — current value, else today.
+  const initialDay   = (parsed?.d || today.getDate()) - 1;
+  const initialMonth = parsed?.m ?? today.getMonth();
+  const initialYear  = (parsed?.y || today.getFullYear()) - yMin;
+
+  const [dayIdx,   setDayIdx]   = useState(initialDay);
+  const [monthIdx, setMonthIdx] = useState(initialMonth);
+  const [yearIdx,  setYearIdx]  = useState(initialYear);
+
+  // Re-seed the wheels whenever the dropdown re-opens so the user starts
+  // on the existing value (or today if blank).
+  useEffect(() => {
+    if (!open) return;
+    const p = parseIso(value);
+    setDayIdx((p?.d || today.getDate()) - 1);
+    setMonthIdx(p?.m ?? today.getMonth());
+    setYearIdx((p?.y || today.getFullYear()) - yMin);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const years = useMemo(
+    () => Array.from({ length: yMax - yMin + 1 }, (_, i) => yMin + i),
+    [yMin, yMax],
+  );
+
+  // Day count depends on the currently selected month/year (handles
+  // 28/29/30/31).
+  const selectedYear  = years[yearIdx] ?? today.getFullYear();
+  const selectedMonth = monthIdx;
+  const daysCount     = daysInMonth(selectedYear, selectedMonth);
+  const days = useMemo(
+    () => Array.from({ length: daysCount }, (_, i) => i + 1),
+    [daysCount],
+  );
+
+  // If the user lands on Feb 30 by changing month, clamp down.
+  useEffect(() => {
+    if (dayIdx >= daysCount) setDayIdx(daysCount - 1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [daysCount]);
 
   const display = parsed
     ? `${pad2(parsed.d)} ${MONTH_NAMES[parsed.m].slice(0, 3)} ${parsed.y}`
     : placeholder;
 
-  // Build the 6x7 grid cells for the day view.
-  const grid = useMemo(() => {
-    const cells = [];
-    const offset = firstWeekday(cursor.y, cursor.m);
-    const total = daysInMonth(cursor.y, cursor.m);
-    for (let i = 0; i < offset; i += 1) cells.push(null);
-    for (let d = 1; d <= total; d += 1) cells.push(d);
-    while (cells.length % 7 !== 0) cells.push(null);
-    return cells;
-  }, [cursor]);
-
-  const stepMonth = (delta) => {
-    let y = cursor.y;
-    let m = cursor.m + delta;
-    if (m < 0) { m = 11; y -= 1; }
-    if (m > 11) { m = 0; y += 1; }
-    if (y < yMin) { y = yMin; m = 0; }
-    if (y > yMax) { y = yMax; m = 11; }
-    setCursor({ y, m });
-  };
-
-  const pickDay = (d) => {
-    if (!d) return;
-    onChange(isoFor(cursor.y, cursor.m, d));
+  const confirm = () => {
+    const d = dayIdx + 1;
+    const m = monthIdx;
+    const y = years[yearIdx];
+    onChange(isoFor(y, m, d));
     setOpen(false);
-    setView('day');
   };
 
   const clear = () => {
     onChange('');
     setOpen(false);
-    setView('day');
   };
 
-  // ─── Renders ─────────────────────────────────────────────────────────
+  const jumpToToday = () => {
+    setDayIdx(today.getDate() - 1);
+    setMonthIdx(today.getMonth());
+    setYearIdx(today.getFullYear() - yMin);
+  };
+
   return (
     <View>
       {/* Trigger button */}
@@ -1222,176 +2129,288 @@ function DateField({ value, onChange, minYear, maxYear, placeholder = 'Pick a da
       </TouchableOpacity>
 
       {open ? (
-        <View style={styles.calendarCard}>
-          {/* Calendar header */}
-          <View style={styles.calHeader}>
-            <TouchableOpacity
-              onPress={() => view === 'day' ? stepMonth(-1) : setYearAnchor(yearAnchor - 12)}
-              style={styles.calNavBtn}
-              activeOpacity={0.7}
-            >
-              <ChevronLeft size={16} color={TEXT} strokeWidth={2.4} />
-            </TouchableOpacity>
-
-            <View style={{ flexDirection: 'row', gap: 6, flex: 1, justifyContent: 'center' }}>
-              <TouchableOpacity
-                style={styles.calLabelBtn}
-                onPress={() => setView(view === 'month' ? 'day' : 'month')}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.calLabelText}>
-                  {view === 'year'
-                    ? `${yearAnchor} – ${yearAnchor + 11}`
-                    : MONTH_NAMES[cursor.m]}
-                </Text>
-              </TouchableOpacity>
-              {view !== 'year' ? (
-                <TouchableOpacity
-                  style={styles.calLabelBtn}
-                  onPress={() => { setView('year'); setYearAnchor(cursor.y - 5); }}
-                  activeOpacity={0.7}
-                >
-                  <Text style={styles.calLabelText}>{cursor.y}</Text>
-                </TouchableOpacity>
-              ) : null}
+        <View style={styles.wheelCard}>
+          {/* Column headers */}
+          <View style={styles.wheelHeaderRow}>
+            <View style={styles.wheelCol}>
+              <Text style={styles.wheelHeaderText}>Day</Text>
             </View>
-
-            <TouchableOpacity
-              onPress={() => view === 'day' ? stepMonth(+1) : setYearAnchor(yearAnchor + 12)}
-              style={styles.calNavBtn}
-              activeOpacity={0.7}
-            >
-              <ChevronRight size={16} color={TEXT} strokeWidth={2.4} />
-            </TouchableOpacity>
+            <View style={styles.wheelCol}>
+              <Text style={styles.wheelHeaderText}>Month</Text>
+            </View>
+            <View style={styles.wheelCol}>
+              <Text style={styles.wheelHeaderText}>Year</Text>
+            </View>
           </View>
 
-          {/* Day view */}
-          {view === 'day' && (
-            <>
-              <View style={styles.calDayHeaderRow}>
-                {DAY_HEADERS.map((d, i) => (
-                  <View key={i} style={styles.calDayHeader}>
-                    <Text style={styles.calDayHeaderText}>{d}</Text>
-                  </View>
-                ))}
-              </View>
-              <View style={styles.calGrid}>
-                {grid.map((d, i) => {
-                  const isSelected = parsed
-                    && parsed.y === cursor.y
-                    && parsed.m === cursor.m
-                    && parsed.d === d;
-                  const isToday = !isSelected
-                    && d
-                    && today.getFullYear() === cursor.y
-                    && today.getMonth() === cursor.m
-                    && today.getDate() === d;
-                  return (
-                    <TouchableOpacity
-                      key={i}
-                      style={styles.calCell}
-                      disabled={!d}
-                      onPress={() => pickDay(d)}
-                      activeOpacity={0.7}
-                    >
-                      {d ? (
-                        <View style={[
-                          styles.calCellInner,
-                          isSelected && styles.calCellSelected,
-                          isToday && styles.calCellToday,
-                        ]}>
-                          <Text style={[
-                            styles.calCellText,
-                            isSelected && { color: '#fff', fontWeight: '800' },
-                            isToday && !isSelected && { color: BRAND, fontWeight: '800' },
-                          ]}>
-                            {d}
-                          </Text>
-                        </View>
-                      ) : null}
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-            </>
-          )}
+          {/* Wheels with center-band highlight */}
+          <View style={styles.wheelRow}>
+            <View pointerEvents="none" style={styles.wheelHighlight} />
 
-          {/* Month view */}
-          {view === 'month' && (
-            <View style={styles.calMonthGrid}>
-              {MONTH_NAMES.map((name, i) => {
-                const isSel = parsed && parsed.y === cursor.y && parsed.m === i;
-                return (
-                  <TouchableOpacity
-                    key={name}
-                    style={[styles.calMonthCell, isSel && styles.calCellSelected]}
-                    onPress={() => { setCursor({ y: cursor.y, m: i }); setView('day'); }}
-                    activeOpacity={0.85}
-                  >
-                    <Text style={[
-                      styles.calMonthCellText,
-                      isSel && { color: '#fff', fontWeight: '800' },
-                    ]}>
-                      {name.slice(0, 3)}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-          )}
-
-          {/* Year view */}
-          {view === 'year' && (
-            <View style={styles.calMonthGrid}>
-              {Array.from({ length: 12 }, (_, i) => yearAnchor + i).map((y) => {
-                const disabled = y < yMin || y > yMax;
-                const isSel = cursor.y === y;
-                return (
-                  <TouchableOpacity
-                    key={y}
-                    style={[
-                      styles.calMonthCell,
-                      isSel && styles.calCellSelected,
-                      disabled && { opacity: 0.3 },
-                    ]}
-                    disabled={disabled}
-                    onPress={() => { setCursor({ y, m: cursor.m }); setView('month'); }}
-                    activeOpacity={0.85}
-                  >
-                    <Text style={[
-                      styles.calMonthCellText,
-                      isSel && { color: '#fff', fontWeight: '800' },
-                    ]}>
-                      {y}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-          )}
+            <WheelColumn
+              items={days}
+              selectedIndex={dayIdx}
+              onIndexChange={setDayIdx}
+              formatter={(n) => pad2(n)}
+            />
+            <WheelColumn
+              items={MONTH_NAMES}
+              selectedIndex={monthIdx}
+              onIndexChange={setMonthIdx}
+              formatter={(n) => n.slice(0, 3)}
+            />
+            <WheelColumn
+              items={years}
+              selectedIndex={yearIdx}
+              onIndexChange={setYearIdx}
+            />
+          </View>
 
           {/* Footer */}
-          <View style={styles.calFooter}>
-            <TouchableOpacity
-              onPress={() => {
-                const t = new Date();
-                if (t.getFullYear() < yMin || t.getFullYear() > yMax) return;
-                setCursor({ y: t.getFullYear(), m: t.getMonth() });
-                setView('day');
-              }}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.calFooterText}>Today</Text>
+          <View style={styles.wheelFooter}>
+            <TouchableOpacity onPress={jumpToToday} activeOpacity={0.7}>
+              <Text style={styles.wheelFooterTextSecondary}>Today</Text>
             </TouchableOpacity>
             <View style={{ flex: 1 }} />
             <TouchableOpacity onPress={() => setOpen(false)} activeOpacity={0.7}>
-              <Text style={styles.calFooterText}>Close</Text>
+              <Text style={styles.wheelFooterTextSecondary}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={confirm}
+              style={styles.wheelDoneBtn}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.wheelDoneText}>Done</Text>
             </TouchableOpacity>
           </View>
         </View>
       ) : null}
     </View>
   );
+}
+
+// ─── TimeField + DaySlotsBlock: Operating Hours editor ─────────────────
+//
+// Each "slot" is a `{ start, end }` pair in 24-hour HH:MM strings. The
+// TimeField renders a compact tap target that, when tapped, opens a
+// 3-column wheel (Hour 1–12 · Minute 00–55 step 5 · AM/PM). DaySlotsBlock
+// composes these into a card per day-group, with an Add slot button at
+// the bottom.
+const HOUR_OPTIONS    = Array.from({ length: 12 }, (_, i) => i + 1);
+const MINUTE_OPTIONS  = Array.from({ length: 12 }, (_, i) => i * 5);
+const AMPM_OPTIONS    = ['AM', 'PM'];
+
+function parseTime24(value) {
+  if (!value) return null;
+  const [h, m] = String(value).split(':').map(Number);
+  if (Number.isNaN(h) || Number.isNaN(m)) return null;
+  return { h, m };
+}
+function formatTime12(value) {
+  const p = parseTime24(value);
+  if (!p) return '';
+  const isPM = p.h >= 12;
+  const hour12 = p.h % 12 || 12;
+  return `${hour12}:${pad2(p.m)} ${isPM ? 'PM' : 'AM'}`;
+}
+
+function TimeField({ value, onChange, placeholder = 'Select time' }) {
+  const [open, setOpen] = useState(false);
+  const parsed = parseTime24(value);
+
+  // Defaults — 9:00 AM when empty.
+  const def = parsed || { h: 9, m: 0 };
+  const initHourIdx  = (def.h % 12 || 12) - 1;
+  const initMinIdx   = Math.max(0, MINUTE_OPTIONS.indexOf(def.m));
+  const initAmPmIdx  = def.h >= 12 ? 1 : 0;
+
+  const [hourIdx,  setHourIdx]  = useState(initHourIdx);
+  const [minIdx,   setMinIdx]   = useState(initMinIdx);
+  const [ampmIdx,  setAmPmIdx]  = useState(initAmPmIdx);
+
+  useEffect(() => {
+    if (!open) return;
+    const p = parseTime24(value) || { h: 9, m: 0 };
+    setHourIdx((p.h % 12 || 12) - 1);
+    const mi = MINUTE_OPTIONS.indexOf(p.m);
+    setMinIdx(mi >= 0 ? mi : 0);
+    setAmPmIdx(p.h >= 12 ? 1 : 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const confirm = () => {
+    const hour12 = HOUR_OPTIONS[hourIdx];
+    const minute = MINUTE_OPTIONS[minIdx];
+    const isPM = ampmIdx === 1;
+    let hour24 = hour12 % 12;
+    if (isPM) hour24 += 12;
+    onChange(`${pad2(hour24)}:${pad2(minute)}`);
+    setOpen(false);
+  };
+
+  return (
+    <View>
+      <TouchableOpacity
+        style={styles.timeTrigger}
+        onPress={() => setOpen((o) => !o)}
+        activeOpacity={0.85}
+      >
+        <Clock size={13} color={BRAND} strokeWidth={2.4} />
+        <Text
+          style={[
+            styles.timeTriggerText,
+            !parsed && { color: TEXT_LIGHT, fontWeight: '500' },
+          ]}
+          numberOfLines={1}
+        >
+          {parsed ? formatTime12(value) : placeholder}
+        </Text>
+      </TouchableOpacity>
+
+      {open ? (
+        <View style={styles.wheelCard}>
+          <View style={styles.wheelHeaderRow}>
+            <View style={styles.wheelCol}>
+              <Text style={styles.wheelHeaderText}>Hour</Text>
+            </View>
+            <View style={styles.wheelCol}>
+              <Text style={styles.wheelHeaderText}>Min</Text>
+            </View>
+            <View style={styles.wheelCol}>
+              <Text style={styles.wheelHeaderText}>AM/PM</Text>
+            </View>
+          </View>
+
+          <View style={styles.wheelRow}>
+            <View pointerEvents="none" style={styles.wheelHighlight} />
+            <WheelColumn
+              items={HOUR_OPTIONS}
+              selectedIndex={hourIdx}
+              onIndexChange={setHourIdx}
+            />
+            <WheelColumn
+              items={MINUTE_OPTIONS}
+              selectedIndex={minIdx}
+              onIndexChange={setMinIdx}
+              formatter={(n) => pad2(n)}
+            />
+            <WheelColumn
+              items={AMPM_OPTIONS}
+              selectedIndex={ampmIdx}
+              onIndexChange={setAmPmIdx}
+            />
+          </View>
+
+          <View style={styles.wheelFooter}>
+            <View style={{ flex: 1 }} />
+            <TouchableOpacity onPress={() => setOpen(false)} activeOpacity={0.7}>
+              <Text style={styles.wheelFooterTextSecondary}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={confirm}
+              style={styles.wheelDoneBtn}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.wheelDoneText}>Done</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+function DaySlotsBlock({ title, subtitle, slots, onChange }) {
+  const safeSlots = Array.isArray(slots) && slots.length > 0
+    ? slots
+    : [{ start: '', end: '' }];
+
+  const update = (i, patch) => {
+    const next = [...safeSlots];
+    next[i] = { ...next[i], ...patch };
+    onChange(next);
+  };
+  const addSlot = () => onChange([...safeSlots, { start: '', end: '' }]);
+  const removeSlot = (i) => {
+    const next = safeSlots.filter((_, k) => k !== i);
+    // Always keep at least one editable row visible.
+    onChange(next.length ? next : [{ start: '', end: '' }]);
+  };
+
+  return (
+    <View style={styles.daySlotsCard}>
+      <View style={styles.daySlotsHeader}>
+        <View style={styles.daySlotsHeaderIcon}>
+          <Calendar size={13} color={BRAND} strokeWidth={2.4} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.daySlotsTitle}>{title}</Text>
+          {subtitle ? (
+            <Text style={styles.daySlotsSubtitle}>{subtitle}</Text>
+          ) : null}
+        </View>
+      </View>
+
+      {safeSlots.map((s, i) => (
+        <View key={i} style={styles.slotRow}>
+          <View style={styles.slotField}>
+            <Text style={styles.slotFieldLabel}>From</Text>
+            <TimeField
+              value={s.start}
+              onChange={(v) => update(i, { start: v })}
+              placeholder="Start"
+            />
+          </View>
+          <View style={styles.slotField}>
+            <Text style={styles.slotFieldLabel}>To</Text>
+            <TimeField
+              value={s.end}
+              onChange={(v) => update(i, { end: v })}
+              placeholder="End"
+            />
+          </View>
+          <TouchableOpacity
+            onPress={() => removeSlot(i)}
+            style={styles.slotRemoveBtn}
+            disabled={safeSlots.length === 1 && !s.start && !s.end}
+            hitSlop={6}
+          >
+            <Trash2
+              size={14}
+              color={safeSlots.length === 1 && !s.start && !s.end ? TEXT_LIGHT : BRAND}
+              strokeWidth={2.4}
+            />
+          </TouchableOpacity>
+        </View>
+      ))}
+
+      <TouchableOpacity
+        style={styles.addSlotBtn}
+        onPress={addSlot}
+        activeOpacity={0.85}
+      >
+        <Plus size={12} color={BRAND} strokeWidth={2.6} />
+        <Text style={styles.addSlotBtnText}>Add slot</Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+// Build a one-liner from the two slot arrays for back-compat with the
+// legacy `operating_hours` text column. Example:
+//   "Mon–Fri 09:00 AM – 12:00 PM, 05:00 PM – 09:00 PM · Sat–Sun 10:00 AM – 06:00 PM"
+function formatOperatingHoursSummary(weekday, weekend) {
+  const fmt = (slots) =>
+    (slots || [])
+      .filter((s) => s.start && s.end)
+      .map((s) => `${formatTime12(s.start)} – ${formatTime12(s.end)}`)
+      .join(', ');
+  const wd = fmt(weekday);
+  const we = fmt(weekend);
+  const parts = [];
+  if (wd) parts.push(`Mon–Fri ${wd}`);
+  if (we) parts.push(`Sat–Sun ${we}`);
+  return parts.join(' · ');
 }
 
 // ─── Styles ─────────────────────────────────────────────────────────────
@@ -1522,6 +2541,89 @@ const styles = StyleSheet.create({
   },
   addTypeBtnText: { color: '#fff', fontSize: 13, fontWeight: '800' },
 
+  // ── Institution Type single-select cards (School / Training Center / Association) ──
+  typeOptionCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: SURFACE,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: BORDER,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  typeOptionCardSelected: {
+    borderColor: BRAND,
+    backgroundColor: BRAND_SOFT,
+  },
+  typeOptionLabel: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: TEXT,
+  },
+  typeOptionLabelSelected: {
+    color: BRAND,
+  },
+  typeOptionCaption: {
+    fontSize: 12,
+    color: TEXT_MUTED,
+    marginTop: 2,
+    lineHeight: 16,
+  },
+  typeOptionRadio: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    borderWidth: 2,
+    borderColor: BORDER,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: SURFACE,
+  },
+  typeOptionRadioSelected: {
+    borderColor: BRAND,
+    backgroundColor: BRAND,
+  },
+  typeOptionRadioDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#fff',
+  },
+
+  // ── Skills multi-select chips ─────────────────────────────────────────
+  skillChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1.5,
+    borderColor: BORDER,
+    backgroundColor: SURFACE,
+  },
+  skillChipOn: {
+    backgroundColor: BRAND,
+    borderColor: BRAND,
+  },
+  skillChipText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: TEXT_MUTED,
+  },
+  skillChipTextOn: {
+    color: '#fff',
+    fontWeight: '700',
+  },
+  skillsOtherLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: TEXT_MUTED,
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginBottom: 6,
+  },
+
   // ── Date picker (trigger + inline calendar) ─────────────────────────
   dateTrigger: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
@@ -1531,11 +2633,150 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12, paddingVertical: 11,
   },
   dateTriggerText: { flex: 1, fontSize: 14, color: TEXT, fontWeight: '600' },
+
+  // ── SimpleDropdown (closed trigger + open menu) ─────────────────────
+  dropdownTrigger: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: SURFACE,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: BORDER,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  dropdownTriggerText: {
+    flex: 1,
+    fontSize: 14,
+    color: TEXT,
+    fontWeight: '600',
+  },
+  dropdownMenu: {
+    marginTop: 6,
+    backgroundColor: SURFACE,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: BORDER,
+    overflow: 'hidden',
+  },
+  dropdownItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  dropdownItemDivider: {
+    borderBottomWidth: 1,
+    borderBottomColor: BORDER,
+  },
+  dropdownItemSelected: {
+    backgroundColor: BRAND_SOFT,
+  },
+  dropdownItemText: {
+    flex: 1,
+    fontSize: 14,
+    color: TEXT,
+    fontWeight: '600',
+  },
+  dropdownItemTextSelected: {
+    color: BRAND,
+    fontWeight: '800',
+  },
+
   dateClearBtn: {
     width: 22, height: 22, borderRadius: 11,
     alignItems: 'center', justifyContent: 'center',
     backgroundColor: BG,
   },
+
+  // ── 3-wheel scroll date picker (Day | Month | Year) ─────────────────
+  wheelCard: {
+    marginTop: 8,
+    backgroundColor: SURFACE,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: BORDER,
+    paddingTop: 10,
+    paddingHorizontal: 8,
+    paddingBottom: 8,
+  },
+  wheelHeaderRow: {
+    flexDirection: 'row',
+    paddingBottom: 6,
+  },
+  wheelHeaderText: {
+    textAlign: 'center',
+    fontSize: 11,
+    fontWeight: '800',
+    color: TEXT_MUTED,
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+  },
+  wheelRow: {
+    flexDirection: 'row',
+    position: 'relative',
+  },
+  // Center highlight band sits behind the three columns. Top = padding
+  // (so it's centered on the middle row).
+  wheelHighlight: {
+    position: 'absolute',
+    left: 4,
+    right: 4,
+    top: WHEEL_PADDING,
+    height: WHEEL_ITEM_HEIGHT,
+    borderRadius: 10,
+    backgroundColor: BRAND_SOFT,
+    borderWidth: 1,
+    borderColor: BRAND,
+  },
+  wheelCol: {
+    flex: 1,
+  },
+  wheelItem: {
+    height: WHEEL_ITEM_HEIGHT,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  wheelItemText: {
+    fontSize: 15,
+    color: TEXT_LIGHT,
+    fontWeight: '600',
+  },
+  wheelItemTextActive: {
+    fontSize: 17,
+    color: BRAND,
+    fontWeight: '800',
+  },
+  wheelFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingTop: 8,
+    marginTop: 6,
+    borderTopWidth: 1,
+    borderTopColor: BORDER,
+    paddingHorizontal: 4,
+  },
+  wheelFooterTextSecondary: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: TEXT_MUTED,
+    paddingVertical: 6,
+    paddingHorizontal: 4,
+  },
+  wheelDoneBtn: {
+    backgroundColor: BRAND,
+    paddingHorizontal: 18,
+    paddingVertical: 8,
+    borderRadius: 10,
+  },
+  wheelDoneText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+
   calendarCard: {
     marginTop: 8,
     backgroundColor: SURFACE,
@@ -1643,6 +2884,289 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   addBranchText: { color: BRAND, fontWeight: '800', fontSize: 13 },
+
+  // ── Day-slots editor (Mon–Fri / Sat–Sun blocks) ────────────────────
+  daySlotsCard: {
+    backgroundColor: SURFACE,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: BORDER,
+    padding: 12,
+  },
+  daySlotsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 8,
+  },
+  daySlotsHeaderIcon: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: BRAND_SOFT,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  daySlotsTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: TEXT,
+  },
+  daySlotsSubtitle: {
+    fontSize: 10,
+    color: TEXT_MUTED,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginTop: 1,
+  },
+  slotRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 8,
+    marginTop: 8,
+  },
+  slotField: {
+    flex: 1,
+  },
+  slotFieldLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: TEXT_MUTED,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 4,
+  },
+  slotRemoveBtn: {
+    width: 32,
+    height: 38,
+    borderRadius: 8,
+    backgroundColor: BG,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  addSlotBtn: {
+    marginTop: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    alignSelf: 'flex-start',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: BRAND,
+    borderStyle: 'dashed',
+    backgroundColor: BRAND_SOFT,
+  },
+  addSlotBtnText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: BRAND,
+  },
+
+  // Compact tap target for one TimeField (start / end). Same visual
+  // weight as the input style, but row-aligned with the clock icon.
+  timeTrigger: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: SURFACE,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: BORDER,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    minHeight: 38,
+  },
+  timeTriggerText: {
+    flex: 1,
+    fontSize: 13,
+    color: TEXT,
+    fontWeight: '700',
+  },
+
+  // Greyed-out variant of `input` used when the field is intentionally
+  // disabled (e.g. Total Capacity on an Unlimited plan).
+  inputDisabled: {
+    backgroundColor: BG,
+    color: TEXT_LIGHT,
+  },
+
+  // ── Plan ceiling badge above the Operations capacity row ───────────
+  // Finite plans → solid red soft pill ("Up to 30 students").
+  // Unlimited plans → green pill ("Unlimited students").
+  planBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: BRAND_SOFT,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: BRAND,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginBottom: 12,
+  },
+  planBadgeUnlimited: {
+    backgroundColor: '#ECFDF5',
+    borderColor: '#10B981',
+  },
+  planBadgeLabel: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: TEXT_MUTED,
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+  },
+  planBadgeValue: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '800',
+    color: TEXT,
+    textAlign: 'right',
+  },
+
+  // ── Operations step explainer card ─────────────────────────────────
+  // Soft-red info box that defines "Total Student Capacity" vs.
+  // "Current Enrollment" so admins fill the right number into each.
+  opsNoteCard: {
+    flexDirection: 'row',
+    gap: 10,
+    backgroundColor: BRAND_SOFT,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: BRAND,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 14,
+  },
+  opsNoteIconWrap: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: SURFACE,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 1,
+  },
+  opsNoteTitle: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: BRAND,
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginBottom: 6,
+  },
+  opsNoteBody: {
+    fontSize: 12,
+    color: TEXT,
+    lineHeight: 17,
+    fontWeight: '500',
+  },
+  opsNoteLabel: {
+    fontWeight: '800',
+    color: BRAND,
+  },
+
+  // Asterisk footnote line under the certificate upload, calling out the
+  // PDF-only + max-size rule.
+  fileRuleNote: {
+    marginTop: 6,
+    fontSize: 11,
+    color: BRAND,
+    fontWeight: '700',
+    letterSpacing: 0.2,
+  },
+
+  // ── Head-office Location capture ────────────────────────────────────
+  locCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: '#ECFDF5',
+    borderWidth: 1,
+    borderColor: '#10B981',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginBottom: 10,
+  },
+  locIconWrap: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  locTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#065F46',
+  },
+  locDetail: {
+    fontSize: 11,
+    color: '#047857',
+    fontWeight: '600',
+    marginTop: 1,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  locClearBtn: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#fff',
+  },
+  locBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: BRAND,
+    borderRadius: 12,
+    paddingVertical: 12,
+  },
+  locBtnText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+
+  // ── Auto-counted "No. of Branches" card (display-only) ───────────────
+  branchCountCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: BRAND_SOFT,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: BRAND,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    gap: 12,
+  },
+  branchCountIconWrap: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: SURFACE,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  branchCountValue: {
+    fontSize: 22,
+    fontWeight: '800',
+    color: BRAND,
+    lineHeight: 26,
+  },
+  branchCountCaption: {
+    fontSize: 11,
+    color: TEXT_MUTED,
+    fontWeight: '600',
+    marginTop: 1,
+  },
 
   // Review box (step 5 footer)
   reviewBox: {

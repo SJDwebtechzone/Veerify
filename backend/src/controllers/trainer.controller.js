@@ -1,6 +1,7 @@
 const bcrypt = require('bcrypt');
 const pool = require('../config/db');
 const { ensureCapacity, limitResponse } = require('../utils/planLimits');
+const { sendTrainerCredentialsEmail } = require('../utils/mailer');
 
 // Helper: get admin's institution_id
 const getAdminInstitutionId = async (userId) => {
@@ -87,8 +88,33 @@ exports.createTrainer = async (req, res) => {
 
     await client.query('COMMIT');
 
+    // ── Email the new trainer their login credentials so they can sign
+    // into the Veerify mobile app. Best-effort: if SMTP isn't configured
+    // or the send fails, we still return 201 — the admin can verify the
+    // trainer exists in the list and re-share credentials manually.
+    try {
+      const instRow = await pool.query(
+        'SELECT name FROM institutions WHERE id = $1',
+        [institutionId],
+      );
+      const institutionName = instRow.rows[0]?.name || 'your academy';
+      const mailResult = await sendTrainerCredentialsEmail({
+        to: email,
+        name,
+        institutionName,
+        loginEmail: email,
+        password,                   // plaintext, only ever sent in this one mail
+      });
+      if (!mailResult.ok) {
+        // Don't fail the request — surface a warning for the admin.
+        console.warn('[createTrainer] credentials email failed:', mailResult.error);
+      }
+    } catch (mailErr) {
+      console.warn('[createTrainer] credentials email threw:', mailErr.message);
+    }
+
     res.status(201).json({
-      message: 'Trainer created successfully',
+      message: 'Trainer created successfully. Login details emailed to the trainer.',
       trainer: {
         ...trainerResult.rows[0],
         name: user.name,

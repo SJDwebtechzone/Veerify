@@ -99,6 +99,11 @@ export default function SendAnnouncementScreen({ navigation }) {
                 category: 'announcement',
               });
               setSent({
+                // status='pending' when the backend gated this for admin
+                // approval (e.g. trainer submitting). delivered_count
+                // stays absent in that case, so the success screen
+                // branches into the "Awaiting approval" copy.
+                pending:         res.data?.status === 'pending',
                 delivered_count: res.data?.delivered_count || recipientCount,
                 audience,
               });
@@ -121,10 +126,13 @@ export default function SendAnnouncementScreen({ navigation }) {
           <View style={styles.successCircle}>
             <CheckCircle size={56} color="#fff" strokeWidth={2.4} />
           </View>
-          <Text style={styles.successTitle}>Announcement sent</Text>
+          <Text style={styles.successTitle}>
+            {sent.pending ? 'Submitted for approval' : 'Announcement sent'}
+          </Text>
           <Text style={styles.successSub}>
-            Delivered to {sent.delivered_count} {sent.delivered_count === 1 ? 'person' : 'people'}.
-            They'll see it in their notifications inbox.
+            {sent.pending
+              ? 'Your institution admin will review and approve this before it reaches students. You\'ll get a notification once they decide.'
+              : `Delivered to ${sent.delivered_count} ${sent.delivered_count === 1 ? 'person' : 'people'}. They'll see it in their notifications inbox.`}
           </Text>
 
           <TouchableOpacity
@@ -170,6 +178,17 @@ export default function SendAnnouncementScreen({ navigation }) {
           <Text style={styles.headerTitle}>Send Announcement</Text>
           <Text style={styles.headerSub}>Compose a broadcast for your academy</Text>
         </View>
+        {/* Sent-history shortcut — lets the admin audit what they've
+            dispatched without leaving the announcement flow. */}
+        <TouchableOpacity
+          onPress={() => navigation.navigate('SentNotifications')}
+          style={styles.historyBtn}
+          activeOpacity={0.7}
+          disabled={sending}
+          hitSlop={6}
+        >
+          <Text style={styles.historyBtnText}>History</Text>
+        </TouchableOpacity>
       </View>
 
       <ScrollView
@@ -324,6 +343,18 @@ const styles = StyleSheet.create({
   },
   headerTitle: { fontSize: 17, fontWeight: '800', color: TEXT },
   headerSub: { fontSize: 11, color: TEXT_MUTED, marginTop: 2, fontWeight: '600' },
+  historyBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: '#F1F5F9',
+  },
+  historyBtnText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: TEXT,
+    letterSpacing: 0.2,
+  },
 
   body: { padding: 16, paddingBottom: 24 },
 

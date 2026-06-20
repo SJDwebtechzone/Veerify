@@ -5,6 +5,7 @@ import { AuthProvider } from './src/context/AuthContext';
 import { InstitutionProvider } from './src/context/InstitutionContext';
 import { ChildProvider } from './src/context/ChildContext';
 import AppNavigator from './src/navigation/AppNavigator';
+import { ConfirmDialogHost } from './src/components/ConfirmDialog';
 
 // React Navigation fires a dev-only warning whenever a GO_BACK / CLOSE_DRAWER
 // action bubbles up to the root without being handled — most commonly when
@@ -23,6 +24,9 @@ export default function App() {
         <InstitutionProvider>
           <ChildProvider>
             <AppNavigator />
+            {/* Imperative styled confirm() dialog host — must be inside
+                SafeAreaProvider so its statusBar overlay sits right. */}
+            <ConfirmDialogHost />
           </ChildProvider>
         </InstitutionProvider>
       </AuthProvider>

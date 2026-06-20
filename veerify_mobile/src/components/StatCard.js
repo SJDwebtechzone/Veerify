@@ -8,20 +8,29 @@
 //   accent   One of palette.purple|blue|green|orange|pink|teal|rose
 
 import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { palette, radius, shadows, spacing, type } from '../theme';
 
-export default function StatCard({ icon: Icon, label, value, delta, accent = palette.purple }) {
-  return (
-    <View style={styles.card}>
+export default function StatCard({ icon: Icon, label, value, delta, accent = palette.purple, onPress }) {
+  const body = (
+    <>
       <View style={[styles.iconWrap, { backgroundColor: accent.soft }]}>
         {Icon ? <Icon size={20} color={accent.vivid} strokeWidth={2.2} /> : null}
       </View>
       <Text style={styles.value}>{value}</Text>
       <Text style={styles.label}>{label}</Text>
       {delta ? <Text style={[styles.delta, { color: accent.on }]}>{delta}</Text> : null}
-    </View>
+    </>
   );
+
+  if (typeof onPress === 'function') {
+    return (
+      <TouchableOpacity style={styles.card} onPress={onPress} activeOpacity={0.85}>
+        {body}
+      </TouchableOpacity>
+    );
+  }
+  return <View style={styles.card}>{body}</View>;
 }
 
 const styles = StyleSheet.create({

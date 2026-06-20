@@ -29,15 +29,43 @@ useEffect(() => {
 
       try {
         const meRes = await apiClient.get('/auth/me');
-
         const userData = meRes?.data?.user ?? null;
 
-       if (!cancelled) {
-  setUser(userData ?? null);
-}
+        // For admins we need onboardingStatus + institution BEFORE we
+        // flip setUser, because the admin navigator picks initialRouteName
+        // the moment the stack mounts. If we set user first and fetch
+        // status second, the navigator mounts with onboardingStatus=null
+        // → falls back to PlanSelection → user is stuck.
+        // The manual login flow already does this; resume-from-token was
+        // missing it, which is why every cold start dropped onto the
+        // plan-selection screen.
+        let status = null;
+        let inst   = null;
+        if (userData?.role === 'admin') {
+          try {
+            const statusRes = await apiClient.get('/onboarding/my-status');
+            status = statusRes?.data?.status || null;
+            inst   = statusRes?.data?.institution || null;
+            console.log('[AUTH] resume onboarding →', status,
+              'institution?', !!inst,
+              inst ? `(owner_user_id=${inst.owner_user_id})` : '');
+          } catch (statusErr) {
+            // Don't fail the whole resume on a status hiccup. Fall back to
+            // 'registered' so the navigator still picks a sane default.
+            console.log('[AUTH] resume /onboarding/my-status failed:', statusErr?.message);
+            status = 'registered';
+          }
+        }
+
+        if (!cancelled) {
+          if (userData?.role === 'admin') {
+            setOnboardingStatus(status);
+            setInstitution(inst);
+          }
+          setUser(userData ?? null);
+        }
       } catch (err) {
         console.log('[AUTH] /auth/me failed safely:', err?.message);
-
         try {
           await deleteToken();
         } catch {}
@@ -148,10 +176,22 @@ useEffect(() => {
   };
 
   const logout = async () => {
-    await deleteToken();
+    // eslint-disable-next-line no-console
+    console.log('[Auth] logout invoked');
+    // Tear down auth state first so the navigator switches roots
+    // immediately, before we touch keychain. If the keychain delete
+    // throws, the user is already logged out as far as the app is
+    // concerned and they won't end up stuck in a half-authenticated
+    // state.
     setUser(null);
     setOnboardingStatus(null);
     setInstitution(null);
+    try {
+      await deleteToken();
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn('[Auth] deleteToken failed (continuing anyway):', err?.message);
+    }
   };
 
   const refreshOnboardingStatus = async () => {

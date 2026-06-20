@@ -159,6 +159,9 @@ export default function AdminDashboardScreen({ navigation }) {
       delta: counts.students === 0 ? 'No enrollments yet' : `Across all batches`,
       accent: palette.purple,
       icon: Users,
+      // Jumps to the Students bottom-tab so the admin sees the
+      // full enrolled-student list.
+      onPress: () => navigation.navigate('Students'),
     },
     {
       label: 'Active Trainers',
@@ -166,6 +169,7 @@ export default function AdminDashboardScreen({ navigation }) {
       delta: counts.trainers === 0 ? 'Add your first trainer' : 'On the team',
       accent: palette.blue,
       icon: GraduationCap,
+      onPress: () => navigation.navigate('TrainersList'),
     },
     {
       label: "Today's Classes",
@@ -173,6 +177,10 @@ export default function AdminDashboardScreen({ navigation }) {
       delta: counts.today_classes === 0 ? 'No classes today' : 'Scheduled today',
       accent: palette.green,
       icon: Calendar,
+      // Batches are the closest equivalent to "today's classes" in the
+      // current information architecture — opens the batch list where
+      // each batch shows its schedule and student count.
+      onPress: () => navigation.navigate('BatchesList'),
     },
     {
       label: 'Pending Fees',
@@ -183,6 +191,8 @@ export default function AdminDashboardScreen({ navigation }) {
           : 'All up to date',
       accent: palette.orange,
       icon: Wallet,
+      // Earnings tab houses both Pending Fees and Revenue breakdowns.
+      onPress: () => navigation.navigate('Earnings'),
     },
     {
       label: 'Revenue',
@@ -190,6 +200,7 @@ export default function AdminDashboardScreen({ navigation }) {
       delta: 'This month',
       accent: palette.pink,
       icon: TrendingUp,
+      onPress: () => navigation.navigate('Earnings'),
     },
     {
       label: 'Attendance',
@@ -197,8 +208,11 @@ export default function AdminDashboardScreen({ navigation }) {
       delta: counts.attendance_pct == null ? 'No data yet' : 'This month',
       accent: palette.teal,
       icon: ClipboardCheck,
+      // Attendance is recorded per batch — open the batch list so the
+      // admin can pick a batch and drill into its attendance history.
+      onPress: () => navigation.navigate('BatchesList'),
     },
-  ]), [counts]);
+  ]), [counts, navigation]);
 
   // Revenue chart from the rolling 6-month series. The chart kit needs at
   // least one non-zero datum or it draws a flat line; if every month is 0
@@ -298,6 +312,7 @@ export default function AdminDashboardScreen({ navigation }) {
                   value={s.value}
                   delta={s.delta}
                   accent={s.accent}
+                  onPress={s.onPress}
                 />
               ))}
             </View>
@@ -313,12 +328,22 @@ export default function AdminDashboardScreen({ navigation }) {
           </View>
           <View style={styles.quickActions}>
             {[
-              { icon: UserPlus,     label: 'Add Student',    accent: palette.purple, onPress: () => placeholder('Add Student') },
+              {
+                icon: UserPlus,
+                label: 'Add Student',
+                accent: palette.purple,
+                // Opens the same student enrollment form that a student
+                // fills when buying a course. The form handles the
+                // admin-initiated path by showing an inline batch picker
+                // at the top when no batch_id was passed in.
+                onPress: () => navigation.navigate('EnrollmentForm', { adminMode: true }),
+              },
               { icon: BookOpen,     label: 'Add Course',     accent: palette.teal,   onPress: () => navigation.navigate('CreateCourse') },
               { icon: CalendarPlus, label: 'Create Batch',   accent: palette.blue,   onPress: () => navigation.navigate('CreateBatch') },
               { icon: BellPlus,     label: 'Add Event',      accent: palette.green,  onPress: () => placeholder('Add Event') },
               { icon: Megaphone,    label: 'Send Notice',    accent: palette.orange, onPress: () => navigation.navigate('SendAnnouncement') },
               { icon: CalendarOff,  label: 'Trainer Leaves', accent: palette.rose,   onPress: () => navigation.navigate('AdminTrainerLeaves') },
+              { icon: Megaphone,    label: 'Trainer Approvals', accent: palette.purple, onPress: () => navigation.navigate('PendingAnnouncements') },
               { icon: Gift,         label: 'Refer & Earn',   accent: palette.green,  onPress: () => navigation.navigate('AdminReferEarn') },
             ].reduce((rows, qa, idx) => {
               if (idx % 3 === 0) rows.push([qa]);

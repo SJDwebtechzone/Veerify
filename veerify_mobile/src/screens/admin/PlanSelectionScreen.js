@@ -7,6 +7,7 @@ import { Gift, ChevronDown, ChevronUp, LogOut } from 'lucide-react-native';
 import apiClient from '../../api/client';
 import { colors } from '../../utils/styles';
 import { useAuth } from '../../context/AuthContext';
+import { confirm } from '../../components/ConfirmDialog';
 
 export default function PlanSelectionScreen({ navigation }) {
   const { logout } = useAuth();
@@ -27,14 +28,30 @@ export default function PlanSelectionScreen({ navigation }) {
   // out of this screen once you land here, since the native back button is
   // hidden and there's no other navigation.
   const confirmSignOut = () => {
-    Alert.alert(
-      'Sign out?',
-      'You\'ll need to log back in to pick a plan and finish setting up your academy.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Sign out', style: 'destructive', onPress: () => logout() },
-      ],
-    );
+    confirm({
+      title: 'Sign out?',
+      message:
+        'You\'ll need to log back in to pick a plan and finish setting up your academy.',
+      variant: 'destructive',
+      confirmText: 'Sign out',
+      cancelText: 'Stay',
+      onConfirm: () => {
+        // eslint-disable-next-line no-console
+        console.log('[PlanSelection] Sign out confirmed');
+        try {
+          const result = logout && logout();
+          if (result && typeof result.catch === 'function') {
+            result.catch((e) =>
+              // eslint-disable-next-line no-console
+              console.warn('[PlanSelection] logout error', e?.message),
+            );
+          }
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.warn('[PlanSelection] logout threw', e?.message);
+        }
+      },
+    });
   };
 
   useEffect(() => {

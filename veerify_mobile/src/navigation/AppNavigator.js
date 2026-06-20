@@ -26,9 +26,13 @@ import CreateCourseScreen from '../screens/admin/CreateCourseScreen';
 import AdminCourseDetailScreen from '../screens/admin/AdminCourseDetailScreen';
 import BatchesListScreen from '../screens/admin/BatchesListScreen';
 import CreateBatchScreen from '../screens/admin/CreateBatchScreen';
+import AdminBatchStudentsScreen from '../screens/admin/AdminBatchStudentsScreen';
 import TrainersListScreen from '../screens/admin/TrainersListScreen';
 import CreateTrainerScreen from '../screens/admin/CreateTrainerScreen';
 import SendAnnouncementScreen from '../screens/admin/SendAnnouncementScreen';
+import SentNotificationsScreen from '../screens/SentNotificationsScreen';
+import PendingAnnouncementsScreen from '../screens/admin/PendingAnnouncementsScreen';
+import PendingAnnouncementDetailScreen from '../screens/PendingAnnouncementDetailScreen';
 import AdminTrainerLeavesScreen from '../screens/admin/AdminTrainerLeavesScreen';
 import AdminReferEarnScreen from '../screens/admin/AdminReferEarnScreen';
 import SettingsScreen from '../screens/admin/SettingsScreen';
@@ -55,6 +59,7 @@ import StaffLeaveRequestsScreen from '../screens/staff/StaffLeaveRequestsScreen'
 import StaffSalaryScreen from '../screens/staff/StaffSalaryScreen';
 import StaffVideosScreen from '../screens/staff/StaffVideosScreen';
 import TrainerRequestLeaveScreen from '../screens/staff/TrainerRequestLeaveScreen';
+import TrainerSendAnnouncementScreen from '../screens/staff/TrainerSendAnnouncementScreen';
 import StaffPerformanceReportsScreen from '../screens/staff/StaffPerformanceReportsScreen';
 import StaffPerformanceReportFormScreen from '../screens/staff/StaffPerformanceReportFormScreen';
 import StudentPerformanceReportsScreen from '../screens/student/StudentPerformanceReportsScreen';
@@ -202,6 +207,11 @@ export default function AppNavigator() {
           <Stack.Screen name="AdminCourseDetail" component={AdminCourseDetailScreen}
             options={{ headerShown: false }} />
           <Stack.Screen name="BatchesList" component={BatchesListScreen} />
+          {/* Drill into a single batch from BatchesList — shows enrolled
+              students, contact chips, payment status, and an Add Student
+              FAB pre-bound to the batch. */}
+          <Stack.Screen name="AdminBatchStudents" component={AdminBatchStudentsScreen}
+            options={{ headerShown: false }} />
           <Stack.Screen name="CreateBatch" component={CreateBatchScreen}
             options={{ headerShown: true, title: 'New Batch' }} />
           <Stack.Screen name="TrainersList" component={TrainersListScreen} />
@@ -215,17 +225,35 @@ export default function AppNavigator() {
           {/* AdminTrainerLeavesScreen renders its own header. */}
           <Stack.Screen name="AdminTrainerLeaves" component={AdminTrainerLeavesScreen}
             options={{ headerShown: false }} />
+          {/* Trainer announcement approval queue — admin reviews drafts. */}
+          <Stack.Screen name="PendingAnnouncements" component={PendingAnnouncementsScreen}
+            options={{ headerShown: false }} />
+          {/* Detail screen for a single trainer-submitted draft. Reached
+              from the inbox nudge ("Trainer announcement awaiting approval")
+              and from rows in PendingAnnouncementsScreen. */}
+          <Stack.Screen name="PendingAnnouncementDetail" component={PendingAnnouncementDetailScreen}
+            options={{ headerShown: false }} />
           {/* AdminReferEarnScreen renders its own header. */}
           <Stack.Screen name="AdminReferEarn" component={AdminReferEarnScreen}
             options={{ headerShown: false }} />
           {/* Admins reuse the same Notifications inbox as staff/parent —
               it scopes to the calling user via JWT, so it works for every role. */}
           <Stack.Screen name="StaffNotifications" component={StaffNotificationsScreen} />
+          <Stack.Screen name="SentNotifications" component={SentNotificationsScreen}
+            options={{ headerShown: false }} />
           <Stack.Screen
             name="Settings"
             component={SettingsScreen}
             options={{ headerShown: true, title: 'Marketplace Settings' }}
           />
+          {/* Admin "Add Student" quick action opens the same enrollment
+              form a student fills when buying a course. Both screens
+              render their own headers so the native stack bar is hidden
+              to avoid stacking two. */}
+          <Stack.Screen name="EnrollmentForm" component={EnrollmentFormScreen}
+            options={{ headerShown: false }} />
+          <Stack.Screen name="EnrollmentPayment" component={EnrollmentPaymentScreen}
+            options={{ headerShown: false }} />
         </Stack.Navigator>
       </NavigationContainer>
     );
@@ -265,6 +293,8 @@ export default function AppNavigator() {
           {/* Students reuse the same Notifications screen the staff module uses —
               the inbox is per-user via the JWT, so it works for every role. */}
           <Stack.Screen name="StaffNotifications" component={StaffNotificationsScreen} />
+          <Stack.Screen name="SentNotifications" component={SentNotificationsScreen}
+            options={{ headerShown: false }} />
           {/* Performance reports — list + detail, both render their own headers. */}
           <Stack.Screen name="StudentPerformanceReports"
             component={StudentPerformanceReportsScreen}
@@ -307,6 +337,15 @@ export default function AppNavigator() {
             options={{ headerShown: false }} />
           {/* TrainerRequestLeaveScreen renders its own header. */}
           <Stack.Screen name="TrainerRequestLeave" component={TrainerRequestLeaveScreen}
+            options={{ headerShown: false }} />
+          {/* TrainerSendAnnouncement — composer + approval-gated submit.
+              The trainer drafts; the institution admin approves it from
+              their PendingAnnouncements queue before students see it. */}
+          <Stack.Screen name="TrainerSendAnnouncement" component={TrainerSendAnnouncementScreen}
+            options={{ headerShown: false }} />
+          {/* Trainers tap their "Announcement approved/rejected" inbox
+              entry to land here and see the admin's decision + reason. */}
+          <Stack.Screen name="PendingAnnouncementDetail" component={PendingAnnouncementDetailScreen}
             options={{ headerShown: false }} />
           {/* Performance report screens render their own headers. */}
           <Stack.Screen name="StaffPerformanceReports" component={StaffPerformanceReportsScreen}
@@ -364,6 +403,8 @@ export default function AppNavigator() {
           {/* Parents reuse the same Notifications screen the staff module uses -
               the inbox is per-user via the JWT, so it works for every role. */}
           <Stack.Screen name="StaffNotifications" component={StaffNotificationsScreen} />
+          <Stack.Screen name="SentNotifications" component={SentNotificationsScreen}
+            options={{ headerShown: false }} />
         </Stack.Navigator>
       </NavigationContainer>
     );

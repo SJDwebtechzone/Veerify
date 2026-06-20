@@ -39,7 +39,28 @@ const SURFACE = '#FFFFFF';
 const BG = '#F4F4F8';
 const BORDER = '#E5E7EB';
 
-const MARITAL_STATUSES = ['Single', 'Married', 'Divorced', 'Widowed', 'Prefer not to say'];
+// Blood-group options for the dropdown picker. Standard eight ABO/Rh
+// combinations.
+const BLOOD_GROUPS = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
+
+// Current belt rank for an incoming student. "New student" is the default
+// (no prior martial-arts training). "Other" reveals a free-text input
+// for academies that use non-standard belt names.
+const BELT_OPTIONS = [
+  'New student',
+  'White',
+  'Yellow',
+  'Orange',
+  'Green',
+  'Blue I',
+  'Blue II',
+  'Gray',
+  'Brown I',
+  'Brown II',
+  'Brown III',
+  'Black',
+  'Other',
+];
 
 function ageFromDob(iso) {
   if (!iso) return null;
@@ -54,9 +75,33 @@ function ageFromDob(iso) {
 }
 
 export default function EnrollmentFormScreen({ route, navigation }) {
-  const { batch, course } = route?.params || {};
-  const batchId = batch?.id;
-  const coursePrice = batch?.course_price || course?.price || 0;
+  const { batch, course, adminMode, batchId: paramBatchId } = route?.params || {};
+
+  // Admin-initiated path (from the Add Student quick action) doesn't
+  // pre-bind to a batch — we let the admin pick one inside the form
+  // with a small inline dropdown.
+  const [pickedBatch, setPickedBatch] = useState(batch || null);
+  const [adminBatches, setAdminBatches] = useState([]);
+  const [batchPickerOpen, setBatchPickerOpen] = useState(false);
+
+  const batchId = pickedBatch?.id || paramBatchId || batch?.id;
+  const coursePrice = pickedBatch?.course_price || batch?.course_price || course?.price || 0;
+
+  // When opened from admin "Add Student", fetch the institution's batches
+  // so we can populate the inline picker.
+  useEffect(() => {
+    if (!adminMode) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiClient.get('/batches');
+        if (!cancelled) setAdminBatches(res?.data?.batches || []);
+      } catch (err) {
+        console.warn('[EnrollmentForm] failed to load batches for admin picker:', err?.message);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [adminMode]);
 
   const [form, setForm] = useState({
     full_name: '',
@@ -66,11 +111,20 @@ export default function EnrollmentFormScreen({ route, navigation }) {
     contact_number: '',
     email: '',
     address: '',
-    marital_status: '',
+    // marital_status removed per spec.
     occupation: '',
     height_cm: '',
     weight_kg: '',
-    disabilities: '',
+    // blood_group — picked from the 8 standard ABO/Rh values.
+    blood_group: '',
+    // health_notes replaces the older 'disabilities' field. Covers
+    // allergies, asthma, mobility considerations, dietary restrictions,
+    // anything the trainer should know.
+    health_notes: '',
+    // belt_category — defaults to "New student" so brand-new joiners
+    // don't have to pick anything. "Other" reveals belt_category_other.
+    belt_category: 'New student',
+    belt_category_other: '',
     photo_url: '',
     photo_uri: '',
   });
@@ -87,6 +141,11 @@ export default function EnrollmentFormScreen({ route, navigation }) {
         const res = await apiClient.get('/enrollments/my-profile');
         const p = res.data?.profile;
         if (p) {
+          // Round-trip the new field names. We also still read the
+          // legacy `disabilities` column so old profiles seed health_notes
+          // cleanly, and resolve a free-text belt back into the dropdown.
+          const savedBelt = p.belt_category || '';
+          const isStandardBelt = BELT_OPTIONS.includes(savedBelt);
           setForm((prev) => ({
             ...prev,
             full_name:      p.full_name || '',
@@ -96,11 +155,15 @@ export default function EnrollmentFormScreen({ route, navigation }) {
             contact_number: p.contact_number || '',
             email:          p.email || '',
             address:        p.address || '',
-            marital_status: p.marital_status || '',
             occupation:     p.occupation || '',
             height_cm:      p.height_cm ? String(p.height_cm) : '',
             weight_kg:      p.weight_kg ? String(p.weight_kg) : '',
-            disabilities:   p.disabilities || '',
+            blood_group:    p.blood_group || '',
+            health_notes:   p.health_notes || p.disabilities || '',
+            belt_category:  savedBelt
+              ? (isStandardBelt ? savedBelt : 'Other')
+              : 'New student',
+            belt_category_other: savedBelt && !isStandardBelt ? savedBelt : '',
             photo_url:      p.photo_url || '',
           }));
         }
@@ -167,6 +230,9 @@ export default function EnrollmentFormScreen({ route, navigation }) {
     if (form.contact_number && form.contact_number.length < 10) {
       return 'Please enter a valid contact number';
     }
+    if (form.belt_category === 'Other' && !form.belt_category_other.trim()) {
+      return 'Please specify the belt level';
+    }
     return null;
   };
 
@@ -177,6 +243,12 @@ export default function EnrollmentFormScreen({ route, navigation }) {
 
     setSubmitting(true);
     try {
+      // Resolve the belt category: when "Other" is picked we send the
+      // custom string. New student / standard belts go through as-is.
+      const beltVal = form.belt_category === 'Other'
+        ? (form.belt_category_other || '').trim() || 'Other'
+        : (form.belt_category || 'New student');
+
       const res = await apiClient.post('/enrollments', {
         batch_id: batchId,
         full_name:      form.full_name.trim(),
@@ -186,11 +258,16 @@ export default function EnrollmentFormScreen({ route, navigation }) {
         contact_number: form.contact_number.trim() || null,
         email:          form.email.trim() || null,
         address:        form.address.trim() || null,
-        marital_status: form.marital_status || null,
+        // marital_status removed from the form per spec.
         occupation:     form.occupation.trim() || null,
         height_cm:      form.height_cm ? Number(form.height_cm) : null,
         weight_kg:      form.weight_kg ? Number(form.weight_kg) : null,
-        disabilities:   form.disabilities.trim() || null,
+        blood_group:    form.blood_group || null,
+        health_notes:   form.health_notes.trim() || null,
+        // Send the legacy `disabilities` key too so any old read path
+        // keeps working until we migrate the column.
+        disabilities:   form.health_notes.trim() || null,
+        belt_category:  beltVal,
         photo_url:      form.photo_url || null,
       });
       const enrollment = res.data?.enrollment;
@@ -237,6 +314,69 @@ export default function EnrollmentFormScreen({ route, navigation }) {
         {loadingProfile ? (
           <View style={{ paddingVertical: 24, alignItems: 'center' }}>
             <ActivityIndicator color={BRAND} />
+          </View>
+        ) : null}
+
+        {/* Admin-only: inline Batch picker. Only renders when the form
+            was opened from the institution admin's "Add Student" quick
+            action (adminMode=true) — students still get a pre-bound
+            batch from the CourseDetail "Enroll Now" flow. */}
+        {adminMode ? (
+          <View style={styles.adminBatchCard}>
+            <Text style={styles.adminBatchLabel}>Select Batch</Text>
+            <TouchableOpacity
+              style={styles.adminBatchTrigger}
+              onPress={() => setBatchPickerOpen((o) => !o)}
+              activeOpacity={0.85}
+            >
+              <Text
+                style={[
+                  styles.adminBatchTriggerText,
+                  !pickedBatch && { color: TEXT_LIGHT, fontWeight: '500' },
+                ]}
+                numberOfLines={1}
+              >
+                {pickedBatch
+                  ? `${pickedBatch.name}${pickedBatch.course_name ? ` · ${pickedBatch.course_name}` : ''}`
+                  : 'Choose the batch this student is joining'}
+              </Text>
+              <ChevronRight
+                size={14}
+                color={TEXT_MUTED}
+                strokeWidth={2.2}
+                style={{ transform: [{ rotate: batchPickerOpen ? '90deg' : '0deg' }] }}
+              />
+            </TouchableOpacity>
+
+            {batchPickerOpen ? (
+              <View style={styles.adminBatchMenu}>
+                {adminBatches.length === 0 ? (
+                  <Text style={styles.adminBatchEmpty}>
+                    No batches yet — create a batch first, then come back here.
+                  </Text>
+                ) : (
+                  adminBatches.map((b) => {
+                    const isSel = pickedBatch?.id === b.id;
+                    return (
+                      <TouchableOpacity
+                        key={b.id}
+                        style={[styles.adminBatchItem, isSel && styles.adminBatchItemSelected]}
+                        onPress={() => {
+                          setPickedBatch(b);
+                          setBatchPickerOpen(false);
+                        }}
+                        activeOpacity={0.85}
+                      >
+                        <Text style={styles.adminBatchItemTitle}>{b.name || `Batch #${b.id}`}</Text>
+                        {b.course_name ? (
+                          <Text style={styles.adminBatchItemSub}>{b.course_name}</Text>
+                        ) : null}
+                      </TouchableOpacity>
+                    );
+                  })
+                )}
+              </View>
+            ) : null}
           </View>
         ) : null}
 
@@ -350,15 +490,9 @@ export default function EnrollmentFormScreen({ route, navigation }) {
           />
         </Field>
 
-        {/* Life */}
+        {/* Life — marital status removed; occupation, vitals,
+            blood group, belt level, health notes. */}
         <SectionTitle icon={Briefcase} title="Other Details" />
-        <Field label="Marital Status">
-          <ChipRow
-            options={MARITAL_STATUSES}
-            value={form.marital_status}
-            onChange={(v) => set('marital_status', v)}
-          />
-        </Field>
         <Field label="Occupation">
           <TextInput
             style={styles.input}
@@ -394,13 +528,44 @@ export default function EnrollmentFormScreen({ route, navigation }) {
           </Field>
         </View>
 
-        <Field label="Disabilities" hint="Mention anything the trainer should know. Leave blank if none.">
+        {/* Blood group — chip row with the 8 ABO/Rh options. */}
+        <Field label="Blood Group">
+          <ChipRow
+            options={BLOOD_GROUPS}
+            value={form.blood_group}
+            onChange={(v) => set('blood_group', v)}
+          />
+        </Field>
+
+        {/* Current belt category — wraps onto multiple lines because
+            there are 13 options. "Other" reveals the free-text field. */}
+        <Field label="Current Belt Category" hint="Default is 'New student'. Pick the right rank if the student has prior training.">
+          <ChipRow
+            options={BELT_OPTIONS}
+            value={form.belt_category}
+            onChange={(v) => set('belt_category', v)}
+          />
+        </Field>
+        {form.belt_category === 'Other' ? (
+          <Field label="Specify belt level" hint="Required when Other is selected.">
+            <TextInput
+              style={styles.input}
+              placeholder="e.g. Red I, Senior Black, Provisional…"
+              placeholderTextColor={TEXT_LIGHT}
+              value={form.belt_category_other}
+              onChangeText={(v) => set('belt_category_other', v)}
+              maxLength={60}
+            />
+          </Field>
+        ) : null}
+
+        <Field label="Health Notes" hint="Allergies, asthma, injuries, dietary needs — anything the trainer should know. Leave blank if none.">
           <TextInput
             style={[styles.input, styles.textarea]}
-            placeholder="e.g. None / Knee injury / Asthma"
+            placeholder="e.g. None / Knee injury / Asthma / Peanut allergy"
             placeholderTextColor={TEXT_LIGHT}
-            value={form.disabilities}
-            onChangeText={(v) => set('disabilities', v)}
+            value={form.health_notes}
+            onChangeText={(v) => set('health_notes', v)}
             multiline
             textAlignVertical="top"
           />
@@ -500,6 +665,76 @@ const styles = StyleSheet.create({
   body: { padding: 16, paddingBottom: 32 },
 
   photoCard: { alignItems: 'center', marginBottom: 16 },
+
+  // ── Admin-mode batch picker (only rendered when adminMode=true) ──
+  adminBatchCard: {
+    backgroundColor: SURFACE,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: BORDER,
+    padding: 14,
+    marginBottom: 14,
+  },
+  adminBatchLabel: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: TEXT_MUTED,
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginBottom: 6,
+  },
+  adminBatchTrigger: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: BG,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: BORDER,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+  },
+  adminBatchTriggerText: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '700',
+    color: TEXT,
+  },
+  adminBatchMenu: {
+    marginTop: 6,
+    backgroundColor: SURFACE,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: BORDER,
+    overflow: 'hidden',
+  },
+  adminBatchEmpty: {
+    fontSize: 12,
+    color: TEXT_MUTED,
+    fontStyle: 'italic',
+    padding: 14,
+    textAlign: 'center',
+  },
+  adminBatchItem: {
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    borderBottomWidth: 1,
+    borderBottomColor: BORDER,
+  },
+  adminBatchItemSelected: {
+    backgroundColor: BRAND_SOFT,
+  },
+  adminBatchItemTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: TEXT,
+  },
+  adminBatchItemSub: {
+    fontSize: 11,
+    color: TEXT_MUTED,
+    fontWeight: '600',
+    marginTop: 2,
+  },
   photoWrap: { position: 'relative' },
   photoPlaceholder: {
     width: 96, height: 96, borderRadius: 48,

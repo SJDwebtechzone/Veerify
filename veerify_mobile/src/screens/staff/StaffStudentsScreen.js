@@ -100,7 +100,16 @@ export default function StaffStudentsScreen({ navigation }) {
 
       const sbb = {};
       list.forEach((b, i) => {
-        sbb[b.id] = (enrollResults[i].data?.enrollments || []).map((e) => ({ ...e, batch_id: b.id, batch_name: b.name }));
+        // Stash batch + course info on each enrollment so downstream
+        // screens (StaffStudentDetail in particular) can load the
+        // course's curriculum without a second batch lookup.
+        sbb[b.id] = (enrollResults[i].data?.enrollments || []).map((e) => ({
+          ...e,
+          batch_id:    b.id,
+          batch_name:  b.name,
+          course_id:   b.course_id,
+          course_name: b.course_name,
+        }));
       });
       setStudentsByBatch(sbb);
 

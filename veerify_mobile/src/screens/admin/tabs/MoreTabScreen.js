@@ -21,7 +21,7 @@ import {
 import {
   UserCog, BookOpen, Building2, CalendarRange, Bell, Megaphone,
   MessageSquare, BarChart3, Palette, CreditCard, Settings, LifeBuoy,
-  LogOut, ChevronRight, Edit3, ShieldCheck,
+  LogOut, ChevronRight, Edit3, ShieldCheck, Layers,
 } from 'lucide-react-native';
 
 import { useAuth } from '../../../context/AuthContext';
@@ -31,6 +31,10 @@ import { palette, spacing, radius, shadows, type } from '../../../theme';
 const MENU = [
   { key: 'trainers',      label: 'Trainers',         icon: UserCog,        accent: palette.purple },
   { key: 'courses',       label: 'Courses',          icon: BookOpen,       accent: palette.blue   },
+  // "Batches" — full list of every batch the institution admin has
+  // created. Reuses the existing BatchesList screen registered in the
+  // root navigator.
+  { key: 'batches',       label: 'Batches',          icon: Layers,         accent: palette.teal   },
   { key: 'branches',      label: 'Branches',         icon: Building2,      accent: palette.green  },
   { key: 'events',        label: 'Events',           icon: CalendarRange,  accent: palette.orange },
   // { key: 'notifications', label: 'Notifications',    icon: Bell,           accent: palette.pink   },
@@ -51,6 +55,7 @@ export default function MoreTabScreen({ navigation }) {
   const TILE_ROUTES = {
     courses:  'CoursesList',
     trainers: 'TrainersList',
+    batches:  'BatchesList',
     settings: 'Settings',
     branches: null, // not built yet — keep placeholder
   };

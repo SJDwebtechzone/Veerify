@@ -18,6 +18,7 @@ const FROM_NAME = process.env.MAIL_FROM_NAME || 'Veerify';
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || SMTP_USER;
 
 let transporter = null;
+let verifyPromise = null;
 
 function getTransporter() {
   if (transporter) return transporter;
@@ -27,10 +28,73 @@ function getTransporter() {
     return null;
   }
   transporter = nodemailer.createTransport({
-    service: 'gmail',
+    // Use the explicit host/port + TLS combo. Gmail's `service: 'gmail'`
+    // shortcut still works, but spelling it out lets us pin keepalive +
+    // pool which Gmail likes — fewer "throttled" errors after the first
+    // few sends in a session.
+    host: 'smtp.gmail.com',
+    port: 465,
+    secure: true,
+    pool: true,
+    maxConnections: 3,
+    maxMessages: 100,
     auth: { user: SMTP_USER, pass: SMTP_PASS },
   });
+
+  // Verify once on first use and log the result. Catches "Invalid auth"
+  // (wrong app password) and "535 5.7.8" (2FA not on, normal password
+  // used instead of app password) immediately instead of failing
+  // silently per-send.
+  verifyPromise = transporter.verify().then(
+    () => {
+      console.log('[mailer] SMTP connection verified OK for', SMTP_USER);
+      return true;
+    },
+    (err) => {
+      console.error('[mailer] SMTP verify FAILED:', err.message);
+      console.error('[mailer]   → Check SMTP_USER / SMTP_PASS in backend/.env');
+      console.error('[mailer]   → SMTP_PASS must be a Gmail APP PASSWORD, not your normal Google password');
+      console.error('[mailer]   → 2FA must be enabled on the Google account to generate one');
+      return false;
+    },
+  );
   return transporter;
+}
+
+// Optional helper a caller can await before booting if it wants to fail
+// fast on bad SMTP creds. Most callers don't bother and rely on the
+// per-send error log.
+function verifyTransporter() {
+  getTransporter();
+  return verifyPromise || Promise.resolve(false);
+}
+
+// Strip HTML to a sensible plain-text fallback. Having BOTH the html
+// and text parts on every message lowers the spam score — Gmail and
+// Outlook penalise html-only messages.
+function toPlainText(html) {
+  return String(html || '')
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|h\d|li)>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/\s+\n/g, '\n')
+    .trim();
+}
+
+// Standard headers we want on every transactional send. Reply-To +
+// X-Mailer + X-Priority lower the spam score; Auto-Submitted tells
+// recipient servers this is a triggered (not bulk-marketing) message.
+function transactionalHeaders() {
+  return {
+    'X-Mailer':         'Veerify Mailer',
+    'X-Priority':       '3',
+    'X-MSMail-Priority': 'Normal',
+    'Importance':       'Normal',
+    'Auto-Submitted':   'auto-generated',
+  };
 }
 
 function rupees(amountInRupeesOrString) {
@@ -230,14 +294,18 @@ async function sendApprovalEmail({
     const subject = hasTrial
       ? `${institutionName} approved on Veerify — your ${trialDays}-day free trial is live`
       : `${institutionName} approved on Veerify — complete payment to go live`;
+    const html = approvalEmailHtml({
+      ownerName, institutionName, planName, planPrice, paymentUrl,
+      trialDays, graceDays, effectivePrice, discountEnabled, discountPercent,
+    });
     const info = await t.sendMail({
       from: `"${FROM_NAME}" <${SMTP_USER}>`,
       to,
       subject,
-      html: approvalEmailHtml({
-        ownerName, institutionName, planName, planPrice, paymentUrl,
-        trialDays, graceDays, effectivePrice, discountEnabled, discountPercent,
-      }),
+      replyTo: SUPPORT_EMAIL,
+      html,
+      text: toPlainText(html),
+      headers: transactionalHeaders(),
     });
     return { ok: true, messageId: info.messageId };
   } catch (err) {
@@ -249,45 +317,40 @@ async function sendApprovalEmail({
 // ---------- Password reset template ----------
 
 function passwordResetEmailHtml({ name, otp, expiresMinutes }) {
+  // Plain, quiet, mostly-text layout. No badges in all-caps, no red
+  // alert boxes, no oversized OTP — those are the patterns Gmail
+  // associates with phishing templates. We keep things looking like
+  // a normal "here's a code" email from a vendor.
   return `
-  <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
-              max-width:560px;margin:0 auto;padding:24px;color:#0f172a;
-              background:#f8fafc;">
-    <div style="background:#fff;border-radius:14px;padding:32px;border:1px solid #e2e8f0;">
-      <div style="display:inline-block;background:#E63946;color:#fff;font-weight:600;
-                  font-size:12px;padding:6px 12px;border-radius:999px;letter-spacing:.5px;">
-        PASSWORD RESET
-      </div>
-      <h1 style="font-size:22px;margin:18px 0 8px;">Hi ${name || 'there'},</h1>
-      <p style="font-size:15px;line-height:1.6;color:#334155;margin:0 0 16px;">
-        We received a request to reset the password on your Veerify account.
-        Enter the code below in the app to set a new password.
-      </p>
+  <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;
+              max-width:560px;margin:0 auto;padding:24px;color:#1f2937;background:#ffffff;">
+    <p style="font-size:15px;margin:0 0 16px;">Hi ${name || 'there'},</p>
 
-      <div style="background:#FFE4E6;border:1px solid #fda4af;border-radius:12px;
-                  padding:20px;margin:24px 0;text-align:center;">
-        <div style="font-size:11px;color:#9f1239;text-transform:uppercase;
-                    letter-spacing:.8px;font-weight:700;">
-          Your verification code
-        </div>
-        <div style="font-size:34px;font-weight:800;color:#9f1239;letter-spacing:8px;
-                    margin-top:8px;font-family:'SF Mono','Monaco',monospace;">
-          ${otp}
-        </div>
-        <div style="font-size:12px;color:#9f1239;margin-top:6px;font-weight:600;">
-          Valid for ${expiresMinutes} minutes
-        </div>
-      </div>
+    <p style="font-size:15px;line-height:1.6;color:#1f2937;margin:0 0 16px;">
+      You recently asked to reset the password for your Veerify account.
+      Enter the verification code below in the Veerify app to choose a new password.
+    </p>
 
-      <p style="font-size:13px;line-height:1.6;color:#64748b;margin:16px 0 0;">
-        Didn't request this? You can safely ignore this email - your account
-        password won't change unless you enter this code.
-      </p>
-      <hr style="border:0;border-top:1px solid #e2e8f0;margin:24px 0;">
-      <p style="font-size:12px;color:#94a3b8;margin:0;">
-        Veerify - Martial arts academy management platform
-      </p>
-    </div>
+    <p style="font-size:22px;font-weight:700;color:#111827;letter-spacing:6px;
+              margin:24px 0;font-family:Consolas,'SF Mono','Monaco',monospace;">
+      ${otp}
+    </p>
+
+    <p style="font-size:14px;line-height:1.6;color:#4b5563;margin:0 0 16px;">
+      This code expires in ${expiresMinutes} minutes.
+      If you did not request a password reset, you can ignore this email — your
+      password will not change.
+    </p>
+
+    <p style="font-size:14px;line-height:1.6;color:#4b5563;margin:0 0 8px;">
+      Thanks,<br/>
+      The Veerify team
+    </p>
+
+    <p style="font-size:12px;color:#9ca3af;margin:24px 0 0;">
+      You are receiving this email because a password reset was requested for
+      a Veerify account associated with this address.
+    </p>
   </div>`;
 }
 
@@ -299,11 +362,30 @@ async function sendPasswordResetEmail({ to, name, otp, expiresMinutes = 10 }) {
   const t = getTransporter();
   if (!t) return { ok: false, error: 'SMTP not configured' };
   try {
+    const html = passwordResetEmailHtml({ name, otp, expiresMinutes });
+    // Build a clean plain-text fallback so the message has a multipart
+    // body — html-only sends are routinely spam-flagged.
+    const text =
+      `Hi ${name || 'there'},\n\n` +
+      `We received a request to reset the password on your Veerify account.\n` +
+      `Enter the code below in the Veerify app to choose a new password.\n\n` +
+      `   ${otp}\n\n` +
+      `This code is valid for ${expiresMinutes} minutes.\n` +
+      `If you did not request this, you can safely ignore this email.\n\n` +
+      `— The Veerify team\n`;
+
     const info = await t.sendMail({
       from: `"${FROM_NAME}" <${SMTP_USER}>`,
       to,
-      subject: `Your Veerify password reset code: ${otp}`,
-      html: passwordResetEmailHtml({ name, otp, expiresMinutes }),
+      // IMPORTANT: do NOT put the OTP in the subject. Gmail's spam
+      // filter strongly down-ranks short codes / passwords in
+      // subjects ("looks like phishing"). Keep the subject neutral
+      // and put the code in the body where it belongs.
+      subject: 'Reset your Veerify password',
+      replyTo: SUPPORT_EMAIL,
+      html,
+      text,
+      headers: transactionalHeaders(),
     });
     return { ok: true, messageId: info.messageId };
   } catch (err) {
@@ -320,11 +402,15 @@ async function sendActivationEmail({ to, ownerName, institutionName, subscriptio
   const t = getTransporter();
   if (!t) return { ok: false, error: 'SMTP not configured' };
   try {
+    const html = activationEmailHtml({ ownerName, institutionName, subscriptionEnd });
     const info = await t.sendMail({
       from: `"${FROM_NAME}" <${SMTP_USER}>`,
       to,
-      subject: `🎉 ${institutionName} is live on Veerify`,
-      html: activationEmailHtml({ ownerName, institutionName, subscriptionEnd }),
+      subject: `${institutionName} is live on Veerify`,
+      replyTo: SUPPORT_EMAIL,
+      html,
+      text: toPlainText(html),
+      headers: transactionalHeaders(),
     });
     return { ok: true, messageId: info.messageId };
   } catch (err) {
@@ -333,8 +419,106 @@ async function sendActivationEmail({ to, ownerName, institutionName, subscriptio
   }
 }
 
+// ---------- Trainer credentials template ----------
+
+function trainerCredentialsEmailHtml({ name, institutionName, loginEmail, password }) {
+  return `
+  <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+              max-width:560px;margin:0 auto;padding:24px;color:#0f172a;
+              background:#f8fafc;">
+    <div style="background:#fff;border-radius:14px;padding:32px;border:1px solid #e2e8f0;">
+      <div style="display:inline-block;background:#10B981;color:#fff;font-weight:600;
+                  font-size:12px;padding:6px 12px;border-radius:999px;letter-spacing:.5px;">
+        WELCOME — TRAINER ACCESS
+      </div>
+      <h1 style="font-size:22px;margin:18px 0 8px;">Hi ${name || 'there'},</h1>
+      <p style="font-size:15px;line-height:1.6;color:#334155;margin:0 0 16px;">
+        You've been added as a trainer at <b>${institutionName || 'your academy'}</b> on Veerify.
+        Use the credentials below to sign in to the Veerify mobile app and start
+        managing your batches, attendance and student progress.
+      </p>
+
+      <div style="background:#f1f5f9;border-radius:12px;padding:18px;margin:20px 0;">
+        <div style="font-size:11px;color:#64748b;text-transform:uppercase;
+                    letter-spacing:.8px;font-weight:700;margin-bottom:8px;">
+          Your sign-in details
+        </div>
+        <div style="font-size:13px;color:#334155;margin-bottom:8px;">
+          <b>Email:</b>
+          <span style="font-family:'SF Mono','Monaco',monospace;color:#0f172a;">${loginEmail}</span>
+        </div>
+        <div style="font-size:13px;color:#334155;">
+          <b>Password:</b>
+          <span style="font-family:'SF Mono','Monaco',monospace;background:#fff;
+                       border:1px solid #cbd5e1;padding:3px 8px;border-radius:6px;
+                       color:#0f172a;letter-spacing:1px;">${password}</span>
+        </div>
+      </div>
+
+      <div style="background:#fef3c7;border:1px solid #fcd34d;border-radius:10px;
+                  padding:14px;margin:20px 0;">
+        <div style="font-size:13px;color:#78350f;line-height:1.6;">
+          <b>Tip:</b> Change your password after your first login from the
+          Profile screen for safety.
+        </div>
+      </div>
+
+      <p style="font-size:13px;color:#64748b;line-height:1.6;margin:16px 0 0;">
+        Open the <b>Veerify mobile app</b> and tap "Sign in" with the email and
+        password above. If you don't have the app yet, install it from the
+        Play Store or App Store.
+      </p>
+
+      <hr style="border:0;border-top:1px solid #e2e8f0;margin:24px 0;">
+      <p style="font-size:12px;color:#94a3b8;margin:0;">
+        Questions? Reply to this email or write to
+        <a href="mailto:${SUPPORT_EMAIL}" style="color:#64748b;">${SUPPORT_EMAIL}</a>.
+      </p>
+    </div>
+  </div>`;
+}
+
+/**
+ * Email a newly-created trainer their login email + plaintext password so
+ * they can sign in to the Veerify mobile app. Called from createTrainer.
+ * Returns { ok, error? }. Never throws.
+ */
+async function sendTrainerCredentialsEmail({
+  to, name, institutionName, loginEmail, password,
+}) {
+  const t = getTransporter();
+  if (!t) return { ok: false, error: 'SMTP not configured' };
+  try {
+    const html = trainerCredentialsEmailHtml({ name, institutionName, loginEmail, password });
+    const text =
+      `Hi ${name || 'there'},\n\n` +
+      `You've been added as a trainer at ${institutionName || 'your academy'} on Veerify.\n\n` +
+      `Sign-in details for the Veerify mobile app:\n` +
+      `  Email:    ${loginEmail}\n` +
+      `  Password: ${password}\n\n` +
+      `Open the Veerify mobile app and sign in with the details above.\n` +
+      `For safety, change the password from your Profile screen after first login.\n\n` +
+      `— The Veerify team\n`;
+    const info = await t.sendMail({
+      from: `"${FROM_NAME}" <${SMTP_USER}>`,
+      to,
+      subject: `Welcome to Veerify — your trainer access for ${institutionName || 'your academy'}`,
+      replyTo: SUPPORT_EMAIL,
+      html,
+      text,
+      headers: transactionalHeaders(),
+    });
+    return { ok: true, messageId: info.messageId };
+  } catch (err) {
+    console.error('[mailer] sendTrainerCredentialsEmail failed:', err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
 module.exports = {
   sendApprovalEmail,
   sendActivationEmail,
   sendPasswordResetEmail,
+  sendTrainerCredentialsEmail,
+  verifyTransporter,
 };

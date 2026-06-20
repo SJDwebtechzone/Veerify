@@ -38,6 +38,16 @@ import { palette, spacing, radius, shadows, type } from '../../theme';
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
+// Mirror of the helper used elsewhere — turns a /uploads path into a
+// fully-qualified URL the emulator can fetch.
+const ASSET_HOST = (apiClient.defaults.baseURL || '').replace(/\/api\/?$/, '');
+function resolveAssetUrl(src) {
+  if (!src) return null;
+  if (src.startsWith('data:') || src.startsWith('http://') || src.startsWith('https://')) return src;
+  if (src.startsWith('/uploads/')) return ASSET_HOST + src;
+  return src;
+}
+
 // Tiny string-distance helper for matching days_of_week to today.
 function classesToday(batches) {
   const today = DAYS[new Date().getDay()];
@@ -60,15 +70,21 @@ export default function StaffDashboardScreen({ navigation }) {
   // (Previously this card read /leave-requests/trainer/my, which is the
   // STUDENT leave review queue — not the trainer's own time off.)
   const [myLeaves, setMyLeaves] = useState([]);
+  // Trainer's own joined profile — used to render the avatar photo + the
+  // pretty name in the header. Falls back to `user` from AuthContext when
+  // the fetch hasn't returned yet so the header never flashes empty.
+  const [me, setMe] = useState(null);
 
   const load = useCallback(async () => {
     try {
-      const [batchRes, leaveRes] = await Promise.all([
+      const [batchRes, leaveRes, meRes] = await Promise.all([
         apiClient.get('/batches/trainer/my').catch(() => ({ data: { batches: [] } })),
         apiClient.get('/trainer-leave-requests/my').catch(() => ({ data: { leave_requests: [] } })),
+        apiClient.get('/trainers/me').catch(() => ({ data: { trainer: null } })),
       ]);
       setBatches(batchRes.data?.batches || []);
       setMyLeaves(leaveRes.data?.leave_requests || []);
+      setMe(meRes.data?.trainer || meRes.data || null);
     } catch (err) {
       console.log('[StaffDashboard] load error:', err?.message);
     } finally {
@@ -110,12 +126,15 @@ export default function StaffDashboardScreen({ navigation }) {
 
   const attendancePct = batches.length ? 92 : 0;
 
-  const initials = (user?.name || 'S')
+  const displayName = me?.name || user?.name || 'Trainer';
+  const photoUrl = resolveAssetUrl(me?.photo_url);
+  const initials = (displayName || 'T')
     .split(' ')
     .map((w) => w[0])
+    .filter(Boolean)
     .slice(0, 2)
     .join('')
-    .toUpperCase();
+    .toUpperCase() || 'T';
 
   if (loading) {
     return (
@@ -146,7 +165,11 @@ export default function StaffDashboardScreen({ navigation }) {
             activeOpacity={0.85}
           >
             <View style={styles.avatar}>
-              <Text style={styles.avatarText}>{initials}</Text>
+              {photoUrl ? (
+                <Image source={{ uri: photoUrl }} style={styles.avatarImg} />
+              ) : (
+                <Text style={styles.avatarText}>{initials}</Text>
+              )}
             </View>
           </TouchableOpacity>
           <TouchableOpacity
@@ -155,7 +178,7 @@ export default function StaffDashboardScreen({ navigation }) {
             activeOpacity={0.85}
           >
             <Text style={styles.eyebrow}>Welcome back</Text>
-            <Text style={styles.greetName} numberOfLines={1}>{user?.name || 'Trainer'}</Text>
+            <Text style={styles.greetName} numberOfLines={1}>{displayName}</Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={styles.bellBtn}
@@ -226,7 +249,7 @@ export default function StaffDashboardScreen({ navigation }) {
           icon={MessageSquare}
           label="Send Announcement"
           accent={palette.green}
-          onPress={() => navigation.navigate('StaffNotifications')}
+          onPress={() => navigation.navigate('TrainerSendAnnouncement')}
         />
         <ActionButton
           icon={Video}
@@ -413,8 +436,10 @@ const styles = StyleSheet.create({
     width: 48, height: 48, borderRadius: 24,
     backgroundColor: palette.purple.vivid,
     alignItems: 'center', justifyContent: 'center',
+    overflow: 'hidden',
   },
   avatarText: { color: '#fff', fontWeight: '800', fontSize: 16 },
+  avatarImg: { width: '100%', height: '100%' },
   eyebrow: { ...type.caption, color: palette.textMuted },
   greetName: { ...type.h1, color: palette.text, marginTop: 1 },
   bellBtn: {

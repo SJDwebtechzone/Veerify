@@ -228,6 +228,30 @@ exports.getMySummary = async (req, res) => {
   }
 };
 
+// GET /api/students/me
+// Tiny endpoint the mobile home header uses to fetch the calling
+// student's avatar photo. Joins the user row with student_profiles so
+// we get a single payload with name + email + photo_url. Other detail
+// screens already have their own joined queries; this stays minimal.
+exports.getMe = async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT u.id, u.name, u.email, u.phone,
+              sp.photo_url, sp.full_name AS profile_full_name
+         FROM users u
+         LEFT JOIN student_profiles sp ON sp.user_id = u.id
+        WHERE u.id = $1`,
+      [req.user.id],
+    );
+    const row = r.rows[0];
+    if (!row) return res.status(404).json({ message: 'Profile not found' });
+    res.json({ student: row });
+  } catch (err) {
+    console.error('Get my (student) error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
 exports.getMyVideos = async (req, res) => {
   try {
     const studentId = req.user.id;

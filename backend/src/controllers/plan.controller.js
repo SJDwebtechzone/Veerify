@@ -16,6 +16,15 @@ exports.getUsage = async (req, res) => {
       getUsage(institutionId, 'students'),
       getUsage(institutionId, 'trainers'),
     ]);
+    // Diagnostic log — visible in the backend terminal. Helps catch
+    // the "why didn't the cap fire?" case (usually missing plan_id or
+    // a plan row with max_trainers >= 999).
+    // eslint-disable-next-line no-console
+    console.log(
+      `[plans/usage] inst=${institutionId} trainers ` +
+      `${trainers.current}/${trainers.limit ?? '∞'} ` +
+      `(plan="${trainers.plan_name || 'none'}", unlimited=${trainers.unlimited})`,
+    );
     res.json({ students, trainers });
   } catch (err) {
     console.error('Plan usage error:', err);

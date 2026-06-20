@@ -28,6 +28,9 @@ const notificationRoutes = require('./src/routes/notification.routes');
 const salaryRoutes = require('./src/routes/salary.routes');
 const adminRoutes = require('./src/routes/admin.routes');
 const announcementRoutes = require('./src/routes/announcement.routes');
+const curriculumRoutes   = require('./src/routes/curriculum.routes');
+const branchRoutes       = require('./src/routes/branch.routes');
+const academyRoutes      = require('./src/routes/academy.routes');
 const studentRoutes = require('./src/routes/student.routes');
 const courseVideoRoutes = require('./src/routes/courseVideo.routes');
 const marketplaceRoutes = require('./src/routes/marketplace.routes');
@@ -104,6 +107,9 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/salaries', salaryRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/announcements', announcementRoutes);
+app.use('/api/curriculum-progress', curriculumRoutes);
+app.use('/api/branches', branchRoutes);
+app.use('/api/academies', academyRoutes);
 app.use('/api/students', studentRoutes);
 app.use('/api/course-videos', courseVideoRoutes);
 app.use('/api/uploads', uploadRoutes);
@@ -116,4 +122,10 @@ app.use((req, res) => {
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
+  // Probe the SMTP transporter on startup so credential / TLS errors
+  // surface immediately rather than only when a real send fails.
+  try {
+    const { verifyTransporter } = require('./src/utils/mailer');
+    verifyTransporter();
+  } catch (_) { /* mailer is optional */ }
 });

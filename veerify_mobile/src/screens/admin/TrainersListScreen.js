@@ -13,18 +13,20 @@
 import React, { useState, useCallback, useMemo } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity, Alert, RefreshControl,
-  ActivityIndicator, Image, StyleSheet, Linking,
+  ActivityIndicator, Image, StyleSheet, Linking, Modal, ScrollView,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import {
   Phone, Mail, MoreHorizontal, Plus, Trash2, Award, Briefcase,
-  GraduationCap, ChevronRight, Users, Edit3,
+  GraduationCap, ChevronRight, Users, Edit3, Eye, X, Calendar, FileText,
+  Crown,
 } from 'lucide-react-native';
 // MoreVertical not in older lucide versions; MoreHorizontal works the same.
 const MoreVertical = MoreHorizontal;
 
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
+import PlanLimitModal from '../../components/PlanLimitModal';
 
 // ─── Asset host helper (re-uses the mobile API base) ───────────────────
 const ASSET_HOST = (apiClient.defaults.baseURL || '').replace(/\/api\/?$/, '');
@@ -58,11 +60,22 @@ export default function TrainersListScreen({ navigation }) {
   const [trainers, setTrainers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  // Selected trainer for the View modal (null = closed)
+  const [viewing, setViewing] = useState(null);
+  // Plan-limit info — { limit, current, plan_name, unlimited, exceeded }
+  const [trainerUsage, setTrainerUsage] = useState(null);
+  // Whether the Upgrade Plan modal is currently visible.
+  const [planModalOpen, setPlanModalOpen] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const res = await apiClient.get('/trainers');
-      setTrainers(res.data.trainers || []);
+      const [tRes, uRes] = await Promise.all([
+        apiClient.get('/trainers'),
+        apiClient.get('/plans/usage').catch(() => null),
+      ]);
+      setTrainers(tRes.data.trainers || []);
+      const usage = uRes?.data?.trainers;
+      if (usage) setTrainerUsage(usage);
     } catch (err) {
       console.log('[TrainersList] load error:', err.message);
     } finally {
@@ -72,6 +85,37 @@ export default function TrainersListScreen({ navigation }) {
   }, []);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  // Whether we're re-checking the plan cap right now (FAB tap).
+  const [checkingCap, setCheckingCap] = useState(false);
+
+  // Tap handler for every "+ Add" entry point on this screen.
+  //
+  // We re-fetch /plans/usage on each tap so the modal fires reliably
+  // even when the cached usage is stale (admin removed/added someone
+  // in another session, or the initial fetch hasn't returned yet on a
+  // slow network). The /plans/usage endpoint is cheap and the FAB tap
+  // is a low-frequency action, so the latency cost is worth the UX.
+  const handleAddTrainerPress = async () => {
+    if (checkingCap) return;
+    setCheckingCap(true);
+    try {
+      const r = await apiClient.get('/plans/usage');
+      const u = r?.data?.trainers || null;
+      if (u) setTrainerUsage(u);
+      if (u && !u.unlimited && u.current >= u.limit) {
+        setPlanModalOpen(true);
+        return;
+      }
+    } catch (err) {
+      // Network or auth blip — fall through and let CreateTrainer's
+      // own 402 handler catch the cap server-side as a safety net.
+      console.log('[TrainersList] usage check failed:', err?.message);
+    } finally {
+      setCheckingCap(false);
+    }
+    navigation.navigate('CreateTrainer');
+  };
 
   const onDelete = (trainer) => {
     Alert.alert(
@@ -124,15 +168,38 @@ export default function TrainersListScreen({ navigation }) {
         <View style={{ flex: 1 }}>
           <Text style={styles.headerTitle}>My Trainers</Text>
           <Text style={styles.headerSub}>
-            {trainers.length === 0
-              ? 'Enroll your first trainer'
-              : `${trainers.length} ${trainers.length === 1 ? 'trainer' : 'trainers'} on staff`}
+            {trainerUsage && !trainerUsage.unlimited
+              ? `${trainerUsage.current}/${trainerUsage.limit} used` +
+                (trainerUsage.plan_name ? ` · ${trainerUsage.plan_name} plan` : '')
+              : trainers.length === 0
+                ? 'Enroll your first trainer'
+                : `${trainers.length} ${trainers.length === 1 ? 'trainer' : 'trainers'} on staff`}
           </Text>
         </View>
-        <View style={styles.headerPill}>
-          <Users size={12} color={palette.purple.on} strokeWidth={2.4} />
-          <Text style={styles.headerPillText}>{trainers.length}</Text>
-        </View>
+        {/* Usage chip — shows "current / limit" against the plan. If the
+            usage call hasn't loaded yet, we fall back to the bare count
+            pill so the header still renders. Tap to open the Upgrade
+            modal even before hitting the cap. */}
+        {trainerUsage && !trainerUsage.unlimited ? (
+          <TouchableOpacity
+            style={[
+              styles.usagePill,
+              trainerUsage.current >= trainerUsage.limit && styles.usagePillFull,
+            ]}
+            onPress={() => setPlanModalOpen(true)}
+            activeOpacity={0.85}
+          >
+            <Users size={12} color={palette.purple.on} strokeWidth={2.4} />
+            <Text style={styles.usagePillText}>
+              {trainerUsage.current}/{trainerUsage.limit}
+            </Text>
+          </TouchableOpacity>
+        ) : (
+          <View style={styles.headerPill}>
+            <Users size={12} color={palette.purple.on} strokeWidth={2.4} />
+            <Text style={styles.headerPillText}>{trainers.length}</Text>
+          </View>
+        )}
       </View>
 
       <FlatList
@@ -157,7 +224,7 @@ export default function TrainersListScreen({ navigation }) {
             </Text>
             <TouchableOpacity
               style={styles.emptyCta}
-              onPress={() => navigation.navigate('CreateTrainer')}
+              onPress={handleAddTrainerPress}
               activeOpacity={0.85}
             >
               <Plus size={14} color="#fff" strokeWidth={2.6} />
@@ -173,43 +240,69 @@ export default function TrainersListScreen({ navigation }) {
             onMail={() => handleMail(item.email)}
             onEdit={() => navigation.navigate('CreateTrainer', { trainer: item })}
             onDelete={() => onDelete(item)}
+            onView={() => setViewing(item)}
           />
         )}
       />
 
-      {/* Floating Add button */}
+      {/* Floating Add button — guarded by plan cap. While we re-check
+          /plans/usage we show a spinner; when we know the cap is hit
+          the icon flips to a Crown so the limit is visible at a glance. */}
       <TouchableOpacity
-        style={styles.fab}
-        onPress={() => navigation.navigate('CreateTrainer')}
+        style={[
+          styles.fab,
+          trainerUsage && !trainerUsage.unlimited && trainerUsage.current >= trainerUsage.limit && styles.fabCapped,
+        ]}
+        onPress={handleAddTrainerPress}
         activeOpacity={0.85}
+        disabled={checkingCap}
       >
-        <Plus size={22} color="#fff" strokeWidth={2.8} />
+        {checkingCap ? (
+          <ActivityIndicator color="#fff" />
+        ) : trainerUsage && !trainerUsage.unlimited && trainerUsage.current >= trainerUsage.limit ? (
+          <Crown size={20} color="#fff" strokeWidth={2.6} />
+        ) : (
+          <Plus size={22} color="#fff" strokeWidth={2.8} />
+        )}
       </TouchableOpacity>
+
+      {/* Full-screen "View Trainer" modal */}
+      <TrainerDetailModal
+        trainer={viewing}
+        onClose={() => setViewing(null)}
+        onCall={(phone) => handleCall(phone)}
+        onMail={(email) => handleMail(email)}
+        onEdit={(t) => {
+          setViewing(null);
+          navigation.navigate('CreateTrainer', { trainer: t });
+        }}
+      />
+
+      {/* Upgrade Plan modal — fired both proactively (FAB / empty CTA
+          when usage.current ≥ limit) and as a fallback when the create
+          screen surfaces a 402 it can't handle locally. */}
+      <PlanLimitModal
+        visible={planModalOpen}
+        kind="trainer"
+        limit={trainerUsage?.limit}
+        current={trainerUsage?.current}
+        planName={trainerUsage?.plan_name}
+        onClose={() => setPlanModalOpen(false)}
+        onUpgrade={() => {
+          try { navigation.navigate('PlanSelection'); }
+          catch { /* PlanSelection isn't always in this stack */ }
+        }}
+      />
     </View>
   );
 }
 
 // ─── Card ──────────────────────────────────────────────────────────────
-function TrainerCard({ trainer, onCall, onMail, onEdit, onDelete }) {
+function TrainerCard({ trainer, onCall, onMail, onEdit, onDelete, onView }) {
   const belt = beltForLabel(trainer.belt_level);
   const photoUrl = resolveAssetUrl(trainer.photo_url);
   const initials = (trainer.name || '?')
     .split(' ').map((w) => w[0]).filter(Boolean).slice(0, 2).join('').toUpperCase();
-
-  const handleMore = () => {
-    Alert.alert(
-      trainer.name,
-      'What would you like to do?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        ...(trainer.phone ? [{ text: 'Call', onPress: onCall }] : []),
-        ...(trainer.email ? [{ text: 'Email', onPress: onMail }] : []),
-        { text: 'Edit', onPress: onEdit },
-        { text: 'Remove', style: 'destructive', onPress: onDelete },
-      ],
-      { cancelable: true },
-    );
-  };
 
   return (
     <View style={styles.card}>
@@ -253,14 +346,28 @@ function TrainerCard({ trainer, onCall, onMail, onEdit, onDelete }) {
           <Text style={styles.editBtnText}>Edit</Text>
         </TouchableOpacity>
 
-        {/* Kebab still exposes Call / Email / Remove. */}
+        {/* Delete pill - removes the trainer (with confirmation). */}
         <TouchableOpacity
-          onPress={handleMore}
-          style={styles.kebab}
-          hitSlop={8}
-          activeOpacity={0.7}
+          onPress={onDelete}
+          style={styles.deleteBtn}
+          hitSlop={6}
+          activeOpacity={0.85}
         >
-          <MoreVertical size={18} color={palette.textMuted} strokeWidth={2.2} />
+          <Trash2 size={13} color="#fff" strokeWidth={2.6} />
+          <Text style={styles.deleteBtnText}>Delete</Text>
+        </TouchableOpacity>
+
+        {/* View pill - opens the full trainer profile modal. Replaces the
+            old kebab (three-dot) menu so admins can see the whole record
+            in one tap. */}
+        <TouchableOpacity
+          onPress={onView}
+          style={styles.viewBtn}
+          hitSlop={6}
+          activeOpacity={0.85}
+        >
+          <Eye size={13} color="#fff" strokeWidth={2.6} />
+          <Text style={styles.viewBtnText}>View</Text>
         </TouchableOpacity>
       </View>
 
@@ -325,6 +432,184 @@ function TrainerCard({ trainer, onCall, onMail, onEdit, onDelete }) {
   );
 }
 
+// ─── TrainerDetailModal — full-screen profile sheet ────────────────────
+function TrainerDetailModal({ trainer, onClose, onCall, onMail, onEdit }) {
+  if (!trainer) return null;
+  const belt = beltForLabel(trainer.belt_level);
+  const photoUrl = resolveAssetUrl(trainer.photo_url);
+  const certUrl  = resolveAssetUrl(trainer.certificate_url);
+  const initials = (trainer.name || '?')
+    .split(' ').map((w) => w[0]).filter(Boolean).slice(0, 2).join('').toUpperCase();
+
+  const fmtDate = (s) => {
+    if (!s) return '—';
+    const d = new Date(s);
+    if (Number.isNaN(d.getTime())) return s;
+    return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+  };
+
+  return (
+    <Modal
+      visible={!!trainer}
+      animationType="slide"
+      transparent={false}
+      onRequestClose={onClose}
+    >
+      <View style={styles.modalScreen}>
+        {/* Header */}
+        <View style={styles.modalHeader}>
+          <Text style={styles.modalHeaderTitle}>Trainer Profile</Text>
+          <TouchableOpacity onPress={onClose} style={styles.modalCloseBtn} hitSlop={8}>
+            <X size={18} color={palette.text} strokeWidth={2.4} />
+          </TouchableOpacity>
+        </View>
+
+        <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: 120 }}>
+          {/* Hero — avatar, name, specialization, belt */}
+          <View style={styles.modalHero}>
+            <View style={[styles.modalAvatar, { borderColor: belt.border }]}>
+              {photoUrl ? (
+                <Image source={{ uri: photoUrl }} style={styles.modalAvatarImg} />
+              ) : (
+                <View style={[styles.modalAvatarFallback, { backgroundColor: belt.bg }]}>
+                  <Text style={[
+                    styles.modalAvatarText,
+                    { color: belt.fg === '#FFFFFF' ? '#111827' : belt.fg },
+                  ]}>
+                    {initials}
+                  </Text>
+                </View>
+              )}
+            </View>
+            <Text style={styles.modalName}>{trainer.name}</Text>
+            {trainer.specialization ? (
+              <Text style={styles.modalSubtitle}>{trainer.specialization}</Text>
+            ) : null}
+            {trainer.belt_level ? (
+              <View style={[styles.modalBeltPill, { backgroundColor: belt.bg, borderColor: belt.border }]}>
+                <Award size={11} color={belt.fg} strokeWidth={2.4} />
+                <Text style={[styles.modalBeltText, { color: belt.fg }]}>
+                  {trainer.belt_level}
+                </Text>
+              </View>
+            ) : null}
+          </View>
+
+          {/* Contact */}
+          <DetailSection title="Contact">
+            <DetailRow icon={Phone} label="Phone" value={trainer.phone || '—'}
+              onPress={trainer.phone ? () => onCall(trainer.phone) : undefined} />
+            <DetailRow icon={Mail} label="Email" value={trainer.email || '—'}
+              onPress={trainer.email ? () => onMail(trainer.email) : undefined} />
+          </DetailSection>
+
+          {/* Professional */}
+          <DetailSection title="Professional">
+            <DetailRow icon={Briefcase} label="Specialization"
+              value={trainer.specialization || '—'} />
+            <DetailRow icon={GraduationCap} label="Experience"
+              value={trainer.experience_years != null
+                ? `${trainer.experience_years} ${trainer.experience_years === 1 ? 'year' : 'years'}`
+                : '—'} />
+            <DetailRow icon={Award} label="Belt level"
+              value={trainer.belt_level || '—'} />
+            {trainer.bio ? (
+              <DetailRow icon={FileText} label="Bio" value={trainer.bio} multiline />
+            ) : null}
+          </DetailSection>
+
+          {/* Personal */}
+          {(trainer.gender || trainer.date_of_birth) ? (
+            <DetailSection title="Personal">
+              {trainer.gender ? (
+                <DetailRow icon={Users} label="Gender" value={trainer.gender} />
+              ) : null}
+              {trainer.date_of_birth ? (
+                <DetailRow icon={Calendar} label="Date of birth"
+                  value={fmtDate(trainer.date_of_birth)} />
+              ) : null}
+            </DetailSection>
+          ) : null}
+
+          {/* Identity documents */}
+          {(trainer.govt_proof_type || trainer.govt_proof_number || certUrl) ? (
+            <DetailSection title="Identity & Documents">
+              {trainer.govt_proof_type ? (
+                <DetailRow icon={FileText} label="ID type"
+                  value={trainer.govt_proof_type} />
+              ) : null}
+              {trainer.govt_proof_number ? (
+                <DetailRow icon={FileText} label="ID number"
+                  value={trainer.govt_proof_number} />
+              ) : null}
+              {certUrl ? (
+                <DetailRow icon={FileText} label="Certificate"
+                  value="Tap to open" onPress={() => Linking.openURL(certUrl)} />
+              ) : null}
+            </DetailSection>
+          ) : null}
+        </ScrollView>
+
+        {/* Sticky bottom actions */}
+        <View style={styles.modalActions}>
+          {trainer.phone ? (
+            <TouchableOpacity
+              style={[styles.modalActionBtn, { backgroundColor: '#10B981' }]}
+              onPress={() => onCall(trainer.phone)}
+              activeOpacity={0.85}
+            >
+              <Phone size={14} color="#fff" strokeWidth={2.6} />
+              <Text style={styles.modalActionText}>Call</Text>
+            </TouchableOpacity>
+          ) : null}
+          <TouchableOpacity
+            style={[styles.modalActionBtn, { backgroundColor: palette.purple.vivid }]}
+            onPress={() => onEdit(trainer)}
+            activeOpacity={0.85}
+          >
+            <Edit3 size={14} color="#fff" strokeWidth={2.6} />
+            <Text style={styles.modalActionText}>Edit</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function DetailSection({ title, children }) {
+  return (
+    <View style={styles.detailSection}>
+      <Text style={styles.detailSectionTitle}>{title}</Text>
+      <View style={styles.detailCard}>{children}</View>
+    </View>
+  );
+}
+
+function DetailRow({ icon: Icon, label, value, onPress, multiline }) {
+  const body = (
+    <View style={styles.detailRow}>
+      <View style={styles.detailIconWrap}>
+        {Icon ? <Icon size={14} color={palette.purple.vivid} strokeWidth={2.2} /> : null}
+      </View>
+      <View style={{ flex: 1 }}>
+        <Text style={styles.detailLabel}>{label}</Text>
+        <Text
+          style={[styles.detailValue, onPress && { color: palette.purple.vivid }]}
+          numberOfLines={multiline ? undefined : 1}
+        >
+          {value}
+        </Text>
+      </View>
+      {onPress ? (
+        <ChevronRight size={14} color={palette.textLight} strokeWidth={2.2} />
+      ) : null}
+    </View>
+  );
+  return onPress
+    ? <TouchableOpacity onPress={onPress} activeOpacity={0.7}>{body}</TouchableOpacity>
+    : body;
+}
+
 // ─── Styles ────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: palette.bg },
@@ -348,6 +633,17 @@ const styles = StyleSheet.create({
     borderRadius: radius.pill,
   },
   headerPillText: { ...type.micro, color: palette.purple.on, fontWeight: '800' },
+
+  // Usage pill (replaces the bare count when a plan cap is in effect).
+  // Tappable; turns red when at the cap to draw the eye.
+  usagePill: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: spacing.sm, paddingVertical: 4,
+    backgroundColor: palette.purple.soft,
+    borderRadius: radius.pill,
+  },
+  usagePillFull: { backgroundColor: '#FFE4E6' },
+  usagePillText: { ...type.micro, color: palette.purple.on, fontWeight: '800' },
 
   // Card
   card: {
@@ -389,6 +685,127 @@ const styles = StyleSheet.create({
     borderRadius: radius.pill,
   },
   editBtnText: { ...type.micro, color: '#fff', fontWeight: '800', letterSpacing: 0.4 },
+
+  // Visible Delete pill - same dimensions as editBtn so they line up
+  // neatly side by side. Brand-red so it's clearly destructive.
+  deleteBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: spacing.sm + 2, paddingVertical: 6,
+    backgroundColor: '#E63946',
+    borderRadius: radius.pill,
+    marginLeft: 6,
+  },
+  deleteBtnText: { ...type.micro, color: '#fff', fontWeight: '800', letterSpacing: 0.4 },
+
+  // View pill - opens the full trainer profile modal. Slate/blue so it
+  // visually reads as "info" next to the action-y Edit and Delete pills.
+  viewBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: spacing.sm + 2, paddingVertical: 6,
+    backgroundColor: '#475569',
+    borderRadius: radius.pill,
+    marginLeft: 6,
+  },
+  viewBtnText: { ...type.micro, color: '#fff', fontWeight: '800', letterSpacing: 0.4 },
+
+  // ── Full-screen trainer profile modal ──────────────────────────────
+  modalScreen: { flex: 1, backgroundColor: palette.bg },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: spacing.lg,
+    paddingTop: 48,
+    paddingBottom: spacing.md,
+    backgroundColor: palette.surface,
+    borderBottomWidth: 1,
+    borderBottomColor: palette.divider || '#E5E7EB',
+  },
+  modalHeaderTitle: { ...type.h3, flex: 1, color: palette.text, fontWeight: '800' },
+  modalCloseBtn: {
+    width: 32, height: 32, borderRadius: 16,
+    backgroundColor: palette.bg,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  modalHero: {
+    alignItems: 'center',
+    paddingVertical: spacing.lg,
+    marginBottom: spacing.md,
+  },
+  modalAvatar: {
+    width: 96, height: 96, borderRadius: 48,
+    borderWidth: 3,
+    alignItems: 'center', justifyContent: 'center',
+    overflow: 'hidden',
+    marginBottom: spacing.md,
+  },
+  modalAvatarImg: { width: '100%', height: '100%' },
+  modalAvatarFallback: {
+    width: '100%', height: '100%',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  modalAvatarText: { fontSize: 32, fontWeight: '800' },
+  modalName: { ...type.h2, color: palette.text, fontWeight: '800' },
+  modalSubtitle: { ...type.body, color: palette.textMuted, marginTop: 4 },
+  modalBeltPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: 10, paddingVertical: 5,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    marginTop: spacing.sm,
+  },
+  modalBeltText: { ...type.micro, fontWeight: '800' },
+
+  detailSection: { marginBottom: spacing.lg },
+  detailSectionTitle: {
+    ...type.micro,
+    color: palette.textMuted,
+    fontWeight: '800',
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+    marginBottom: spacing.sm,
+    marginLeft: spacing.xs,
+  },
+  detailCard: {
+    backgroundColor: palette.surface,
+    borderRadius: radius.lg,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+    ...shadows.card,
+  },
+  detailRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: spacing.md,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: palette.divider || '#E5E7EB',
+    gap: spacing.md,
+  },
+  detailIconWrap: {
+    width: 28, height: 28, borderRadius: 14,
+    backgroundColor: palette.purple.soft,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  detailLabel: { ...type.micro, color: palette.textMuted, fontWeight: '700' },
+  detailValue: { ...type.body, color: palette.text, fontWeight: '600', marginTop: 1 },
+
+  modalActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    padding: spacing.lg,
+    backgroundColor: palette.surface,
+    borderTopWidth: 1,
+    borderTopColor: palette.divider || '#E5E7EB',
+  },
+  modalActionBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: spacing.md,
+    borderRadius: radius.lg,
+  },
+  modalActionText: { ...type.body, color: '#fff', fontWeight: '800' },
 
   // Chip row
   chipRow: {
@@ -469,4 +886,7 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
     ...shadows.raised,
   },
+  // Plan-cap reached → FAB turns brand red and swaps the + for a Crown
+  // so the constraint reads at a glance from anywhere on the screen.
+  fabCapped: { backgroundColor: '#E63946' },
 });

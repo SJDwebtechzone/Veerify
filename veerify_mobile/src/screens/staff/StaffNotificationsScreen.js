@@ -149,6 +149,15 @@ export default function StaffNotificationsScreen({ navigation }) {
             {unread > 0 ? `${unread} unread` : 'You\'re all caught up.'}
           </Text>
         </View>
+        {/* Sent history — visible for any role that can dispatch
+            notifications (trainer / admin). Reuses the same screen. */}
+        <TouchableOpacity
+          onPress={() => navigation.navigate('SentNotifications')}
+          style={styles.sentBtn}
+          activeOpacity={0.85}
+        >
+          <Text style={styles.sentBtnText}>Sent</Text>
+        </TouchableOpacity>
         <TouchableOpacity
           onPress={markAllRead}
           disabled={!unread}
@@ -310,6 +319,20 @@ const styles = StyleSheet.create({
     backgroundColor: palette.purple.soft,
   },
   markAllText: { ...type.micro, color: palette.purple.on, fontWeight: '800' },
+
+  // Sent-history shortcut next to "Mark all". Small slate pill.
+  sentBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 999,
+    backgroundColor: '#F1F5F9',
+    marginRight: 6,
+  },
+  sentBtnText: {
+    ...type.micro,
+    color: palette.text,
+    fontWeight: '800',
+  },
 
   // Tabs
   tabsWrap: {

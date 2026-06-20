@@ -376,8 +376,8 @@ exports.getMyEnrollments = async (req, res) => {
     const studentId = req.user.id;
 
     const result = await pool.query(
-      `SELECT e.*, 
-              b.name AS batch_name, b.days_of_week, b.start_time, b.end_time, b.mode,
+      `SELECT e.*,
+              b.name AS batch_name, b.course_id, b.days_of_week, b.start_time, b.end_time, b.mode,
               c.name AS course_name, c.price AS course_price,
               i.name AS institution_name, i.city AS institution_city,
               u.name AS trainer_name

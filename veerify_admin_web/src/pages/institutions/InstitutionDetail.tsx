@@ -58,6 +58,8 @@ interface Institution {
   registration_number: string;
   date_of_establishment?: string | null;
   logo_url: string;
+  // Skills offered (wizard v2)
+  skills?: string[] | null;
   // Contact & Location
   email: string;
   phone: string;
@@ -67,6 +69,9 @@ interface Institution {
   pincode: string;
   no_of_branches?: number | null;
   branches?: Branch[] | null;
+  // GPS coordinates of the head office (wizard v2)
+  latitude?: number | string | null;
+  longitude?: number | string | null;
   // Accreditation
   affiliation_or_board?: string | null;
   accreditation_body_name?: string | null;
@@ -74,8 +79,12 @@ interface Institution {
   accreditation_certificate_url?: string | null;
   // Operations
   total_student_capacity?: number | null;
+  current_enrollment?: number | null;
   medium_of_instruction?: string[] | null;
   operating_hours?: string | null;
+  // Structured time-slot arrays (wizard v2) — Mon–Fri and Sat–Sun
+  operating_hours_weekday?: Array<{ start?: string; end?: string }> | null;
+  operating_hours_weekend?: Array<{ start?: string; end?: string }> | null;
   // Point of contact
   master_name: string;
   master_role?: string | null;
@@ -133,6 +142,19 @@ function fmtDate(s?: string | null): string {
   const d = new Date(s);
   if (Number.isNaN(d.getTime())) return s;
   return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+}
+
+// Convert a "HH:MM" 24-hour string into a friendlier "9:00 AM" label
+// for the operating-hours display.
+function formatTime12(value?: string | null): string {
+  if (!value) return '—';
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(value));
+  if (!m) return value;
+  const h = Number(m[1]);
+  const mm = m[2];
+  const isPM = h >= 12;
+  const h12 = h % 12 || 12;
+  return `${h12}:${mm} ${isPM ? 'PM' : 'AM'}`;
 }
 
 export function InstitutionDetail() {
@@ -421,6 +443,25 @@ export function InstitutionDetail() {
                 )}
               </div>
             </div>
+
+            {/* Skills chips — martial-arts disciplines taught (wizard v2) */}
+            <div className="mt-4 pt-4 border-t border-gray-50">
+              <p className="text-xs text-gray-500 mb-2">Skills Offered</p>
+              <div className="flex flex-wrap gap-2">
+                {Array.isArray(institution.skills) && institution.skills.length > 0 ? (
+                  institution.skills.map((s, i) => (
+                    <span
+                      key={`${s}-${i}`}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 bg-rose-50 text-rose-700 rounded-full text-xs font-semibold border border-rose-100"
+                    >
+                      {s}
+                    </span>
+                  ))
+                ) : (
+                  <span className="text-sm text-gray-400">—</span>
+                )}
+              </div>
+            </div>
           </Card>
 
           {/* ── 2. Contact & Location ── */}
@@ -456,6 +497,24 @@ export function InstitutionDetail() {
                 )}
               </p>
             </div>
+
+            {/* Head office GPS — captured via the wizard's "Use my current
+                location" button. Click the link to drop a pin on Google Maps. */}
+            {(institution.latitude != null && institution.longitude != null) ? (
+              <div className="mt-4 pt-4 border-t border-gray-50">
+                <p className="text-xs text-gray-500 mb-1">Head Office Coordinates</p>
+                <a
+                  href={`https://www.google.com/maps?q=${institution.latitude},${institution.longitude}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-sm font-mono text-emerald-700 hover:text-emerald-800 hover:underline inline-flex items-center gap-1"
+                  title="Open in Google Maps"
+                >
+                  {Number(institution.latitude).toFixed(5)}, {Number(institution.longitude).toFixed(5)}
+                  <ExternalLink size={11} />
+                </a>
+              </div>
+            ) : null}
 
             {/* Branch list */}
             {institution.branches && institution.branches.length > 0 ? (
@@ -561,10 +620,58 @@ export function InstitutionDetail() {
                 }
               />
               <InfoRow
-                icon={Clock}
-                label="Operating Hours"
-                value={institution.operating_hours || '—'}
+                icon={Users}
+                label="Current Enrollment"
+                value={
+                  institution.current_enrollment != null
+                    ? institution.current_enrollment.toLocaleString('en-IN')
+                    : '—'
+                }
               />
+            </div>
+
+            {/* Structured operating-hour slots (wizard v2). Falls back to
+                the legacy text summary if the new arrays are empty. */}
+            <div className="mt-4 pt-4 border-t border-gray-50">
+              <p className="text-xs text-gray-500 mb-2 flex items-center gap-1">
+                <Clock size={12} />
+                Operating Hours
+              </p>
+              {Array.isArray(institution.operating_hours_weekday) &&
+               institution.operating_hours_weekday.length > 0 ||
+               Array.isArray(institution.operating_hours_weekend) &&
+               institution.operating_hours_weekend.length > 0 ? (
+                <div className="space-y-2">
+                  {Array.isArray(institution.operating_hours_weekday)
+                   && institution.operating_hours_weekday.length > 0 ? (
+                    <div className="flex items-start gap-3">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-orange-700 bg-orange-50 border border-orange-100 px-2 py-0.5 rounded-md mt-0.5">
+                        Mon–Fri
+                      </span>
+                      <p className="text-sm text-gray-900 font-mono">
+                        {institution.operating_hours_weekday
+                          .map((s) => `${formatTime12(s.start)} – ${formatTime12(s.end)}`)
+                          .join(', ')}
+                      </p>
+                    </div>
+                  ) : null}
+                  {Array.isArray(institution.operating_hours_weekend)
+                   && institution.operating_hours_weekend.length > 0 ? (
+                    <div className="flex items-start gap-3">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-orange-700 bg-orange-50 border border-orange-100 px-2 py-0.5 rounded-md mt-0.5">
+                        Sat–Sun
+                      </span>
+                      <p className="text-sm text-gray-900 font-mono">
+                        {institution.operating_hours_weekend
+                          .map((s) => `${formatTime12(s.start)} – ${formatTime12(s.end)}`)
+                          .join(', ')}
+                      </p>
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <p className="text-sm text-gray-700">{institution.operating_hours || '—'}</p>
+              )}
             </div>
 
             <div className="mt-4 pt-4 border-t border-gray-50">

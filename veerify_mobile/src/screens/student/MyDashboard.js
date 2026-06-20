@@ -25,6 +25,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import {
   Bell, BookOpen, PlayCircle, Calendar, Clock, GraduationCap, Award,
   ChevronRight, Wallet, CheckCircle2, Video, Building2, User,
+  CalendarDays, Target,
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
@@ -78,20 +79,64 @@ export default function MyDashboard({ navigation }) {
   const [videos, setVideos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  // Profile photo + display name for the hero avatar. We pull this in
+  // parallel with the rest of the dashboard so the avatar paints with
+  // the first paint instead of swapping in late.
+  const [me, setMe] = useState(null);
+
+  // Per-course progress lookup, keyed by course_id. Each entry shape:
+  //   { lessons: [...all curriculum lessons], completed: [...only the
+  //     ones with a row in student_curriculum_progress] }
+  // We only render the `completed` slice on the home screen — the user
+  // wants the dashboard to surface what the student has finished, not
+  // the open todo list.
+  const [progressByCourse, setProgressByCourse] = useState({});
 
   const load = useCallback(async () => {
     try {
-      const [enrRes, vidRes] = await Promise.all([
+      const [enrRes, vidRes, meRes] = await Promise.all([
         apiClient.get('/enrollments/my').catch(() => ({ data: { enrollments: [] } })),
         apiClient.get('/students/my-videos').catch(() => ({ data: { videos: [] } })),
+        apiClient.get('/students/me').catch(() => ({ data: { student: null } })),
       ]);
-      setEnrollments(enrRes.data?.enrollments || []);
+      const enrs = enrRes.data?.enrollments || [];
+      setEnrollments(enrs);
       setVideos(vidRes.data?.videos || []);
+      setMe(meRes.data?.student || null);
+
+      // Fan out one curriculum-progress fetch per unique paid course.
+      // Errors fall through silently (e.g. a course with no curriculum
+      // yet) — the section just won't render that course's tile.
+      const paid = enrs.filter((e) => e.payment_status === 'paid' && e.course_id);
+      const uniqCourseIds = [...new Set(paid.map((e) => e.course_id))];
+      const progRes = await Promise.all(
+        uniqCourseIds.map((cid) =>
+          apiClient
+            .get(`/curriculum-progress?student_id=${user?.id}&course_id=${cid}`)
+            .then((r) => ({ cid, data: r.data }))
+            .catch(() => ({ cid, data: null })),
+        ),
+      );
+      const map = {};
+      progRes.forEach(({ cid, data }) => {
+        if (!data) return;
+        const lessons = Array.isArray(data.lessons) ? data.lessons : [];
+        const progress = Array.isArray(data.progress) ? data.progress : [];
+        // Build the "only completed" slice — lessons that have a
+        // matching progress row, hydrated with the completion date.
+        const completedByIdx = {};
+        progress.forEach((p) => { completedByIdx[p.lesson_index] = p; });
+        const completed = lessons
+          .map((lesson, idx) => completedByIdx[idx] ? { ...lesson, idx, ...completedByIdx[idx] } : null)
+          .filter(Boolean);
+        map[cid] = { lessons, completed };
+      });
+      setProgressByCourse(map);
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [user?.id]);
 
   useFocusEffect(useCallback(() => { setLoading(true); load(); }, [load]));
 
@@ -108,6 +153,11 @@ export default function MyDashboard({ navigation }) {
   }), [paidEnrollments.length, enrollments.length, videos.length]);
 
   const firstName = (user?.name || 'Student').split(' ')[0];
+  const fullName  = me?.profile_full_name || me?.name || user?.name || 'Student';
+  const photoUrl  = resolveAssetUrl(me?.photo_url);
+  const initials  = (fullName || '?')
+    .split(' ').map((w) => w[0]).filter(Boolean)
+    .slice(0, 2).join('').toUpperCase() || '?';
 
   return (
     <View style={styles.screen}>
@@ -125,9 +175,16 @@ export default function MyDashboard({ navigation }) {
         {/* ───── Hero banner ───── */}
         <View style={styles.hero}>
           <View style={styles.heroTopRow}>
+            <View style={styles.heroAvatar}>
+              {photoUrl ? (
+                <Image source={{ uri: photoUrl }} style={styles.heroAvatarImg} />
+              ) : (
+                <Text style={styles.heroAvatarInit}>{initials}</Text>
+              )}
+            </View>
             <View style={{ flex: 1 }}>
               <Text style={styles.heroEyebrow}>WELCOME BACK</Text>
-              <Text style={styles.heroName} numberOfLines={1}>{firstName}</Text>
+              <Text style={styles.heroName} numberOfLines={1}>{fullName}</Text>
             </View>
             <TouchableOpacity
               style={styles.bellBtn}
@@ -191,6 +248,40 @@ export default function MyDashboard({ navigation }) {
             ))}
           </View>
         )}
+
+        {/* ───── Course Progress ─────
+            For each paid enrollment whose course has any completed
+            lessons, render a card listing only the completed items
+            along with their dates and an overall progress %. */}
+        {(() => {
+          const cards = paidEnrollments
+            .map((e) => {
+              const p = progressByCourse[e.course_id];
+              if (!p || p.completed.length === 0) return null;
+              return { enrollment: e, progress: p };
+            })
+            .filter(Boolean);
+
+          if (cards.length === 0) return null;
+          return (
+            <>
+              <SectionHeader
+                title="Course Progress"
+                subtitle="Lessons your trainer has marked as completed"
+              />
+              <View style={{ paddingHorizontal: 16, gap: 12 }}>
+                {cards.map(({ enrollment, progress }) => (
+                  <CourseProgressCard
+                    key={`prog-${enrollment.id}`}
+                    enrollment={enrollment}
+                    progress={progress}
+                    onPress={() => navigation.navigate('EnrolledCourse', { enrollmentId: enrollment.id })}
+                  />
+                ))}
+              </View>
+            </>
+          );
+        })()}
 
         {/* ───── Recorded Videos ───── */}
         <SectionHeader title="Recorded Videos" subtitle="Shared by your trainers" />
@@ -312,6 +403,81 @@ function CourseCard({ enrollment, onPress }) {
   );
 }
 
+// Compact card listing only the lessons the trainer has ticked off for
+// this student in this course. Shows a percentage ring + the dated
+// list. Tapping opens the EnrolledCourseScreen for full course detail.
+function CourseProgressCard({ enrollment, progress, onPress }) {
+  const total = progress.lessons.length;
+  const done  = progress.completed.length;
+  const pct   = total > 0 ? Math.round((done / total) * 100) : 0;
+
+  const fmt = (iso) => {
+    if (!iso) return '';
+    try {
+      return new Date(iso).toLocaleDateString(undefined, {
+        day: 'numeric', month: 'short', year: 'numeric',
+      });
+    } catch { return ''; }
+  };
+
+  return (
+    <TouchableOpacity
+      style={styles.progressCard}
+      onPress={onPress}
+      activeOpacity={0.85}
+    >
+      <View style={styles.progressHeader}>
+        <View style={styles.progressIconWrap}>
+          <Target size={16} color={BRAND} strokeWidth={2.4} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.progressCourse} numberOfLines={1}>
+            {enrollment.course_name || 'Course'}
+          </Text>
+          <Text style={styles.progressSummary}>
+            {done} of {total} completed
+          </Text>
+        </View>
+        <View style={styles.progressPctPill}>
+          <Text style={styles.progressPctText}>{pct}%</Text>
+        </View>
+      </View>
+
+      {/* Progress bar */}
+      <View style={styles.progressBarTrack}>
+        <View style={[styles.progressBarFill, { width: `${pct}%` }]} />
+      </View>
+
+      {/* Completed lesson list — chronological by completion date */}
+      <View style={styles.progressList}>
+        {progress.completed
+          .slice()
+          .sort((a, b) => String(b.completed_at).localeCompare(String(a.completed_at)))
+          .slice(0, 5)
+          .map((lesson) => (
+            <View key={`lesson-${lesson.idx}`} style={styles.progressItem}>
+              <View style={styles.progressCheck}>
+                <CheckCircle2 size={12} color={GREEN} strokeWidth={2.6} />
+              </View>
+              <Text style={styles.progressItemTitle} numberOfLines={1}>
+                {lesson.title || `Lesson ${lesson.idx + 1}`}
+              </Text>
+              <View style={styles.progressDateChip}>
+                <CalendarDays size={9} color={TEXT_MUTED} strokeWidth={2.4} />
+                <Text style={styles.progressDateText}>{fmt(lesson.completed_at)}</Text>
+              </View>
+            </View>
+          ))}
+        {progress.completed.length > 5 ? (
+          <Text style={styles.progressMore}>
+            + {progress.completed.length - 5} more completed
+          </Text>
+        ) : null}
+      </View>
+    </TouchableOpacity>
+  );
+}
+
 function VideoCard({ video, onPress }) {
   const thumb = resolveAssetUrl(video.thumbnail_url || video.course_image);
   const duration = fmtDuration(video.duration_seconds);
@@ -363,7 +529,21 @@ const styles = StyleSheet.create({
   },
   heroTopRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   heroEyebrow: { fontSize: 10, color: 'rgba(255,255,255,0.7)', fontWeight: '800', letterSpacing: 1.6 },
-  heroName: { fontSize: 22, color: '#fff', fontWeight: '800', marginTop: 2 },
+  heroName: { fontSize: 20, color: '#fff', fontWeight: '800', marginTop: 2 },
+
+  // Circular avatar in the hero — shows the uploaded student photo when
+  // present, otherwise renders the student's initials on a translucent
+  // white circle that reads cleanly against the red hero background.
+  heroAvatar: {
+    width: 52, height: 52, borderRadius: 26,
+    backgroundColor: 'rgba(255,255,255,0.22)',
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 2, borderColor: 'rgba(255,255,255,0.5)',
+    overflow: 'hidden',
+  },
+  heroAvatarImg: { width: '100%', height: '100%' },
+  heroAvatarInit: { color: '#fff', fontSize: 18, fontWeight: '800', letterSpacing: 0.5 },
+
   bellBtn: {
     width: 36, height: 36, borderRadius: 18,
     backgroundColor: 'rgba(255,255,255,0.18)',
@@ -481,6 +661,87 @@ const styles = StyleSheet.create({
   videoBody: { padding: 10, gap: 2 },
   videoTitle: { fontSize: 13, fontWeight: '800', color: TEXT },
   videoCourse: { fontSize: 11, color: TEXT_MUTED, fontWeight: '600' },
+
+  // Course Progress card
+  progressCard: {
+    backgroundColor: SURFACE,
+    borderRadius: 14,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: BORDER,
+    shadowColor: '#000',
+    shadowOpacity: 0.04,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 1,
+  },
+  progressHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 10,
+  },
+  progressIconWrap: {
+    width: 32, height: 32, borderRadius: 16,
+    backgroundColor: BRAND_SOFT,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  progressCourse: { fontSize: 14, color: TEXT, fontWeight: '800', letterSpacing: -0.2 },
+  progressSummary: { fontSize: 11, color: TEXT_MUTED, marginTop: 2, fontWeight: '600' },
+  progressPctPill: {
+    paddingHorizontal: 10, paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: GREEN,
+  },
+  progressPctText: { fontSize: 11, color: '#fff', fontWeight: '800' },
+
+  progressBarTrack: {
+    height: 6,
+    borderRadius: 999,
+    backgroundColor: BG,
+    overflow: 'hidden',
+    marginBottom: 12,
+  },
+  progressBarFill: {
+    height: '100%',
+    backgroundColor: GREEN,
+    borderRadius: 999,
+  },
+
+  progressList: { gap: 8 },
+  progressItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  progressCheck: {
+    width: 18, height: 18, borderRadius: 9,
+    backgroundColor: '#D1FAE5',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  progressItemTitle: {
+    flex: 1,
+    fontSize: 12,
+    color: TEXT,
+    fontWeight: '700',
+  },
+  progressDateChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    backgroundColor: BG,
+    borderRadius: 999,
+  },
+  progressDateText: { fontSize: 10, color: TEXT_MUTED, fontWeight: '700' },
+  progressMore: {
+    fontSize: 11,
+    color: TEXT_MUTED,
+    fontWeight: '700',
+    marginTop: 2,
+    paddingLeft: 26,
+  },
 
   // Empty inline
   emptyInline: {

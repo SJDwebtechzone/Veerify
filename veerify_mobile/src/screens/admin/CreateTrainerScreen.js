@@ -34,6 +34,8 @@ import { launchImageLibrary, launchCamera } from 'react-native-image-picker';
 
 import apiClient from '../../api/client';
 import DateField from '../../components/DateField';
+import PasswordInput from '../../components/PasswordInput';
+import PlanLimitModal from '../../components/PlanLimitModal';
 
 // ─── Theme tokens (kept local to avoid coupling to ../theme) ───────────
 const BRAND = '#E63946';
@@ -106,6 +108,9 @@ export default function CreateTrainerScreen({ navigation, route }) {
     govt_proof_number: editingTrainer?.govt_proof_number || '',
   });
   const [submitting, setSubmitting] = useState(false);
+  // Plan-limit modal state — populated from the 402 PLAN_LIMIT_REACHED
+  // response body so the modal can show the real plan name + counts.
+  const [planLimit, setPlanLimit] = useState(null);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [uploadingCert, setUploadingCert] = useState(false);
 
@@ -286,18 +291,14 @@ export default function CreateTrainerScreen({ navigation, route }) {
       // instead of being told a generic 'Error'.
       const body = e?.response?.data;
       if (e?.response?.status === 402 && body?.code === 'PLAN_LIMIT_REACHED') {
-        Alert.alert(
-          'Upgrade plan to add more trainers',
-          `Your ${body.plan_name || 'current'} plan allows ${body.limit} trainer${body.limit === 1 ? '' : 's'}, ` +
-          `and you already have ${body.current}. Upgrade to add more.`,
-          [
-            { text: 'Not now', style: 'cancel' },
-            { text: 'View plans', onPress: () => {
-                try { navigation.navigate('PlanSelection'); }
-                catch { navigation.goBack(); }
-              } },
-          ],
-        );
+        // Show the styled in-app modal instead of a system Alert so the
+        // explanation ("Your <Plan> plan limit is N trainers only") and
+        // the upgrade CTA feel native.
+        setPlanLimit({
+          limit:    body.limit,
+          current:  body.current,
+          planName: body.plan_name,
+        });
       } else {
         Alert.alert(
           'Error',
@@ -454,13 +455,12 @@ export default function CreateTrainerScreen({ navigation, route }) {
             </Field>
 
             <Field label="Temporary Password" required hint="At least 6 characters. Share securely with the trainer.">
-              <TextInput
-                style={styles.input}
+              <PasswordInput
+                inputStyle={styles.input}
                 placeholder="••••••"
                 placeholderTextColor={TEXT_LIGHT}
                 value={form.password}
                 onChangeText={(v) => set('password', v)}
-                secureTextEntry
               />
             </Field>
           </>
@@ -629,6 +629,20 @@ export default function CreateTrainerScreen({ navigation, route }) {
           )}
         </TouchableOpacity>
       </View>
+
+      {/* Plan-limit modal — fired when /trainers POST returns 402. */}
+      <PlanLimitModal
+        visible={!!planLimit}
+        kind="trainer"
+        limit={planLimit?.limit}
+        current={planLimit?.current}
+        planName={planLimit?.planName}
+        onClose={() => setPlanLimit(null)}
+        onUpgrade={() => {
+          try { navigation.navigate('PlanSelection'); }
+          catch { navigation.goBack(); }
+        }}
+      />
     </KeyboardAvoidingView>
   );
 }

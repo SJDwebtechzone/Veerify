@@ -27,7 +27,7 @@ import {
 import {
   ArrowLeft, Phone, Mail, Award, TrendingUp, TrendingDown, Minus,
   Calendar, Users, ClipboardList, FileText, Pencil,
-  Plane, Clock, X as XIcon, Check,
+  Plane, Clock, X as XIcon, Check, BookOpen, CalendarDays,
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
@@ -77,6 +77,20 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
   const [notes, setNotes] = useState('');        // local-only for now
   const [editingNotes, setEditingNotes] = useState(false);
 
+  // ── Curriculum progress ──
+  // `lessons` is the JSONB array stored on the course (title/duration/is_free).
+  // `progressByIdx` maps lesson_index -> { completed_at, completed_by_name }.
+  // `pickerForIdx` (number | null) opens the inline date picker for the
+  // lesson the trainer just tapped, so they can pick when the work
+  // actually happened rather than always defaulting to today.
+  const [lessons, setLessons] = useState([]);
+  const [progressByIdx, setProgressByIdx] = useState({});
+  const [pickerForIdx, setPickerForIdx] = useState(null);
+  const [savingIdx, setSavingIdx] = useState(null);
+
+  const courseId = passedStudent?.course_id || null;
+  const courseName = passedStudent?.course_name || null;
+
   // ── Pull attendance for this batch and filter client-side ──
   const load = useCallback(async () => {
     if (!batchId || !studentId) { setLoading(false); return; }
@@ -91,6 +105,63 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
     }
   }, [batchId, studentId]);
   useEffect(() => { load(); }, [load]);
+
+  // Pull the course's curriculum + this student's existing ticks. Re-runs
+  // whenever the trainer drills into a new student so saved state is in
+  // sync with the backend.
+  const loadCurriculum = useCallback(async () => {
+    if (!studentId || !courseId) return;
+    try {
+      const res = await apiClient.get(
+        `/curriculum-progress?student_id=${studentId}&course_id=${courseId}`,
+      );
+      setLessons(Array.isArray(res.data?.lessons) ? res.data.lessons : []);
+      const map = {};
+      (res.data?.progress || []).forEach((p) => {
+        map[p.lesson_index] = p;
+      });
+      setProgressByIdx(map);
+    } catch (err) {
+      console.log('[StudentDetail] curriculum load failed:', err?.response?.data || err?.message);
+    }
+  }, [studentId, courseId]);
+  useEffect(() => { loadCurriculum(); }, [loadCurriculum]);
+
+  // Toggle a lesson. If already completed → DELETE. Otherwise → upsert
+  // with the picked date (or today as the fallback when no date picker
+  // was opened).
+  const toggleLesson = async (idx, dateOverride) => {
+    if (!studentId || !courseId) return;
+    const current = progressByIdx[idx];
+    setSavingIdx(idx);
+    try {
+      if (current && !dateOverride) {
+        await apiClient.delete('/curriculum-progress', {
+          data: { student_id: studentId, course_id: courseId, lesson_index: idx },
+        });
+        setProgressByIdx((prev) => {
+          const { [idx]: _drop, ...rest } = prev;
+          return rest;
+        });
+      } else {
+        const res = await apiClient.post('/curriculum-progress', {
+          student_id:   studentId,
+          course_id:    courseId,
+          lesson_index: idx,
+          completed_at: dateOverride || new Date().toISOString().slice(0, 10),
+        });
+        setProgressByIdx((prev) => ({
+          ...prev,
+          [idx]: res.data?.progress || { lesson_index: idx, completed_at: dateOverride || isoDate(new Date()) },
+        }));
+      }
+    } catch (err) {
+      console.log('[StudentDetail] toggle failed:', err?.response?.data || err?.message);
+    } finally {
+      setSavingIdx(null);
+      setPickerForIdx(null);
+    }
+  };
 
   // ── Derive everything from records + passed student ──
   const counts = useMemo(() => {
@@ -313,6 +384,135 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
           </Text>
         </Card>
 
+        {/* Curriculum progress — checklist of every lesson on the
+            student's enrolled course. Each row is tappable to mark /
+            unmark, and the "Pick date" pill opens an inline date picker
+            so the trainer can attribute the work to the right day. */}
+        <Card
+          title="Curriculum progress"
+          icon={BookOpen}
+          right={
+            lessons.length > 0 ? (
+              <View style={styles.cardActionBtn}>
+                <Text style={styles.cardActionText}>
+                  {Object.keys(progressByIdx).length}/{lessons.length}
+                </Text>
+              </View>
+            ) : null
+          }
+        >
+          {!courseId ? (
+            <Text style={styles.placeholderText}>
+              Curriculum is tied to the student's course. We couldn't
+              read the course id from this profile — open them again
+              from the Students tab to refresh.
+            </Text>
+          ) : lessons.length === 0 ? (
+            <Text style={styles.placeholderText}>
+              {courseName ? `"${courseName}" has no lessons yet. ` : ''}
+              Add lessons to the course curriculum and they'll appear
+              here as a checklist.
+            </Text>
+          ) : (
+            <View>
+              <Text style={[styles.placeholderText, { marginBottom: spacing.sm }]}>
+                {courseName || 'Course'} · tap a lesson to mark it done; tap "Pick date" to set a different completion date.
+              </Text>
+              {lessons.map((lesson, idx) => {
+                const done    = !!progressByIdx[idx];
+                const saving  = savingIdx === idx;
+                const pickOpen = pickerForIdx === idx;
+                const dateStr = progressByIdx[idx]?.completed_at?.slice?.(0, 10) || null;
+                return (
+                  <View key={idx} style={styles.lessonRow}>
+                    <TouchableOpacity
+                      style={[styles.lessonCheckbox, done && styles.lessonCheckboxOn]}
+                      onPress={() => toggleLesson(idx)}
+                      disabled={saving}
+                      activeOpacity={0.8}
+                    >
+                      {done ? <Check size={14} color="#fff" strokeWidth={3} /> : null}
+                    </TouchableOpacity>
+                    <View style={{ flex: 1 }}>
+                      <Text
+                        style={[
+                          styles.lessonTitle,
+                          done && { textDecorationLine: 'line-through', color: palette.textMuted },
+                        ]}
+                        numberOfLines={2}
+                      >
+                        {lesson.title || `Lesson ${idx + 1}`}
+                      </Text>
+                      <View style={styles.lessonMetaRow}>
+                        {lesson.duration ? (
+                          <View style={styles.lessonDurChip}>
+                            <Clock size={10} color={palette.textMuted} strokeWidth={2.4} />
+                            <Text style={styles.lessonDurText}>{lesson.duration}</Text>
+                          </View>
+                        ) : null}
+                        {done && dateStr ? (
+                          <View style={styles.lessonDoneChip}>
+                            <CalendarDays size={10} color={palette.green.vivid} strokeWidth={2.4} />
+                            <Text style={styles.lessonDoneText}>
+                              {new Date(dateStr).toLocaleDateString(undefined, {
+                                day: 'numeric', month: 'short', year: 'numeric',
+                              })}
+                            </Text>
+                          </View>
+                        ) : null}
+                      </View>
+                    </View>
+                    <TouchableOpacity
+                      style={styles.lessonDateBtn}
+                      onPress={() => setPickerForIdx(pickOpen ? null : idx)}
+                      activeOpacity={0.8}
+                    >
+                      <CalendarDays size={12} color={palette.purple.vivid} strokeWidth={2.4} />
+                      <Text style={styles.lessonDateBtnText}>Pick date</Text>
+                    </TouchableOpacity>
+
+                    {/* Inline date picker — last 30 days as quick-pick
+                        chips. Keeps things native-feeling without
+                        pulling in a DateTimePicker dependency. */}
+                    {pickOpen ? (
+                      <View style={styles.lessonDatePanel}>
+                        <ScrollView
+                          horizontal
+                          showsHorizontalScrollIndicator={false}
+                          contentContainerStyle={{ gap: 6, paddingHorizontal: 4 }}
+                        >
+                          {Array.from({ length: 14 }).map((_, dOff) => {
+                            const d = new Date();
+                            d.setDate(d.getDate() - dOff);
+                            const iso = isoDate(d);
+                            const isSel = dateStr === iso;
+                            return (
+                              <TouchableOpacity
+                                key={iso}
+                                style={[styles.lessonDateChip, isSel && styles.lessonDateChipOn]}
+                                onPress={() => toggleLesson(idx, iso)}
+                                disabled={saving}
+                                activeOpacity={0.85}
+                              >
+                                <Text style={[styles.lessonDateChipDay, isSel && { color: '#fff' }]}>
+                                  {d.toLocaleDateString(undefined, { weekday: 'short' })}
+                                </Text>
+                                <Text style={[styles.lessonDateChipDate, isSel && { color: '#fff' }]}>
+                                  {d.getDate()} {d.toLocaleDateString(undefined, { month: 'short' })}
+                                </Text>
+                              </TouchableOpacity>
+                            );
+                          })}
+                        </ScrollView>
+                      </View>
+                    ) : null}
+                  </View>
+                );
+              })}
+            </View>
+          )}
+        </Card>
+
         {/* Notes */}
         <Card
           title="Notes"
@@ -530,6 +730,82 @@ const styles = StyleSheet.create({
   cardActionText: { ...type.micro, color: palette.purple.on, fontWeight: '800' },
 
   placeholderText: { ...type.caption, color: palette.textMuted, fontStyle: 'italic' },
+
+  // Curriculum checklist
+  lessonRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.sm,
+    paddingVertical: spacing.sm,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: palette.borderSoft,
+    flexWrap: 'wrap',
+  },
+  lessonCheckbox: {
+    width: 22, height: 22, borderRadius: 6,
+    borderWidth: 1.5, borderColor: palette.border,
+    alignItems: 'center', justifyContent: 'center',
+    marginTop: 2,
+    backgroundColor: '#fff',
+  },
+  lessonCheckboxOn: { backgroundColor: '#E63946', borderColor: '#E63946' },
+  lessonTitle: { ...type.body, color: palette.text, fontWeight: '700' },
+  lessonMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 4,
+    flexWrap: 'wrap',
+  },
+  lessonDurChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    backgroundColor: palette.borderSoft,
+    borderRadius: 999,
+  },
+  lessonDurText: { ...type.micro, color: palette.textMuted, fontWeight: '700' },
+  lessonDoneChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    backgroundColor: palette.green.soft,
+    borderRadius: 999,
+  },
+  lessonDoneText: { ...type.micro, color: palette.green.vivid, fontWeight: '800' },
+
+  lessonDateBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    backgroundColor: palette.purple.soft,
+    borderRadius: 999,
+    marginTop: 2,
+  },
+  lessonDateBtnText: { ...type.micro, color: palette.purple.vivid, fontWeight: '800' },
+
+  lessonDatePanel: {
+    width: '100%',
+    marginTop: 8,
+    paddingVertical: 4,
+  },
+  lessonDateChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 10,
+    backgroundColor: palette.borderSoft,
+    alignItems: 'center',
+    minWidth: 56,
+  },
+  lessonDateChipOn: { backgroundColor: '#E63946' },
+  lessonDateChipDay: { ...type.micro, color: palette.textMuted, fontWeight: '700' },
+  lessonDateChipDate: { fontSize: 12, fontWeight: '800', color: palette.text, marginTop: 2 },
 
   // Chart
   chartRow: {
