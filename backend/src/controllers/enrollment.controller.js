@@ -1,5 +1,8 @@
 const pool = require('../config/db');
-const bcrypt = require('bcryptjs');
+// Use the same bcrypt package as the rest of the codebase (the native
+// one, not bcryptjs). Both expose the same hash/compare API so no
+// other code change is needed.
+const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const { sendStudentCredentialsEmail } = require('../utils/mailer');
 const { ensureCapacity, limitResponse } = require('../utils/planLimits');
