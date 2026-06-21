@@ -35,18 +35,12 @@ import {
 import apiClient from '../../api/client';
 import { useAuth } from '../../context/AuthContext';
 import { palette, spacing, radius, shadows, type } from '../../theme';
+// Shared resolver — strips embedded localhost / 10.0.2.2 hosts from
+// legacy DB rows so uploads written before the bug fix still render
+// on any client.
+import resolveAssetUrl from '../../utils/assetUrl';
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-
-// Mirror of the helper used elsewhere — turns a /uploads path into a
-// fully-qualified URL the emulator can fetch.
-const ASSET_HOST = (apiClient.defaults.baseURL || '').replace(/\/api\/?$/, '');
-function resolveAssetUrl(src) {
-  if (!src) return null;
-  if (src.startsWith('data:') || src.startsWith('http://') || src.startsWith('https://')) return src;
-  if (src.startsWith('/uploads/')) return ASSET_HOST + src;
-  return src;
-}
 
 // Tiny string-distance helper for matching days_of_week to today.
 function classesToday(batches) {

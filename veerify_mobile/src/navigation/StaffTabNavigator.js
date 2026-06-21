@@ -9,6 +9,7 @@
 import React from 'react';
 import { Platform, Text, StyleSheet } from 'react-native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   LayoutDashboard, ClipboardCheck, Users, Video, UserCircle,
 } from 'lucide-react-native';
@@ -49,12 +50,16 @@ function makeIcon(Icon) {
 }
 
 export default function StaffTabNavigator() {
+  // Push the floating tab bar above any system gesture / nav bar so
+  // it never gets clipped on devices with bottom insets.
+  const insets = useSafeAreaInsets();
+  const tabBottom = Math.max(insets.bottom, 8);
   return (
     <Tab.Navigator
       screenOptions={{
         headerShown: false,
         tabBarShowLabel: true,
-        tabBarStyle: styles.tabBar,
+        tabBarStyle: [styles.tabBar, { bottom: tabBottom }],
         tabBarItemStyle: { paddingTop: 8 },
         tabBarHideOnKeyboard: true,
       }}
@@ -108,7 +113,8 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: spacing.lg,
     right: spacing.lg,
-    bottom: Platform.OS === 'ios' ? 24 : 14,
+    // `bottom` is overridden per-render via Math.max(insets.bottom, 8)
+    // so the tab bar always sits above gesture / soft nav.
     height: 64,
     borderRadius: 22,
     backgroundColor: palette.surface,

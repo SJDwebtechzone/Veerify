@@ -515,10 +515,82 @@ async function sendTrainerCredentialsEmail({
   }
 }
 
+// ---------- Student credentials template ----------
+// Sent when an institution admin enrols a student. The student didn't
+// sign up themselves so they need to know how to log in to the Veerify
+// mobile app to see their courses, attendance, and progress.
+
+function studentCredentialsEmailHtml({ name, institutionName, courseName, loginEmail, password }) {
+  return `
+  <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;
+              max-width:560px;margin:0 auto;padding:24px;color:#1f2937;background:#ffffff;">
+    <p style="font-size:15px;margin:0 0 16px;">Hi ${name || 'there'},</p>
+
+    <p style="font-size:15px;line-height:1.6;color:#1f2937;margin:0 0 16px;">
+      ${institutionName || 'Your academy'} has enrolled you${courseName ? ` in <b>${courseName}</b>` : ''} on Veerify.
+      Use the credentials below to sign in to the Veerify mobile app and start tracking your classes,
+      attendance, and progress.
+    </p>
+
+    <table style="font-size:14px;line-height:1.6;color:#1f2937;margin:0 0 16px;">
+      <tr>
+        <td style="padding:4px 12px 4px 0;color:#4b5563;">Email:</td>
+        <td style="font-family:Consolas,'SF Mono','Monaco',monospace;">${loginEmail}</td>
+      </tr>
+      <tr>
+        <td style="padding:4px 12px 4px 0;color:#4b5563;">Password:</td>
+        <td style="font-family:Consolas,'SF Mono','Monaco',monospace;">${password}</td>
+      </tr>
+    </table>
+
+    <p style="font-size:14px;line-height:1.6;color:#4b5563;margin:0 0 16px;">
+      For safety, please change your password from the Profile screen after your first login.
+    </p>
+
+    <p style="font-size:14px;line-height:1.6;color:#4b5563;margin:0 0 8px;">
+      Thanks,<br/>
+      The Veerify team
+    </p>
+  </div>`;
+}
+
+async function sendStudentCredentialsEmail({
+  to, name, institutionName, courseName, loginEmail, password,
+}) {
+  const t = getTransporter();
+  if (!t) return { ok: false, error: 'SMTP not configured' };
+  try {
+    const html = studentCredentialsEmailHtml({ name, institutionName, courseName, loginEmail, password });
+    const text =
+      `Hi ${name || 'there'},\n\n` +
+      `${institutionName || 'Your academy'} has enrolled you on Veerify` +
+      `${courseName ? ` in ${courseName}` : ''}.\n\n` +
+      `Sign-in details for the Veerify mobile app:\n` +
+      `  Email:    ${loginEmail}\n` +
+      `  Password: ${password}\n\n` +
+      `For safety, please change your password from your Profile screen after first login.\n\n` +
+      `— The Veerify team\n`;
+    const info = await t.sendMail({
+      from: `"${FROM_NAME}" <${SMTP_USER}>`,
+      to,
+      subject: `Welcome to Veerify — your student access for ${institutionName || 'your academy'}`,
+      replyTo: SUPPORT_EMAIL,
+      html,
+      text,
+      headers: transactionalHeaders(),
+    });
+    return { ok: true, messageId: info.messageId };
+  } catch (err) {
+    console.error('[mailer] sendStudentCredentialsEmail failed:', err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
 module.exports = {
   sendApprovalEmail,
   sendActivationEmail,
   sendPasswordResetEmail,
   sendTrainerCredentialsEmail,
+  sendStudentCredentialsEmail,
   verifyTransporter,
 };

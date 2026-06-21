@@ -172,21 +172,20 @@ export default function BatchesTabScreen({ navigation }) {
 
   return (
     <View style={styles.screen}>
-      {/* Header */}
+      {/* Header — just academy name + dropdown. Eyebrow line dropped to
+          match the simplified Programs tab layout; bottom padding bumped
+          so the search bar below has clear breathing room. */}
       <View style={styles.header}>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.eyebrow}>Batches at</Text>
-          <TouchableOpacity
-            onPress={() => navigation.navigate('SelectInstitution')}
-            activeOpacity={0.85}
-            style={styles.instSelector}
-          >
-            <Text style={styles.instText} numberOfLines={1}>
-              {selectedInstitution?.name}
-            </Text>
-            <ChevronDown size={16} color={palette.purple.vivid} strokeWidth={2.4} />
-          </TouchableOpacity>
-        </View>
+        <TouchableOpacity
+          onPress={() => navigation.navigate('SelectInstitution')}
+          activeOpacity={0.85}
+          style={styles.instSelector}
+        >
+          <Text style={styles.instText} numberOfLines={1}>
+            {selectedInstitution?.name}
+          </Text>
+          <ChevronDown size={20} color={palette.purple.vivid} strokeWidth={2.4} />
+        </TouchableOpacity>
       </View>
 
       {/* Search */}
@@ -397,7 +396,7 @@ const styles = StyleSheet.create({
   center: { alignItems: 'center', justifyContent: 'center' },
 
   // Header
-  header: { paddingHorizontal: spacing.xl, paddingTop: spacing.xxl, paddingBottom: spacing.md },
+  header: { paddingHorizontal: spacing.xl, paddingTop: spacing.xxl, paddingBottom: spacing.xl },
   eyebrow: { ...type.caption, color: palette.textMuted },
   instSelector: { flexDirection: 'row', alignItems: 'center', gap: 4, alignSelf: 'flex-start', marginTop: 2 },
   instText: { ...type.display, color: palette.text, maxWidth: 260 },

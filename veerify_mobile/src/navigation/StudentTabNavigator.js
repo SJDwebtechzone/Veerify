@@ -1,6 +1,7 @@
 import React from 'react';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Text, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import HomeTabScreen from '../screens/student/tabs/HomeTabScreen';
 import ProgramsTabScreen from '../screens/student/tabs/ProgramsTabScreen';
@@ -20,6 +21,12 @@ const TabIcon = ({ emoji, focused }) => (
 );
 
 export default function StudentTabNavigator() {
+  // Ensure the tab bar's content sits above any device-side gesture
+  // pill / soft nav bar. We extend the bar's height and paddingBottom
+  // by the bottom inset so the icons + labels stay above the system
+  // area even on phones that report a non-zero inset.
+  const insets = useSafeAreaInsets();
+  const extra = insets.bottom;
   return (
     <Tab.Navigator
       screenOptions={{
@@ -29,8 +36,8 @@ export default function StudentTabNavigator() {
         tabBarStyle: {
           backgroundColor: colors.white,
           borderTopColor: colors.lightGray,
-          height: 64,
-          paddingBottom: 8,
+          height: 64 + extra,
+          paddingBottom: 8 + extra,
           paddingTop: 6,
         },
         tabBarLabelStyle: {

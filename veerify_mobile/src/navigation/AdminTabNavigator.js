@@ -11,6 +11,7 @@
 import React from 'react';
 import { Platform, Text, View, StyleSheet } from 'react-native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   LayoutDashboard, Users, BookOpen, Wallet, Menu,
 } from 'lucide-react-native';
@@ -50,12 +51,18 @@ function makeIcon(Icon) {
 }
 
 export default function AdminTabNavigator() {
+  // Devices with gesture navigation report a non-zero bottom inset;
+  // we push the floating tab bar above it so the system pill / back
+  // gesture area doesn't sit on top of the tab icons. Math.max keeps
+  // the original 8 px breathing room on phones with no inset.
+  const insets = useSafeAreaInsets();
+  const tabBottom = Math.max(insets.bottom, 8);
   return (
     <Tab.Navigator
       screenOptions={{
         headerShown: false,
         tabBarShowLabel: true,
-        tabBarStyle: styles.tabBar,
+        tabBarStyle: [styles.tabBar, { bottom: tabBottom }],
         tabBarItemStyle: { paddingTop: 8 },
         tabBarHideOnKeyboard: true,
       }}
@@ -109,7 +116,8 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: spacing.lg,
     right: spacing.lg,
-    bottom: 0,
+    // `bottom` is applied dynamically per-render from the safe-area
+    // inset; we keep this style sheet otherwise stable.
     height: 64,
     borderRadius: 22,
     backgroundColor: palette.surface,

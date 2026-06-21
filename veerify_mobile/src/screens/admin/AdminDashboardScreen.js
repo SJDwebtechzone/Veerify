@@ -147,6 +147,25 @@ export default function AdminDashboardScreen({ navigation }) {
   // if for any reason the institution row hasn't loaded yet.
   const academyName = institution?.name || (user?.name || 'Academy').split(' ')[0];
 
+  // Resolve the institution's logo to a renderable URL. The DB usually
+  // stores "/uploads/foo.png" (relative); we prepend the current api
+  // base so the emulator + production both work.
+  const ASSET_HOST = (apiClient.defaults.baseURL || '').replace(/\/api\/?$/, '');
+  const rawLogo = institution?.logo_url || null;
+  const institutionLogo = rawLogo
+    ? (rawLogo.startsWith('http') ? rawLogo : ASSET_HOST + rawLogo)
+    : null;
+
+  // Time-of-day greeting used by the dashboard header so the page feels
+  // personal. Falls back to "Welcome" if for any reason the hour can't
+  // be read. Tamil Nadu is the primary market so this uses local time.
+  const greeting = (() => {
+    const h = new Date().getHours();
+    if (h < 12) return 'Good morning';
+    if (h < 17) return 'Good afternoon';
+    return 'Good evening';
+  })();
+
   const counts = data.counts || {};
   const unread = counts.unread_notifications || 0;
 
@@ -250,40 +269,62 @@ export default function AdminDashboardScreen({ navigation }) {
           />
         }
       >
-        {/* ───── Hero block (concept B - solid red dojo banner) ─────
-            Big brand-red panel as the very top of the screen. Anchors
-            the dashboard with the academy name + active student count
-            as the headline metric. Bell + initials sit floating in the
-            top-right corner. */}
-        <View style={styles.hero}>
-          <View style={styles.heroTopRow}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.heroEyebrow}>OSU SENSEI</Text>
-              <Text style={styles.heroDojo} numberOfLines={1}>{academyName}</Text>
+        {/* ───── Header — polished logo + academy name card ─────
+            Soft greeting line + a floating white card that holds the
+            institution logo, the academy name with a live status pill,
+            a member-since line, and the notification bell. Replaces the
+            old solid-red hero. */}
+        <View style={styles.topBar}>
+          <Text style={styles.greeting}>{greeting},</Text>
+          <Text style={styles.greetingName} numberOfLines={1}>
+            {(user?.name || 'Admin').split(' ')[0]} 👋
+          </Text>
+
+          <View style={styles.identityCard}>
+            <View style={styles.logoWrap}>
+              <View style={styles.logoRing}>
+                {institutionLogo ? (
+                  <Image source={{ uri: institutionLogo }} style={styles.topBarLogo} />
+                ) : (
+                  <View style={styles.topBarLogoFallback}>
+                    <Text style={styles.topBarLogoInitial}>
+                      {(academyName || '?').charAt(0).toUpperCase()}
+                    </Text>
+                  </View>
+                )}
+              </View>
             </View>
-            {/* Notification bell — the only top-right action. The profile
-                avatar that used to sit beside it was removed because it
-                wasn't wired to a real screen; the dashboard's Profile tab
-                already provides that destination. */}
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <View style={styles.nameRow}>
+                <Text style={styles.topBarName} numberOfLines={1}>
+                  {academyName}
+                </Text>
+                <View style={styles.activePill}>
+                  <View style={styles.activeDot} />
+                  <Text style={styles.activePillText}>Active</Text>
+                </View>
+              </View>
+              {institution?.city ? (
+                <Text style={styles.topBarSub} numberOfLines={1}>
+                  {institution.city}
+                  {institution?.institution_type ? ` · ${institution.institution_type}` : ''}
+                </Text>
+              ) : (
+                <Text style={styles.topBarSub} numberOfLines={1}>Tap the bell for updates</Text>
+              )}
+            </View>
             <TouchableOpacity
               onPress={() => navigation.navigate('StaffNotifications')}
-              style={styles.heroBellBtn}
+              style={styles.topBarBellBtn}
               activeOpacity={0.85}
             >
-              <Bell size={16} color="#fff" strokeWidth={2.4} />
+              <Bell size={18} color={palette.purple.vivid} strokeWidth={2.4} />
               {unread > 0 && (
                 <View style={styles.dot}>
                   <Text style={styles.dotText}>{unread > 9 ? '9+' : unread}</Text>
                 </View>
               )}
             </TouchableOpacity>
-          </View>
-
-          <View style={styles.heroHeadlineRow}>
-            <Text style={styles.heroHeadlineNumber}>{counts.students || 0}</Text>
-            <Text style={styles.heroHeadlineLabel}>
-              active student{(counts.students || 0) === 1 ? '' : 's'}
-            </Text>
           </View>
         </View>
 
@@ -457,12 +498,16 @@ export default function AdminDashboardScreen({ navigation }) {
         <View style={{ height: 110 }} />
       </ScrollView>
 
-      {/* Floating + button — placeholder for now */}
+      {/* Floating + button hidden — the placeholder "Quick Create" wasn't
+          wired to anything useful and was confusing admins. The Quick
+          Actions grid above already covers every add path. */}
+      {/*
       <FAB
         bottom={92}
         onPress={() => placeholder('Quick Create')}
         accent={palette.purple}
       />
+      */}
     </View>
   );
 }
@@ -649,6 +694,94 @@ const styles = StyleSheet.create({
 
   // ── Concept B hero block ─────────────────────────────────────────
   // Solid brand-red panel that anchors the top of the dashboard.
+  // Polished card-style header: a soft gradient-feel container with a
+  // friendly greeting, then a white "identity card" holding the logo,
+  // academy name + Active pill, city/type sub-line, and the bell.
+  topBar: {
+    marginHorizontal: -spacing.xl,
+    paddingHorizontal: spacing.xl,
+    paddingTop: spacing.xxxl,
+    paddingBottom: spacing.lg,
+    marginBottom: spacing.lg,
+    backgroundColor: palette.purple.soft,
+    borderBottomLeftRadius: radius.xxl,
+    borderBottomRightRadius: radius.xxl,
+  },
+  greeting: {
+    ...type.caption,
+    color: palette.purple.on,
+    fontWeight: '700',
+    letterSpacing: 0.3,
+  },
+  greetingName: {
+    ...type.h1,
+    color: palette.text,
+    marginTop: 2,
+    marginBottom: spacing.lg,
+  },
+
+  // Identity card that holds the logo + name + bell
+  identityCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    backgroundColor: palette.surface,
+    borderRadius: radius.xl,
+    padding: spacing.md,
+    ...shadows.card,
+  },
+  logoWrap: { padding: 0 },
+  logoRing: {
+    width: 56, height: 56, borderRadius: 28,
+    padding: 3,
+    backgroundColor: palette.purple.soft,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  topBarLogo: {
+    width: 50, height: 50, borderRadius: 25,
+    backgroundColor: palette.borderSoft,
+  },
+  topBarLogoFallback: {
+    width: 50, height: 50, borderRadius: 25,
+    backgroundColor: palette.purple.vivid,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  topBarLogoInitial: { fontSize: 20, fontWeight: '800', color: '#fff' },
+
+  nameRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  topBarName: { ...type.h2, color: palette.text, flexShrink: 1 },
+  topBarSub: {
+    ...type.caption,
+    color: palette.textMuted,
+    marginTop: 2,
+    fontWeight: '600',
+  },
+
+  // Tiny green "Active" status pill beside the academy name.
+  activePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+    backgroundColor: palette.green.soft,
+  },
+  activeDot: {
+    width: 6, height: 6, borderRadius: 3,
+    backgroundColor: palette.green.vivid,
+  },
+  activePillText: {
+    fontSize: 10, fontWeight: '800',
+    color: palette.green.on, letterSpacing: 0.3,
+  },
+
+  topBarBellBtn: {
+    width: 40, height: 40, borderRadius: 20,
+    backgroundColor: palette.purple.soft,
+    alignItems: 'center', justifyContent: 'center',
+  },
+
   // Bleeds full-width by using negative horizontal margins to cancel
   // out the ScrollView's padding.
   hero: {
@@ -794,16 +927,26 @@ const styles = StyleSheet.create({
     letterSpacing: -0.3,
   },
 
-  // Section header
+  // Section header — title on the left, "See all" link on the right
+  // pushed by justifyContent: 'space-between'. Title gets flex:1 with
+  // shrinkable behaviour so it never collides with the link.
   section: { marginBottom: spacing.xxl },
   sectionHeader: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
     marginBottom: spacing.md,
+    gap: spacing.sm,
   },
-  sectionTitle: { ...type.h2, color: palette.text },
+  sectionTitle: { ...type.h2, color: palette.text, flex: 1, flexShrink: 1 },
   sectionSubtitle: { ...type.caption, color: palette.textMuted, marginTop: 2 },
-  linkRow: { flexDirection: 'row', alignItems: 'center', gap: 2 },
+  linkRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    paddingVertical: 4,   // bigger tap target without changing visual
+    paddingLeft: spacing.sm,
+  },
   linkText: { ...type.caption, color: palette.purple.vivid, fontWeight: '700' },
 
   // Quick actions — outer card stacks the rows vertically.

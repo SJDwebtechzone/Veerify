@@ -122,6 +122,9 @@ export default function StudentsTabScreen({ navigation }) {
           <Text style={styles.title}>Students</Text>
           <Text style={styles.subtitle}>{counts.All} total • {counts.Active} active</Text>
         </View>
+        {/* Filter icon hidden — it just fired a placeholder alert and
+            confused admins. Bring it back once the filter panel
+            (by batch / payment status / etc.) is built.
         <TouchableOpacity
           onPress={() => placeholder('Filter')}
           style={styles.iconButton}
@@ -129,6 +132,7 @@ export default function StudentsTabScreen({ navigation }) {
         >
           <SlidersHorizontal size={20} color={palette.text} strokeWidth={2.2} />
         </TouchableOpacity>
+        */}
       </View>
 
       {/* ───── Search ───── */}
@@ -214,10 +218,13 @@ export default function StudentsTabScreen({ navigation }) {
         />
       )}
 
+      {/* Opens the same EnrollmentForm a student fills when buying a
+          course. adminMode: true tells the form to show an inline batch
+          picker at the top so the admin can pick the batch first. */}
       <FAB
         icon={UserPlus}
         bottom={92}
-        onPress={() => placeholder('Add Student')}
+        onPress={() => navigation.navigate('EnrollmentForm', { adminMode: true })}
         accent={palette.purple}
       />
     </View>

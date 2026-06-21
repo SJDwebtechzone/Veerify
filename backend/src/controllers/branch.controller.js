@@ -16,6 +16,7 @@
 
 const pool = require('../config/db');
 const { ensureCapacity, limitResponse } = require('../utils/planLimits');
+const { geocodeAddress } = require('../utils/geocoder');
 
 async function getAdminInstitutionId(userId) {
   const r = await pool.query('SELECT institution_id FROM users WHERE id = $1', [userId]);
@@ -126,6 +127,31 @@ exports.create = async (req, res) => {
       return res.status(400).json({ message: 'Branch name is required' });
     }
 
+    // ── Auto-geocode ───────────────────────────────────────────────
+    // The admin fills in branch info from their office without
+    // visiting each location. If they didn't supply lat/lng we
+    // resolve them from the pincode (most accurate) or from the full
+    // typed address (when the pincode isn't available). The resulting
+    // coords are what the student-side nearby search needs.
+    let latNum = latitude == null ? null : Number(latitude);
+    let lngNum = longitude == null ? null : Number(longitude);
+    if ((latNum == null || Number.isNaN(latNum) || lngNum == null || Number.isNaN(lngNum))
+        && (pin_code || city || address_line)) {
+      try {
+        const resolved = await geocodeAddress({
+          address_line, city, state, pincode: pin_code, country,
+        });
+        if (resolved) {
+          latNum = resolved.latitude;
+          lngNum = resolved.longitude;
+        }
+      } catch (e) {
+        // Geocoding is best-effort; we still create the branch even if
+        // it fails. Admin can edit later to retry / supply manually.
+        console.warn('[branch/create] geocode failed:', e?.message);
+      }
+    }
+
     // If the caller marks this branch primary, clear any other primary
     // for the same institution so we don't end up with two flagged.
     if (is_primary === true) {
@@ -145,8 +171,7 @@ exports.create = async (req, res) => {
       [institutionId, String(name).trim(), address_line || null,
        city || null, state || null, pin_code || null, country || null,
        phone || null, email || null,
-       latitude == null ? null : Number(latitude),
-       longitude == null ? null : Number(longitude),
+       latNum, lngNum,
        is_primary === true,
        status || 'active',
        notes || null],
@@ -177,6 +202,26 @@ exports.update = async (req, res) => {
       name, address_line, city, state, pin_code, country,
       phone, email, latitude, longitude, is_primary, status, notes,
     } = req.body || {};
+
+    // Auto-geocode on update too — handles the common case where the
+    // admin edits the pincode / city of an existing branch and we need
+    // to refresh its lat/lng to match the new location.
+    let latNum = latitude == null ? null : Number(latitude);
+    let lngNum = longitude == null ? null : Number(longitude);
+    if ((latNum == null || Number.isNaN(latNum) || lngNum == null || Number.isNaN(lngNum))
+        && (pin_code || city || address_line)) {
+      try {
+        const resolved = await geocodeAddress({
+          address_line, city, state, pincode: pin_code, country,
+        });
+        if (resolved) {
+          latNum = resolved.latitude;
+          lngNum = resolved.longitude;
+        }
+      } catch (e) {
+        console.warn('[branch/update] geocode failed:', e?.message);
+      }
+    }
 
     if (is_primary === true) {
       // Demote any other branch currently marked primary.
@@ -209,8 +254,7 @@ exports.update = async (req, res) => {
       [name ? String(name).trim() : null,
        address_line || null, city || null, state || null, pin_code || null,
        country || null, phone || null, email || null,
-       latitude == null ? null : Number(latitude),
-       longitude == null ? null : Number(longitude),
+       latNum, lngNum,
        typeof is_primary === 'boolean' ? is_primary : null,
        status || null, notes || null,
        req.params.id],

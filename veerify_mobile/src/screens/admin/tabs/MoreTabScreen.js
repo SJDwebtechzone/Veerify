@@ -116,9 +116,9 @@ export default function MoreTabScreen({ navigation }) {
             <Text style={styles.planBadgeText}>Pro Plan • Active</Text>
           </View>
         </View>
-        <View style={styles.profileEditButton}>
-          <Edit3 size={16} color={palette.text} strokeWidth={2.2} />
-        </View>
+        {/* Edit pencil removed per user request — the profile card
+            itself is still tappable, but the small right-side icon was
+            redundant with that and not yet wired to an edit screen. */}
       </TouchableOpacity>
 
       {/* ───── Grid menu ───── */}

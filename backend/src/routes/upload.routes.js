@@ -14,17 +14,46 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
+// Slugify free-form names into a filesystem-safe filename prefix.
+// "Mohan Kumar !"  →  "mohan-kumar"
+// Drops everything that isn't a-z, 0-9, hyphen or space; collapses
+// whitespace into single hyphens; trims hyphens off the ends; clamps
+// to 40 chars so the final path doesn't explode if someone pastes a
+// novel into the name field.
+function slugifyHint(raw) {
+  if (!raw) return null;
+  const slug = String(raw)
+    .toLowerCase()
+    .normalize('NFKD').replace(/[̀-ͯ]/g, '')      // strip accents
+    .replace(/[^a-z0-9\s-]/g, '')                            // keep alnum + space + hyphen
+    .replace(/\s+/g, '-')                                    // spaces → hyphens
+    .replace(/-+/g, '-')                                     // collapse repeats
+    .replace(/^-|-$/g, '')                                   // trim ends
+    .slice(0, 40);
+  return slug || null;
+}
+
 // Generic multer used by POST /api/uploads — does NOT touch req.user, so it
 // works for both authenticated and anonymous callers (CMS uploads from the
-// web admin, course banners from the mobile admin, etc.). Files land in
-// `uploads/<stamp>-<rand>.<ext>` so collisions can't happen.
+// web admin, course banners from the mobile admin, etc.).
+//
+// Filename format:
+//   • With ?name_hint=mohan-kumar  →  uploads/mohan-kumar-<stamp>-<rand>.jpg
+//   • Without hint                 →  uploads/<stamp>-<rand>.jpg
+//
+// The hint is slugified server-side, so the caller can pass a friendly
+// raw name ("Mohan Kumar") without worrying about safety. The stamp +
+// rand suffix guarantees collisions can't happen even when two students
+// share a name.
 const genericStorage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, uploadsDir),
-  filename: (_req, file, cb) => {
+  filename: (req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase() || '.jpg';
     const stamp = Date.now();
     const rand = Math.random().toString(36).slice(2, 8);
-    cb(null, `${stamp}-${rand}${ext}`);
+    const hint = slugifyHint(req.query?.name_hint);
+    const base = hint ? `${hint}-${stamp}-${rand}` : `${stamp}-${rand}`;
+    cb(null, `${base}${ext}`);
   },
 });
 const genericFileFilter = (_req, file, cb) => {

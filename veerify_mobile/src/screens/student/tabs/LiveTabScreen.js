@@ -251,24 +251,20 @@ export default function LiveTabScreen({ navigation }) {
 
   return (
     <View style={styles.screen}>
-      {/* Header pad = Math.max of every plausible status-bar height source,
-          with a 32px floor so we're never flush against the system clock
-          even when both inset sources lie. Same pattern Programs uses, plus
-          the floor. */}
+      {/* Header — just academy name + dropdown, matching the simplified
+          Programs + Batches layout. Eyebrow line dropped; bottom padding
+          bumped so the mode toggle below sits clear of the academy name. */}
       <View style={[styles.header, { paddingTop: headerPadTop }]}>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.eyebrow}>Sessions at</Text>
-          <TouchableOpacity
-            onPress={() => navigation.navigate('SelectInstitution')}
-            activeOpacity={0.85}
-            style={styles.instSelector}
-          >
-            <Text style={styles.instText} numberOfLines={1}>
-              {selectedInstitution?.name || 'Pick academy'}
-            </Text>
-            <ChevronDown size={16} color={palette.purple.vivid} strokeWidth={2.4} />
-          </TouchableOpacity>
-        </View>
+        <TouchableOpacity
+          onPress={() => navigation.navigate('SelectInstitution')}
+          activeOpacity={0.85}
+          style={styles.instSelector}
+        >
+          <Text style={styles.instText} numberOfLines={1}>
+            {selectedInstitution?.name || 'Pick academy'}
+          </Text>
+          <ChevronDown size={20} color={palette.purple.vivid} strokeWidth={2.4} />
+        </TouchableOpacity>
       </View>
 
       {/* Mode toggle — a single pill split between Live / Recorded. Hidden
@@ -569,7 +565,7 @@ const styles = StyleSheet.create({
 
   // Header — paddingTop is overridden at render time with the safe-area
   // inset so the academy-name pill never sits behind the status bar.
-  header: { paddingHorizontal: spacing.xl, paddingBottom: spacing.md },
+  header: { paddingHorizontal: spacing.xl, paddingBottom: spacing.xl },
   eyebrow: { ...type.caption, color: palette.textMuted },
   instSelector: { flexDirection: 'row', alignItems: 'center', gap: 4, alignSelf: 'flex-start', marginTop: 2 },
   instText: { ...type.display, color: palette.text, maxWidth: 260 },

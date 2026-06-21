@@ -30,6 +30,9 @@ import {
 
 import apiClient from '../../api/client';
 import { useAuth } from '../../context/AuthContext';
+// Shared resolver — strips embedded localhost / 10.0.2.2 hosts from
+// legacy DB rows so old uploads still render on any client.
+import resolveAssetUrl from '../../utils/assetUrl';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const VIDEO_CARD_WIDTH = Math.round(SCREEN_WIDTH * 0.65);
@@ -44,14 +47,6 @@ const SURFACE = '#FFFFFF';
 const BG = '#F4F4F8';
 const BORDER = '#E5E7EB';
 const GREEN = '#10B981';
-
-const ASSET_HOST = (apiClient.defaults.baseURL || '').replace(/\/api\/?$/, '');
-function resolveAssetUrl(src) {
-  if (!src) return null;
-  if (src.startsWith('data:') || src.startsWith('http://') || src.startsWith('https://')) return src;
-  if (src.startsWith('/uploads/')) return ASSET_HOST + src;
-  return src;
-}
 
 function fmtINR(n) {
   const v = Number(n) || 0;

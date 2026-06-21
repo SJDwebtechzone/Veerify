@@ -31,6 +31,14 @@ import {
   ExternalLink,
 } from 'lucide-react-native';
 import { launchImageLibrary, launchCamera } from 'react-native-image-picker';
+// Lazy-require the document picker. Same try/catch pattern as the
+// institution setup wizard so this screen still mounts on builds
+// where the native module isn't linked yet.
+let DocPicker = null;
+try {
+  const mod = require('@react-native-documents/picker');
+  DocPicker = (mod && mod.default) || mod || null;
+} catch (_) { DocPicker = null; }
 
 import apiClient from '../../api/client';
 import DateField from '../../components/DateField';
@@ -149,15 +157,68 @@ export default function CreateTrainerScreen({ navigation, route }) {
   };
 
   const pickCertificate = () => {
-    Alert.alert(
-      'Upload Certificate',
-      'Choose how to upload the certificate:',
-      [
-        { text: 'Gallery', onPress: () => fromGallery('cert') },
-        { text: 'Camera',  onPress: () => fromCamera('cert') },
-        { text: 'Cancel',  style: 'cancel' },
-      ],
-    );
+    // Build the action list dynamically: the PDF option only appears
+    // when the document picker native module is linked, otherwise the
+    // user just sees Gallery/Camera which already work.
+    const actions = [
+      { text: 'PDF document', onPress: () => fromDocument('cert') },
+      { text: 'Gallery',      onPress: () => fromGallery('cert') },
+      { text: 'Camera',       onPress: () => fromCamera('cert') },
+      { text: 'Cancel',       style: 'cancel' },
+    ];
+    if (!DocPicker) actions.shift(); // strip PDF option when unavailable
+    Alert.alert('Upload Certificate', 'Choose how to upload the certificate:', actions);
+  };
+
+  // PDF / document picker — used for certificate uploads. Handles the
+  // two API shapes the @react-native-documents/picker package has
+  // shipped (pickSingle in v9, pick in v10+) so the screen works on
+  // both. Falls back to uploadAsset which already serialises PDFs.
+  const fromDocument = async (kind) => {
+    if (!DocPicker) {
+      Alert.alert(
+        'PDF not supported',
+        'Document picker module is missing from this build. Use Gallery or Camera to take a photo of the certificate.',
+      );
+      return;
+    }
+    try {
+      // Type filter — v9 wants strings like 'application/pdf', v10 has
+      // a types helper. Both accept the raw MIME string, so we go with
+      // that for compatibility.
+      const opts = { type: ['application/pdf', 'image/*'] };
+
+      let file = null;
+      if (typeof DocPicker.pickSingle === 'function') {
+        // v9 API
+        file = await DocPicker.pickSingle({ ...opts, copyTo: 'cachesDirectory' });
+      } else if (typeof DocPicker.pick === 'function') {
+        // v10+ API
+        const res = await DocPicker.pick({ ...opts, allowMultiSelection: false });
+        file = Array.isArray(res) ? res[0] : res;
+      } else {
+        Alert.alert('PDF not supported', 'No compatible pick API found in the document picker module.');
+        return;
+      }
+      if (!file) return;
+
+      uploadAsset({
+        uri:      file.fileCopyUri || file.uri,
+        type:     file.type || 'application/pdf',
+        fileName: file.name || 'certificate.pdf',
+      }, kind);
+    } catch (err) {
+      // Cancellations come through with different shapes per version
+      // (an isCancel helper on v9, code OPERATION_CANCELED on v10).
+      const isCancel =
+        (typeof DocPicker.isCancel === 'function' && DocPicker.isCancel(err)) ||
+        err?.code === 'OPERATION_CANCELED' ||
+        err?.code === 'DOCUMENT_PICKER_CANCELED' ||
+        err?.message?.toLowerCase().includes('cancel');
+      if (!isCancel) {
+        Alert.alert('Picker error', err?.message || 'Could not pick the document.');
+      }
+    }
   };
 
   const fromGallery = (kind) => {
@@ -191,18 +252,35 @@ export default function CreateTrainerScreen({ navigation, route }) {
 
     try {
       const fd = new FormData();
+      // Infer a sensible mime/name fallback per slot. Photos default
+      // to JPEG; certificates default to PDF so a document picker that
+      // somehow returns no type still serialises correctly.
+      const defaultType = kind === 'photo' ? 'image/jpeg' : 'application/pdf';
+      const defaultName = kind === 'photo' ? 'photo.jpg' : 'certificate.pdf';
       fd.append('file', {
         uri: asset.uri,
-        type: asset.type || 'image/jpeg',
-        name: asset.fileName || (kind === 'photo' ? 'photo.jpg' : 'certificate.jpg'),
+        type: asset.type || defaultType,
+        name: asset.fileName || defaultName,
       });
-      const resp = await apiClient.post('/uploads', fd, {
+      // Pass the trainer's name as the upload hint so the file on disk
+      // is named "mohan-kumar-1738485293-xy12.jpg" instead of the random
+      // gallery temp name. Defaults to "trainer-photo" when the name
+      // field is blank.
+      const hintName = (form.name || 'trainer').trim();
+      const hintKind = kind === 'photo' ? 'photo' : 'certificate';
+      const hint = encodeURIComponent(`${hintName}-${hintKind}`);
+      const resp = await apiClient.post(`/uploads?name_hint=${hint}`, fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
+      // Store the RELATIVE path returned by /api/uploads (e.g.
+      // "/uploads/xyz.jpg"), not the absolute `url`. The absolute one
+      // bakes in the emulator host (10.0.2.2:5000) and breaks every
+      // other client. resolveAssetUrl prepends the right base at
+      // render time. We keep `url` as a fallback for older builds.
       if (kind === 'photo') {
-        set('photo_url', resp.data.url);
+        set('photo_url', resp.data.path || resp.data.url);
       } else {
-        set('certificate_url', resp.data.url);
+        set('certificate_url', resp.data.path || resp.data.url);
         set('certificate_name', asset.fileName || 'Certificate');
       }
     } catch (err) {

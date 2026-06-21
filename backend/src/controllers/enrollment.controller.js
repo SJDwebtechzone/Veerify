@@ -1,4 +1,20 @@
 const pool = require('../config/db');
+const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
+const { sendStudentCredentialsEmail } = require('../utils/mailer');
+const { ensureCapacity, limitResponse } = require('../utils/planLimits');
+
+// Generates a short, human-shareable temp password for a newly-created
+// student account. Mixed-case letters + digits, 10 chars long. Avoids
+// ambiguous characters (O, 0, I, l, 1) so the student doesn't mis-type.
+function generateTempPassword() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  let pw = '';
+  for (let i = 0; i < 10; i++) {
+    pw += chars[crypto.randomInt(0, chars.length)];
+  }
+  return pw;
+}
 
 // GET /api/enrollments/all
 // Platform-wide most-recent enrollments. Used by the super admin web
@@ -150,10 +166,72 @@ exports.enrollInBatch = async (req, res) => {
       disabilities,
       photo_url,
     } = req.body;
-    const studentId = req.user.id;
 
     if (!batch_id) {
       return res.status(400).json({ message: 'batch_id is required' });
+    }
+
+    // ── Admin-mode branch ────────────────────────────────────────────
+    // When an institution admin enrols a student from the admin app,
+    // the request comes in with role='admin'. We don't want to enrol
+    // the admin themselves — we want to (a) find or create a student
+    // user account with the supplied email, (b) email them their login
+    // credentials, then (c) use that user's id as the enrollment's
+    // student_id. The rest of the controller continues unchanged.
+    let studentId = req.user.id;
+    let createdStudentCreds = null; // populated when we created a new account
+    if (req.user.role === 'admin') {
+      const adminMode = req.body?.admin_mode === true;
+      const cleanEmail = String(email || '').trim().toLowerCase();
+      const cleanName  = String(full_name || '').trim();
+      if (!adminMode || !cleanEmail || !cleanName) {
+        return res.status(400).json({
+          message: 'Admin enrolment needs full_name + email so we can create the student\'s login.',
+        });
+      }
+      // Find an existing student user with that email; otherwise create
+      // one. We never overwrite an existing user's password — the admin
+      // can ask them to use Forgot Password if they've lost it.
+      const existing = await pool.query(
+        `SELECT id, role FROM users WHERE LOWER(email) = $1`,
+        [cleanEmail],
+      );
+      if (existing.rows[0]) {
+        const u = existing.rows[0];
+        if (u.role !== 'student') {
+          return res.status(409).json({
+            message: 'That email is already registered under a different role. Use a different email.',
+          });
+        }
+        studentId = u.id;
+      } else {
+        // Create a fresh student account with a temp password.
+        const tempPassword = generateTempPassword();
+        const hashed = await bcrypt.hash(tempPassword, 10);
+        // Find the admin's institution so we link the new student to it.
+        const adminInst = await pool.query(
+          `SELECT institution_id FROM users WHERE id = $1`,
+          [req.user.id],
+        );
+        const institutionId = adminInst.rows[0]?.institution_id || null;
+        const insertUser = await pool.query(
+          `INSERT INTO users (name, email, phone, password, role, institution_id)
+           VALUES ($1, $2, $3, $4, 'student', $5)
+           RETURNING id, name, email`,
+          [cleanName, cleanEmail,
+           String(contact_number || '').trim() || null,
+           hashed, institutionId],
+        );
+        studentId = insertUser.rows[0].id;
+        // Defer the send until after the transaction commits so we
+        // don't email a student whose enrollment ultimately fails.
+        createdStudentCreds = {
+          to: cleanEmail,
+          name: cleanName,
+          loginEmail: cleanEmail,
+          password: tempPassword,
+        };
+      }
     }
 
     // Get batch details + capacity check
@@ -172,9 +250,19 @@ exports.enrollInBatch = async (req, res) => {
 
     const batch = batchResult.rows[0];
 
-    // Capacity check
+    // Capacity check (batch-level — physical seat count for this batch).
     if (parseInt(batch.enrolled_count) >= batch.capacity) {
       return res.status(409).json({ message: 'Batch is full. No seats available.' });
+    }
+
+    // Plan-cap check (institution-level — total students under the
+    // institution's subscription plan). This blocks both self-enrolment
+    // by a student and admin-driven enrolment so neither path can sneak
+    // past the cap. Returns the same 402 PLAN_LIMIT_REACHED shape the
+    // mobile already knows how to render as an upgrade prompt.
+    const overLimit = await ensureCapacity(batch.institution_id, 'students');
+    if (overLimit) {
+      return res.status(402).json(limitResponse('students', overLimit));
     }
 
     // Check duplicate enrollment
@@ -292,9 +380,40 @@ exports.enrollInBatch = async (req, res) => {
       }
     })();
 
+    // Now that the transaction has committed, email the student their
+    // login credentials if we created a fresh account during this
+    // admin-mode call. Best-effort: a mail failure logs a warning but
+    // doesn't fail the enrollment (the account exists and the admin can
+    // re-share the password manually if needed).
+    if (createdStudentCreds) {
+      try {
+        const inst = await pool.query(
+          `SELECT i.name, c.name AS course_name
+             FROM batches b
+             JOIN courses c ON b.course_id = c.id
+             JOIN institutions i ON b.institution_id = i.id
+            WHERE b.id = $1`,
+          [batch_id],
+        );
+        const mailResult = await sendStudentCredentialsEmail({
+          ...createdStudentCreds,
+          institutionName: inst.rows[0]?.name || 'your academy',
+          courseName:      inst.rows[0]?.course_name || null,
+        });
+        if (!mailResult.ok) {
+          console.warn('[enroll] student credentials email failed:', mailResult.error);
+        }
+      } catch (mailErr) {
+        console.warn('[enroll] student credentials email threw:', mailErr.message);
+      }
+    }
+
     res.status(201).json({
-      message: 'Enrolled successfully. Please complete payment.',
-      enrollment: result.rows[0]
+      message: createdStudentCreds
+        ? 'Student enrolled. Login details emailed to the student.'
+        : 'Enrolled successfully. Please complete payment.',
+      enrollment: result.rows[0],
+      student_credentials_sent: !!createdStudentCreds,
     });
   } catch (err) {
     await client.query('ROLLBACK');

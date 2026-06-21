@@ -21,21 +21,16 @@ import {
   GraduationCap, ChevronRight, Users, Edit3, Eye, X, Calendar, FileText,
   Crown,
 } from 'lucide-react-native';
-// MoreVertical not in older lucide versions; MoreHorizontal works the same.
-const MoreVertical = MoreHorizontal;
-
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 import PlanLimitModal from '../../components/PlanLimitModal';
+// Shared resolver — repairs legacy DB rows that baked in 10.0.2.2:5000
+// or localhost from the Android emulator, and prepends the current
+// api host to plain /uploads/... paths. See src/utils/assetUrl.js.
+import resolveAssetUrl from '../../utils/assetUrl';
 
-// ─── Asset host helper (re-uses the mobile API base) ───────────────────
-const ASSET_HOST = (apiClient.defaults.baseURL || '').replace(/\/api\/?$/, '');
-function resolveAssetUrl(src) {
-  if (!src) return null;
-  if (src.startsWith('data:') || src.startsWith('http://') || src.startsWith('https://')) return src;
-  if (src.startsWith('/uploads/')) return ASSET_HOST + src;
-  return src;
-}
+// MoreVertical not in older lucide versions; MoreHorizontal works the same.
+const MoreVertical = MoreHorizontal;
 
 // ─── Belt → color palette mapping (matches student/parent screens) ────
 const BELT_COLORS = {

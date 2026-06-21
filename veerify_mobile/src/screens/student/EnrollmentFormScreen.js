@@ -211,10 +211,18 @@ export default function EnrollmentFormScreen({ route, navigation }) {
         type: asset.type || 'image/jpeg',
         name: asset.fileName || 'photo.jpg',
       });
-      const resp = await apiClient.post('/uploads', fd, {
+      // Pass the student's full name as the upload hint so the saved
+      // filename reads as "priya-r-student-1738485293-xy12.jpg" on disk
+      // — much easier to identify than the gallery's temp name.
+      const hintName = (form.full_name || 'student').trim();
+      const hint = encodeURIComponent(`${hintName}-student`);
+      const resp = await apiClient.post(`/uploads?name_hint=${hint}`, fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
-      set('photo_url', resp.data.url);
+      // Store the RELATIVE /uploads/... path; the absolute `url` bakes
+      // in 10.0.2.2:5000 from the Android emulator and is unreachable
+      // from any browser or other device.
+      set('photo_url', resp.data.path || resp.data.url);
     } catch (err) {
       Alert.alert('Upload failed', 'Please try a smaller image.');
       set('photo_uri', '');
@@ -227,6 +235,11 @@ export default function EnrollmentFormScreen({ route, navigation }) {
   const validate = () => {
     if (!form.full_name?.trim()) return 'Full Name is required';
     if (form.email && !/\S+@\S+\.\S+/.test(form.email)) return 'Please enter a valid email';
+    // In admin mode the email is the student's login id, so it can't
+    // be skipped — we'd have nowhere to email the credentials.
+    if (adminMode && !form.email?.trim()) {
+      return 'Email is required so we can email the student their login.';
+    }
     if (form.contact_number && form.contact_number.length < 10) {
       return 'Please enter a valid contact number';
     }
@@ -251,6 +264,11 @@ export default function EnrollmentFormScreen({ route, navigation }) {
 
       const res = await apiClient.post('/enrollments', {
         batch_id: batchId,
+        // Tell the backend this is an admin-driven enrolment. When set,
+        // the server creates a brand-new student user (or reuses the
+        // existing email's account), emails the login credentials, then
+        // links the enrolment to that user instead of the admin's id.
+        admin_mode: !!adminMode,
         full_name:      form.full_name.trim(),
         date_of_birth:  form.date_of_birth || null,
         father_name:    form.father_name.trim() || null,
@@ -466,7 +484,7 @@ export default function EnrollmentFormScreen({ route, navigation }) {
             maxLength={15}
           />
         </Field>
-        <Field label="Email">
+        <Field label={adminMode ? 'Email *' : 'Email'}>
           <TextInput
             style={styles.input}
             placeholder="you@example.com"
@@ -477,6 +495,14 @@ export default function EnrollmentFormScreen({ route, navigation }) {
             autoCapitalize="none"
             autoCorrect={false}
           />
+          {adminMode ? (
+            <Text style={{
+              fontSize: 11, color: '#6B7280', marginTop: 6, fontWeight: '600',
+              fontStyle: 'italic',
+            }}>
+              We'll create a student login at this email and send the password.
+            </Text>
+          ) : null}
         </Field>
         <Field label="Address">
           <TextInput

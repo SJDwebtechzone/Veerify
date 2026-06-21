@@ -327,13 +327,19 @@ export default function HomeTabScreen({ navigation }) {
         ) : null}
 
         {/* ── Upcoming Live Classes ───────────────────────────── */}
-        <Section
-          title="Upcoming Live Classes"
-          actionLabel="See all"
-          onAction={() => navigation.navigate('Live')}
-        >
-          <EmptyInline icon={Radio} text="No live classes scheduled — check back soon" />
-        </Section>
+        {/* Hidden for guest users — they have no enrolled batches yet,
+            so the section would render permanently empty and create
+            confusion. Logged-in students still see it so the "No live
+            classes" message has context. */}
+        {!isGuest ? (
+          <Section
+            title="Upcoming Live Classes"
+            actionLabel="See all"
+            onAction={() => navigation.navigate('Live')}
+          >
+            <EmptyInline icon={Radio} text="No live classes scheduled — check back soon" />
+          </Section>
+        ) : null}
 
         {/* ── Nearby Academies — hybrid (GPS or pincode) ──────── */}
         <Section title="Other Academies Near You">
@@ -525,6 +531,10 @@ function NearbyAcademyRow({ academy, accent, onPress }) {
   const titleLine = isBranch && academy.institution_name
     ? `${academy.institution_name} · ${academy.name}`
     : academy.name;
+  // Backend returns seats_available: false when the parent institution
+  // has hit its plan's max_students cap. We render the row dimmed and
+  // show a red "No seats" pill so students know not to bother enrolling.
+  const isFull = academy.seats_available === false;
   return (
     <TouchableOpacity onPress={onPress} activeOpacity={0.85} style={styles.nearbyRow}>
       {logo ? (
@@ -535,7 +545,7 @@ function NearbyAcademyRow({ academy, accent, onPress }) {
         </View>
       )}
       <View style={{ flex: 1 }}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
           <Text style={styles.nearbyName} numberOfLines={1}>{titleLine}</Text>
           {isBranch ? (
             <View style={{
@@ -544,6 +554,16 @@ function NearbyAcademyRow({ academy, accent, onPress }) {
             }}>
               <Text style={{ fontSize: 9, fontWeight: '800', color: '#E63946', letterSpacing: 0.4 }}>
                 BRANCH
+              </Text>
+            </View>
+          ) : null}
+          {isFull ? (
+            <View style={{
+              paddingHorizontal: 6, paddingVertical: 1,
+              borderRadius: 999, backgroundColor: '#FEE2E2',
+            }}>
+              <Text style={{ fontSize: 9, fontWeight: '800', color: '#B91C1C', letterSpacing: 0.4 }}>
+                NO SEATS
               </Text>
             </View>
           ) : null}

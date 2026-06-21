@@ -429,7 +429,9 @@ export default function SetupInstitutionScreen({ navigation }) {
     );
   };
 
-  // Native document picker — PDF only, max 2 MB.
+  // Native document picker — PDF only, max 2 MB. Supports both v9
+  // (pickSingle) and v10+ (pick) of @react-native-documents/picker so
+  // the picker works regardless of which version is installed.
   const pickCertPdf = async () => {
     if (!DocumentPicker) {
       Alert.alert(
@@ -442,10 +444,26 @@ export default function SetupInstitutionScreen({ navigation }) {
       return;
     }
     try {
-      const res = await DocumentPicker.pickSingle({
-        type: [DocumentPicker.types.pdf],
-        copyTo: 'cachesDirectory',
-      });
+      // Raw MIME string works on both v9 (which also exposes
+      // DocumentPicker.types.pdf) and v10+ (which dropped types).
+      const opts = { type: ['application/pdf'] };
+
+      let res = null;
+      if (typeof DocumentPicker.pickSingle === 'function') {
+        // v9 API
+        res = await DocumentPicker.pickSingle({ ...opts, copyTo: 'cachesDirectory' });
+      } else if (typeof DocumentPicker.pick === 'function') {
+        // v10+ API
+        const arr = await DocumentPicker.pick({ ...opts, allowMultiSelection: false });
+        res = Array.isArray(arr) ? arr[0] : arr;
+      } else {
+        Alert.alert(
+          'Picker unavailable',
+          'No compatible pick API found in the document picker module.',
+        );
+        return;
+      }
+      if (!res) return;
 
       // Belt-and-braces: extension + mime-type check (some Android pickers
       // ignore the type filter and surface non-PDF files).
@@ -475,7 +493,13 @@ export default function SetupInstitutionScreen({ navigation }) {
         'cert',
       );
     } catch (err) {
-      if (DocumentPicker.isCancel?.(err)) return;
+      // Cancellation comes through in different shapes per version.
+      const isCancel =
+        (typeof DocumentPicker.isCancel === 'function' && DocumentPicker.isCancel(err)) ||
+        err?.code === 'OPERATION_CANCELED' ||
+        err?.code === 'DOCUMENT_PICKER_CANCELED' ||
+        err?.message?.toLowerCase().includes('cancel');
+      if (isCancel) return;
       console.warn('pickCertPdf error:', err);
       Alert.alert('Pick failed', err?.message || 'Could not open the file picker.');
     }
@@ -525,10 +549,17 @@ export default function SetupInstitutionScreen({ navigation }) {
           type: asset.type || 'application/pdf',
           name: asset.fileName || 'certificate.pdf',
         });
-        const resp = await apiClient.post('/uploads', fd, {
+        // Use the institution / academy name as the file hint so the
+        // accreditation cert lands as "veerify-academy-accreditation-...pdf"
+        // on disk instead of the gallery's temp name.
+        const hintName = (form.name || 'academy').trim();
+        const hint = encodeURIComponent(`${hintName}-accreditation`);
+        const resp = await apiClient.post(`/uploads?name_hint=${hint}`, fd, {
           headers: { 'Content-Type': 'multipart/form-data' },
         });
-        set('accreditation_certificate_url', resp.data.url);
+        // Store the RELATIVE upload path so the same record renders on
+        // every client (emulator + browser + production).
+        set('accreditation_certificate_url', resp.data.path || resp.data.url);
         set('accreditation_certificate_name', asset.fileName || 'certificate.pdf');
       }
     } catch (err) {

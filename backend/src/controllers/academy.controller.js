@@ -18,46 +18,23 @@
 //     institutions so the student sees something.
 
 const pool = require('../config/db');
+const { resolvePincode } = require('../utils/geocoder');
 
-// Resolve a string pincode to { latitude, longitude, district, state }.
-// Returns null if no row even loosely matches.
-async function resolvePincode(rawPin) {
-  const pin = String(rawPin || '').replace(/[^0-9]/g, '').slice(0, 6);
-  if (pin.length !== 6) return null;
-
-  // Exact hit first.
-  const exact = await pool.query(
-    `SELECT pincode, latitude, longitude, district, state
-       FROM pincodes WHERE pincode = $1`,
-    [pin],
-  );
-  if (exact.rows[0]) return exact.rows[0];
-
-  // Prefix match — try 3 digits (same postal sorting district) and
-  // average their coords. Good "same city" fallback when the student's
-  // exact pincode isn't in our seed yet.
-  const prefix = pin.slice(0, 3);
-  const fuzzy = await pool.query(
-    `SELECT AVG(latitude)::float  AS latitude,
-            AVG(longitude)::float AS longitude,
-            MAX(district)         AS district,
-            MAX(state)            AS state
-       FROM pincodes
-      WHERE region3 = $1`,
-    [prefix],
-  );
-  const f = fuzzy.rows[0];
-  if (f && f.latitude && f.longitude) {
-    return { pincode: pin, ...f };
-  }
-  return null;
-}
+// resolvePincode is shared from utils/geocoder.js so the branch +
+// onboarding flows use the exact same lookup logic.
 
 // GET /api/academies/nearby
 exports.getNearby = async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit || '20', 10), 100);
-    const maxKm = req.query.max_km ? parseFloat(req.query.max_km) : null;
+    // Default "nearby" radius — keeps the list feeling local. The
+    // caller can pass max_km=0 to disable. If the first pass returns
+    // nothing within this radius we widen automatically so the section
+    // never goes empty when there ARE academies in the DB.
+    let maxKm = req.query.max_km != null
+      ? parseFloat(req.query.max_km)
+      : 50;
+    if (Number.isNaN(maxKm) || maxKm <= 0) maxKm = null;
 
     let lat = parseFloat(req.query.lat);
     let lng = parseFloat(req.query.lng);
@@ -174,11 +151,96 @@ exports.getNearby = async (req, res) => {
       ORDER BY distance_km ASC
       LIMIT $${params.length}
     `;
-    const r = await pool.query(sql, params);
+    let r = await pool.query(sql, params);
+
+    // Progressive widen — if the strict radius found nothing AND the
+    // caller didn't pin an explicit max_km, retry once at 200 km, and
+    // once unbounded. "Other Academies Near You" should never go empty
+    // when there are geocoded academies in the DB; we just label the
+    // result so the mobile can say "farther away than usual" if needed.
+    let widened_to = null;
+    if (r.rows.length === 0 && req.query.max_km == null) {
+      const buildSql = (capKm) => {
+        const params2 = [lat, lng];
+        let distFilter = '';
+        if (capKm != null) {
+          params2.push(capKm);
+          distFilter = ` AND (
+            6371 * acos(
+              cos(radians($1)) * cos(radians(latitude))
+              * cos(radians(longitude) - radians($2))
+              + sin(radians($1)) * sin(radians(latitude))
+            )
+          ) <= $${params2.length}`;
+        }
+        params2.push(limit);
+        return [params2, distFilter];
+      };
+      // Attempt 200 km.
+      {
+        const [p2, df2] = buildSql(200);
+        const sql2 = sql
+          .replace(`${distanceWhere}`, df2)
+          .replace(`$${params.length}`, `$${p2.length}`);
+        r = await pool.query(sql2, p2);
+        if (r.rows.length > 0) widened_to = 200;
+      }
+      // Attempt unbounded.
+      if (r.rows.length === 0) {
+        const [p3, df3] = buildSql(null);
+        const sql3 = sql
+          .replace(`${distanceWhere}`, df3)
+          .replace(`$${params.length}`, `$${p3.length}`);
+        r = await pool.query(sql3, p3);
+        if (r.rows.length > 0) widened_to = 'unbounded';
+      }
+    }
+
+    // Decorate each row with `seats_available` so the mobile can flag
+    // institutions whose subscription plan has hit its student cap.
+    // For an institution row, the cap is its own; for a branch row, we
+    // use the parent institution's cap (since branches share the plan).
+    const instIds = [...new Set(
+      r.rows.map((row) => row.kind === 'branch' ? row.institution_id : row.id).filter(Boolean),
+    )];
+    if (instIds.length > 0) {
+      const capRows = await pool.query(
+        `SELECT i.id            AS institution_id,
+                sp.max_students AS max_students,
+                (
+                  SELECT COUNT(DISTINCT e.student_id)::int
+                    FROM enrollments e
+                   WHERE e.institution_id = i.id
+                ) AS current_students
+           FROM institutions i
+           LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
+          WHERE i.id = ANY($1::int[])`,
+        [instIds],
+      );
+      const capByInst = {};
+      capRows.rows.forEach((c) => {
+        const cap = Number(c.max_students || 0);
+        const used = Number(c.current_students || 0);
+        const unlimited = !cap || cap >= 999;
+        capByInst[c.institution_id] = {
+          seats_available: unlimited ? true : used < cap,
+          seats_total:     unlimited ? null : cap,
+          seats_used:      used,
+        };
+      });
+      r.rows.forEach((row) => {
+        const instId = row.kind === 'branch' ? row.institution_id : row.id;
+        const info = capByInst[instId];
+        if (info) Object.assign(row, info);
+      });
+    }
+
     res.json({
       resolved_from:    resolvedFrom,
       resolved_pincode: resolvedPincode,
       origin:           { latitude: lat, longitude: lng },
+      radius_km:        maxKm,
+      widened_to,
       results:          r.rows,
     });
   } catch (err) {

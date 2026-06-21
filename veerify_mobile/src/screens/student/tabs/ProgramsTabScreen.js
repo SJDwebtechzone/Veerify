@@ -163,34 +163,20 @@ export default function ProgramsTabScreen({ navigation }) {
 
   return (
     <View style={styles.screen}>
-      {/* Header — paddingTop is dynamic so the institution name doesn't get
-          clipped behind the Android status bar or iOS notch. We use the
-          safe-area inset if it's reported, falling back to the StatusBar
-          height on Android in case the SafeAreaProvider context isn't in
-          scope yet. */}
-      <View style={[
-        styles.header,
-        {
-          paddingTop:
-            Math.max(
-              insets.top,
-              Platform.OS === 'android' ? (StatusBar.currentHeight || 0) : 0,
-            ) + spacing.md,
-        },
-      ]}>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.eyebrow}>Programs at</Text>
-          <TouchableOpacity
-            onPress={() => navigation.navigate('SelectInstitution')}
-            activeOpacity={0.85}
-            style={styles.instSelector}
-          >
-            <Text style={styles.instText} numberOfLines={1}>
-              {selectedInstitution?.name}
-            </Text>
-            <ChevronDown size={16} color={palette.purple.vivid} strokeWidth={2.4} />
-          </TouchableOpacity>
-        </View>
+      {/* Header — just the academy name + dropdown. The eyebrow line was
+          dropped at the user's request so the header reads cleaner and
+          there's nothing left to clip behind the status bar. */}
+      <View style={styles.header}>
+        <TouchableOpacity
+          onPress={() => navigation.navigate('SelectInstitution')}
+          activeOpacity={0.85}
+          style={styles.instSelector}
+        >
+          <Text style={styles.instText} numberOfLines={1}>
+            {selectedInstitution?.name}
+          </Text>
+          <ChevronDown size={20} color={palette.purple.vivid} strokeWidth={2.4} />
+        </TouchableOpacity>
       </View>
 
       <ScrollView
@@ -426,13 +412,24 @@ const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: palette.bg },
   center: { alignItems: 'center', justifyContent: 'center' },
 
-  // Header
+  // Header — generous bottom padding so the search bar below it has
+  // clear breathing room from the academy name.
   header: {
     paddingHorizontal: spacing.xl,
     paddingTop: spacing.xxl,
-    paddingBottom: spacing.md,
+    paddingBottom: spacing.xl,
   },
-  eyebrow: { ...type.caption, color: palette.textMuted },
+  // Explicit large, bold, brand-coloured eyebrow so "PROGRAMS AT" can't
+  // be missed. The previous 12 px muted grey was effectively invisible.
+  eyebrow: {
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '800',
+    color: palette.purple.vivid,
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+    marginBottom: 2,
+  },
   instSelector: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -448,6 +445,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: spacing.sm,
     marginHorizontal: spacing.xl,
+    // Small top gap so the search bar is clearly separate from the
+    // institution-selector header above it.
+    marginTop: spacing.sm,
     backgroundColor: palette.surface,
     borderRadius: radius.lg,
     paddingHorizontal: spacing.lg,

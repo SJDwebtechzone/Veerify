@@ -86,6 +86,11 @@ export default function RegisterScreen({ navigation }) {
               </Text>
             </TouchableOpacity>
 
+            {/* Parent role tile temporarily hidden from the registration
+                picker — the Parent module code is untouched and still
+                works for already-registered parents. Reveal this tile
+                again when we re-open parent self-signup. */}
+            {/*
             <TouchableOpacity
               style={[styles.roleButton, role === 'parent' && styles.roleButtonActive]}
               onPress={() => setRole('parent')}
@@ -96,6 +101,7 @@ export default function RegisterScreen({ navigation }) {
                 Parent
               </Text>
             </TouchableOpacity>
+            */}
 
             <TouchableOpacity
               style={[styles.roleButton, role === 'admin' && styles.roleButtonActive]}
