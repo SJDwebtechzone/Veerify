@@ -3,6 +3,7 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { View, Text, ActivityIndicator } from 'react-native';
 import { useAuth } from '../context/AuthContext';
+import { navigationRef } from './navigationRef';
 
 // Auth screens
 import WelcomeScreen from '../screens/WelcomeScreen';
@@ -21,11 +22,16 @@ import AdminTabNavigator from './AdminTabNavigator';
 import SetupInstitutionScreen from '../screens/admin/SetupInstitutionScreen';
 import AccountDeletedScreen from '../screens/admin/AccountDeletedScreen';
 import StudentDetailScreen from '../screens/admin/StudentDetailScreen';
+import EditStudentScreen from '../screens/admin/EditStudentScreen';
 import CoursesListScreen from '../screens/admin/CoursesListScreen';
 import CreateCourseScreen from '../screens/admin/CreateCourseScreen';
 import AdminCourseDetailScreen from '../screens/admin/AdminCourseDetailScreen';
 import BatchesListScreen from '../screens/admin/BatchesListScreen';
 import CreateBatchScreen from '../screens/admin/CreateBatchScreen';
+import CreateEventScreen from '../screens/admin/CreateEventScreen';
+import EventsListScreen from '../screens/admin/EventsListScreen';
+import EventDetailScreen from '../screens/EventDetailScreen';
+import PricingPlansScreen from '../screens/admin/PricingPlansScreen';
 import AdminBatchStudentsScreen from '../screens/admin/AdminBatchStudentsScreen';
 import TrainersListScreen from '../screens/admin/TrainersListScreen';
 import CreateTrainerScreen from '../screens/admin/CreateTrainerScreen';
@@ -127,7 +133,7 @@ export default function AppNavigator() {
   // ── NOT LOGGED IN ──
   if (!user) {
     return (
-      <NavigationContainer>
+      <NavigationContainer ref={navigationRef}>
         <Stack.Navigator screenOptions={{ headerShown: false }}>
           <Stack.Screen name="Welcome" component={WelcomeScreen} />
           <Stack.Screen name="Login" component={LoginScreen} />
@@ -157,7 +163,7 @@ export default function AppNavigator() {
     const initialRoute = getAdminInitialRoute(onboardingStatus);
     console.log('[NAV] admin stack mounting → onboardingStatus=', onboardingStatus, '→ initialRoute=', initialRoute);
     return (
-      <NavigationContainer>
+      <NavigationContainer ref={navigationRef}>
         {/* key= forces the navigator to fully remount whenever the onboarding
             status changes, so initialRouteName is re-evaluated. Without this,
             initialRouteName is only honored on the first mount and any later
@@ -199,6 +205,7 @@ export default function AppNavigator() {
           {/* Dashboard screens — accessible only after active */}
           <Stack.Screen name="AdminDashboard" component={AdminTabNavigator} />
           <Stack.Screen name="StudentDetail" component={StudentDetailScreen} />
+          <Stack.Screen name="EditStudent" component={EditStudentScreen} options={{ headerShown: false }} />
           <Stack.Screen name="CoursesList" component={CoursesListScreen} />
           <Stack.Screen name="CreateCourse" component={CreateCourseScreen}
             options={{ headerShown: true, title: 'New Course' }} />
@@ -214,6 +221,19 @@ export default function AppNavigator() {
             options={{ headerShown: false }} />
           <Stack.Screen name="CreateBatch" component={CreateBatchScreen}
             options={{ headerShown: true, title: 'New Batch' }} />
+          {/* CreateEventScreen renders its own header. */}
+          <Stack.Screen name="CreateEvent" component={CreateEventScreen}
+            options={{ headerShown: false }} />
+          {/* EventsListScreen renders its own header. */}
+          <Stack.Screen name="EventsList" component={EventsListScreen}
+            options={{ headerShown: false }} />
+          {/* EventDetailScreen — shared detail view used by admin /
+              trainer / student. Renders its own header. */}
+          <Stack.Screen name="EventDetail" component={EventDetailScreen}
+            options={{ headerShown: false }} />
+          {/* PricingPlansScreen — reached from More tab. Renders its own header. */}
+          <Stack.Screen name="PricingPlans" component={PricingPlansScreen}
+            options={{ headerShown: false }} />
           <Stack.Screen name="TrainersList" component={TrainersListScreen} />
           {/* CreateTrainerScreen renders its own header so we hide the
               native stack header to avoid stacking two bars. */}
@@ -262,7 +282,7 @@ export default function AppNavigator() {
   // ── STUDENT ──
   if (user.role === 'student') {
     return (
-      <NavigationContainer>
+      <NavigationContainer ref={navigationRef}>
         <Stack.Navigator screenOptions={{ headerShown: false }}>
           <Stack.Screen name="StudentTabs" component={StudentTabNavigator} />
           <Stack.Screen name="SelectInstitution" component={SelectInstitutionScreen}
@@ -289,6 +309,10 @@ export default function AppNavigator() {
             options={{ headerShown: false }} />
           {/* EnrolledCourseScreen renders its own image hero + back button. */}
           <Stack.Screen name="EnrolledCourse" component={EnrolledCourseScreen}
+            options={{ headerShown: false }} />
+          {/* Shared event detail — students reach this by tapping an event
+              card on their Home tab / MyDashboard. */}
+          <Stack.Screen name="EventDetail" component={EventDetailScreen}
             options={{ headerShown: false }} />
           {/* Students reuse the same Notifications screen the staff module uses —
               the inbox is per-user via the JWT, so it works for every role. */}
@@ -321,13 +345,17 @@ export default function AppNavigator() {
   // pushed on top — full-screen, no tab bar visible.
   if (user.role === 'trainer') {
     return (
-      <NavigationContainer>
+      <NavigationContainer ref={navigationRef}>
         <Stack.Navigator screenOptions={{ headerShown: false }}>
           <Stack.Screen name="StaffTabs" component={StaffTabNavigator} />
           {/* Legacy route name kept so any code that still calls
               navigation.navigate('TrainerDashboard') continues to land on
               the tabbed shell. */}
           <Stack.Screen name="TrainerDashboard" component={StaffTabNavigator} />
+          {/* Shared event detail — trainers reach this by tapping an event
+              card on their dashboard. */}
+          <Stack.Screen name="EventDetail" component={EventDetailScreen}
+            options={{ headerShown: false }} />
           <Stack.Screen name="StaffAttendanceHistory" component={StaffAttendanceHistoryScreen} />
           <Stack.Screen name="StaffStudentDetail" component={StaffStudentDetailScreen} />
           <Stack.Screen name="StaffLeaveRequests" component={StaffLeaveRequestsScreen} />
@@ -375,7 +403,7 @@ export default function AppNavigator() {
   // ChildProfile) sit ABOVE the tabs — pushing them hides the tab bar.
   if (user.role === 'parent') {
     return (
-      <NavigationContainer>
+      <NavigationContainer ref={navigationRef}>
         <Stack.Navigator screenOptions={{ headerShown: false }}>
           <Stack.Screen name="ParentTabs" component={ParentTabNavigator} />
           {/* Legacy route — keep so any direct navigate('ParentDashboard')
@@ -400,22 +428,21 @@ export default function AppNavigator() {
           {/* ChildProfileScreen renders its own red hero/header, so we keep
               the stack header hidden to avoid stacking two bars. */}
           <Stack.Screen name="ChildProfile" component={ChildProfileScreen} />
-          {/* Parents reuse the same Notifications screen the staff module uses -
-              the inbox is per-user via the JWT, so it works for every role. */}
+          {/* Parents reuse the same Notifications screen the staff module uses. */}
           <Stack.Screen name="StaffNotifications" component={StaffNotificationsScreen} />
-          <Stack.Screen name="SentNotifications" component={SentNotificationsScreen}
-            options={{ headerShown: false }} />
         </Stack.Navigator>
       </NavigationContainer>
     );
   }
 
-  // Fallback
+  // Fallback — shouldn't reach here if the role gating above exhausts
+  // every state, but render Welcome rather than a blank screen if it does.
   return (
-    <NavigationContainer>
+    <NavigationContainer ref={navigationRef}>
       <Stack.Navigator screenOptions={{ headerShown: false }}>
         <Stack.Screen name="Welcome" component={WelcomeScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );
 }
+

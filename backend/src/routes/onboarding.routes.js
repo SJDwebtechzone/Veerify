@@ -10,6 +10,9 @@ router.post('/setup',           verifyToken, requireRole('admin'), onboardingCon
 router.get('/my-status',        verifyToken, requireRole('admin'), onboardingController.getMyStatus);
 router.get('/subscription-status', verifyToken, requireRole('admin'), onboardingController.getSubscriptionStatus);
 router.post('/mock-payment',    verifyToken, requireRole('admin'), onboardingController.mockPayment);
+// Renewal — generates a fresh Razorpay payment link for the admin's
+// current plan. Mobile's "Renew now" dialog calls this then opens the URL.
+router.post('/renew',           verifyToken, requireRole('admin'), onboardingController.createRenewalPaymentLink);
 
 // Owner self-delete + restore + start-over (mounted under /me so they don't
 // clash with the super-admin /:id routes).

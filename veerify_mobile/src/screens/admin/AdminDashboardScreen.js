@@ -381,7 +381,7 @@ export default function AdminDashboardScreen({ navigation }) {
               },
               { icon: BookOpen,     label: 'Add Course',     accent: palette.teal,   onPress: () => navigation.navigate('CreateCourse') },
               { icon: CalendarPlus, label: 'Create Batch',   accent: palette.blue,   onPress: () => navigation.navigate('CreateBatch') },
-              { icon: BellPlus,     label: 'Add Event',      accent: palette.green,  onPress: () => placeholder('Add Event') },
+              { icon: BellPlus,     label: 'Add Event',      accent: palette.green,  onPress: () => navigation.navigate('CreateEvent') },
               { icon: Megaphone,    label: 'Send Notice',    accent: palette.orange, onPress: () => navigation.navigate('SendAnnouncement') },
               { icon: CalendarOff,  label: 'Trainer Leaves', accent: palette.rose,   onPress: () => navigation.navigate('AdminTrainerLeaves') },
               { icon: Megaphone,    label: 'Trainer Approvals', accent: palette.purple, onPress: () => navigation.navigate('PendingAnnouncements') },

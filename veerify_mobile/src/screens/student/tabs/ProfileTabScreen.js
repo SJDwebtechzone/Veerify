@@ -25,6 +25,7 @@ import {
 import { useAuth } from '../../../context/AuthContext';
 import { useInstitution } from '../../../context/InstitutionContext';
 import { palette, spacing, radius, shadows, type } from '../../../theme';
+import { confirm } from '../../../components/ConfirmDialog';
 
 export default function ProfileTabScreen({ navigation }) {
   const { user, logout } = useAuth();
@@ -172,14 +173,14 @@ function LoggedInView({ user, subscription, selectedInstitution, onLogout, navig
   const placeholder = (n) => Alert.alert(n, "We'll wire this up next.");
 
   const handleSignOut = () => {
-    Alert.alert(
-      'Sign out?',
-      "You'll return to the welcome screen.",
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Sign out', style: 'destructive', onPress: () => onLogout() },
-      ],
-    );
+    confirm({
+      title: 'Sign out?',
+      message: "You'll return to the welcome screen.",
+      variant: 'destructive',
+      confirmText: 'Sign out',
+      cancelText: 'Cancel',
+      onConfirm: () => onLogout(),
+    });
   };
 
   const handleReferral = async () => {

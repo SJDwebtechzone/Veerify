@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { Platform, NativeModules } from 'react-native';
+import { Platform, NativeModules, Linking } from 'react-native';
 import { getToken } from '../utils/storage';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -74,6 +74,52 @@ apiClient.interceptors.response.use(
   (error) => {
     if (error.response) {
       console.log('API Error:', error.response.status, error.response.data);
+
+      // ── Plan expired / locked — intercept once at the API layer and pop
+      // a branded renewal dialog so every screen doesn't have to wire its
+      // own handler. We still re-reject so the caller's UI (loading spinner
+      // etc.) can settle, but mark the error so they don't double-prompt.
+      const data = error.response.data || {};
+      if (error.response.status === 402 && data.code === 'PLAN_EXPIRED') {
+        try {
+          // Late-require so this module stays cheap to import and we avoid
+          // a circular dep with the ConfirmDialog → navigation imports.
+          const { confirm } = require('../components/ConfirmDialog');
+          const { navigate } = require('../navigation/navigationRef');
+          confirm({
+            title: data.phase === 'expired'
+              ? 'Subscription expired'
+              : data.phase === 'locked'
+                ? 'Trial ended'
+                : 'Action unavailable',
+            message: data.message || 'Renew your plan to continue managing your academy.',
+            variant: 'warning',
+            confirmText: 'Renew now',
+            cancelText: 'Later',
+            onConfirm: async () => {
+              // Generate a fresh Razorpay payment link on the backend, then
+              // hand off to the system browser. If anything errors, fall back
+              // to the PricingPlans screen so the admin still has a path.
+              try {
+                const res = await apiClient.post('/onboarding/renew');
+                const url = res.data?.payment_link_url;
+                if (url) {
+                  await Linking.openURL(url);
+                  return;
+                }
+              } catch (e) {
+                console.log('[API] renew link failed:', e?.response?.data || e?.message);
+              }
+              try { navigate('PricingPlans'); } catch (_) {}
+            },
+          });
+          error.handledByInterceptor = true;
+        } catch (e) {
+          // ConfirmDialog or navigationRef not available — caller will
+          // fall back to its own error handling.
+          console.log('[API] PLAN_EXPIRED dialog skipped:', e?.message);
+        }
+      }
     } else if (error.request) {
       console.log('Network Error: cannot reach backend');
     }
@@ -82,3 +128,4 @@ apiClient.interceptors.response.use(
 );
 
 export default apiClient;
+

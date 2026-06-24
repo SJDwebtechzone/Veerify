@@ -6,6 +6,10 @@ const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const { sendStudentCredentialsEmail } = require('../utils/mailer');
 const { ensureCapacity, limitResponse } = require('../utils/planLimits');
+const {
+  validateEmailFormat, validatePhoneFormat,
+  ensureEmailUnique, ensurePhoneUnique,
+} = require('../utils/contactValidation');
 
 // Generates a short, human-shareable temp password for a newly-created
 // student account. Mixed-case letters + digits, 10 chars long. Avoids
@@ -90,6 +94,7 @@ exports.getEnrollmentsForMyInstitution = async (req, res) => {
          e.enrolled_at,
          e.payment_status,
          e.payment_amount,
+         e.payment_mode,
          e.paid_at,
          e.payment_reference,
 
@@ -185,12 +190,44 @@ exports.enrollInBatch = async (req, res) => {
     let createdStudentCreds = null; // populated when we created a new account
     if (req.user.role === 'admin') {
       const adminMode = req.body?.admin_mode === true;
-      const cleanEmail = String(email || '').trim().toLowerCase();
-      const cleanName  = String(full_name || '').trim();
-      if (!adminMode || !cleanEmail || !cleanName) {
+      const cleanName = String(full_name || '').trim();
+      if (!adminMode || !cleanName) {
         return res.status(400).json({
+          field: 'full_name',
           message: 'Admin enrolment needs full_name + email so we can create the student\'s login.',
         });
+      }
+
+      // ── Format checks ────────────────────────────────────────────
+      // Email is REQUIRED in admin mode (it becomes the student's login).
+      // Phone is OPTIONAL but if supplied must be a real 10-digit mobile.
+      const eFmt = validateEmailFormat(email, { required: true });
+      if (!eFmt.ok) return res.status(eFmt.status).json(eFmt.body);
+      const pFmt = validatePhoneFormat(contact_number, { required: false });
+      if (!pFmt.ok) return res.status(pFmt.status).json(pFmt.body);
+      const cleanEmail = eFmt.value;
+
+      // ── Phone uniqueness ─────────────────────────────────────────
+      // We check the phone against every other user globally. If this
+      // phone already belongs to someone (trainer, parent, another
+      // student under a different academy), the admin can't reuse it.
+      // We skip phone check when the phone matches an EXISTING student
+      // account that this email would re-use (handled below).
+      if (pFmt.value) {
+        const phoneUnique = await ensurePhoneUnique(pFmt.value);
+        // Allow the phone to belong to a soon-to-be-reused student row
+        // (same email + same phone). Look that up before rejecting.
+        if (!phoneUnique.ok) {
+          const sameRow = await pool.query(
+            `SELECT id FROM users
+              WHERE LOWER(email) = $1 AND phone = $2 AND role = 'student'
+              LIMIT 1`,
+            [cleanEmail, pFmt.value],
+          );
+          if (sameRow.rows.length === 0) {
+            return res.status(phoneUnique.status).json(phoneUnique.body);
+          }
+        }
       }
       // Find an existing student user with that email; otherwise create
       // one. We never overwrite an existing user's password — the admin
@@ -341,6 +378,39 @@ exports.enrollInBatch = async (req, res) => {
       [studentId, batch_id, batch.institution_id, batch.course_price || null]
     );
 
+    // ── Offline payment branch ───────────────────────────────────────
+    // When an admin enrols a student and supplies a payment_mode (cash,
+    // upi, bank, cheque), we treat the fee as collected at the counter
+    // and flip the enrolment to 'paid' in the same transaction. This
+    // skips the Razorpay / mock-pay step and lets the admin record the
+    // sale in one shot. Self-enrolled students never set this branch —
+    // they continue through the existing online-pay flow.
+    const ALLOWED_MODES = ['cash', 'upi', 'bank', 'cheque'];
+    const rawMode = String(req.body?.payment_mode || '').trim().toLowerCase();
+    if (req.body?.admin_mode === true && rawMode) {
+      if (!ALLOWED_MODES.includes(rawMode)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          message: `payment_mode must be one of: ${ALLOWED_MODES.join(', ')}`,
+        });
+      }
+      const reference = `${rawMode.toUpperCase()}-${Date.now()}-${result.rows[0].id}`;
+      const amount = Number(batch.course_price) || 0;
+      const paid = await client.query(
+        `UPDATE enrollments SET
+           payment_status    = 'paid',
+           payment_mode      = $1,
+           payment_reference = $2,
+           payment_amount    = COALESCE(payment_amount, $3),
+           paid_at           = NOW()
+         WHERE id = $4
+         RETURNING *`,
+        [rawMode, reference, amount, result.rows[0].id]
+      );
+      // Replace the row we return below so the caller sees the paid state.
+      result.rows[0] = paid.rows[0];
+    }
+
     // Update student's institution_id (if not set)
     await client.query(
       `UPDATE users SET institution_id = $1
@@ -411,12 +481,28 @@ exports.enrollInBatch = async (req, res) => {
       }
     }
 
+    // Tailor the message:
+    //   • paid + credentials emailed  → both confirmations
+    //   • paid only                   → 'enrolled and payment recorded'
+    //   • credentials only            → 'login details emailed'
+    //   • neither (self-enrol)        → 'please complete payment'
+    const paidNow = result.rows[0]?.payment_status === 'paid';
+    let msg;
+    if (paidNow && createdStudentCreds) {
+      msg = 'Student enrolled, payment recorded, and login details emailed.';
+    } else if (paidNow) {
+      msg = 'Student enrolled and payment recorded.';
+    } else if (createdStudentCreds) {
+      msg = 'Student enrolled. Login details emailed to the student.';
+    } else {
+      msg = 'Enrolled successfully. Please complete payment.';
+    }
+
     res.status(201).json({
-      message: createdStudentCreds
-        ? 'Student enrolled. Login details emailed to the student.'
-        : 'Enrolled successfully. Please complete payment.',
+      message: msg,
       enrollment: result.rows[0],
       student_credentials_sent: !!createdStudentCreds,
+      payment_recorded: paidNow,
     });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -694,6 +780,132 @@ exports.markPaid = async (req, res) => {
     });
   } catch (err) {
     console.error('Mark paid error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+// ─── Admin: update a student's profile + user record ────────────────────────
+// PATCH /api/enrollments/student/:userId
+//
+// Used by the institution admin from StudentDetailScreen edit pencil.
+// Updates the users row (name, email, phone) and the student_profiles row
+// (address, father, mother, DOB, gender). Skips fields that arrive as
+// empty / undefined so partial saves are safe. Validates email/phone
+// uniqueness with the existing contactValidation helpers (passing
+// excludeUserId so the student's own email/phone don't collide with
+// themselves).
+exports.updateStudentByAdmin = async (req, res) => {
+  const adminId   = req.user.userId;
+  const studentId = parseInt(req.params.userId, 10);
+  if (!Number.isInteger(studentId)) {
+    return res.status(400).json({ message: 'Invalid student id' });
+  }
+
+  const {
+    name, email, phone,
+    address, father_name, mother_name,
+    date_of_birth, gender,
+  } = req.body || {};
+
+  try {
+    // Confirm the admin owns this student.
+    const adminRow = await pool.query(
+      'SELECT institution_id FROM users WHERE id = $1',
+      [adminId],
+    );
+    const adminInst = adminRow.rows[0]?.institution_id;
+    if (!adminInst) {
+      return res.status(403).json({ message: 'Admin not linked to an institution' });
+    }
+
+    const studentRow = await pool.query(
+      'SELECT id, institution_id, name, email, phone FROM users WHERE id = $1 AND role = $2',
+      [studentId, 'student'],
+    );
+    const student = studentRow.rows[0];
+    if (!student) {
+      return res.status(404).json({ message: 'Student not found' });
+    }
+    if (student.institution_id !== adminInst) {
+      return res.status(403).json({ message: 'Student not in your institution' });
+    }
+
+    // ── Validate contact uniqueness (only when the value actually changed)
+    if (email && email !== student.email) {
+      const fmt = validateEmailFormat(email);
+      if (!fmt.ok) return res.status(400).json({ message: fmt.message });
+      const uniq = await ensureEmailUnique(email, { excludeUserId: studentId });
+      if (!uniq.ok) return res.status(409).json({ message: uniq.message });
+    }
+    if (phone && phone !== student.phone) {
+      const fmt = validatePhoneFormat(phone);
+      if (!fmt.ok) return res.status(400).json({ message: fmt.message });
+      const uniq = await ensurePhoneUnique(phone, { excludeUserId: studentId });
+      if (!uniq.ok) return res.status(409).json({ message: uniq.message });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Patch users row.
+      await client.query(
+        `UPDATE users SET
+           name  = COALESCE(NULLIF($2, ''), name),
+           email = COALESCE(NULLIF($3, ''), email),
+           phone = COALESCE(NULLIF($4, ''), phone)
+         WHERE id = $1`,
+        [studentId, name, email, phone],
+      );
+
+      // Upsert student_profiles row. The unique index on user_id makes
+      // ON CONFLICT (user_id) DO UPDATE the natural fit; if no row exists
+      // we create one so the edit form can save profile fields even
+      // before the student finished their first enrollment form.
+      await client.query(
+        `INSERT INTO student_profiles
+           (user_id, full_name, address, father_name, mother_name, date_of_birth, gender)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (user_id) DO UPDATE SET
+           full_name     = COALESCE(NULLIF(EXCLUDED.full_name,     ''), student_profiles.full_name),
+           address       = COALESCE(NULLIF(EXCLUDED.address,       ''), student_profiles.address),
+           father_name   = COALESCE(NULLIF(EXCLUDED.father_name,   ''), student_profiles.father_name),
+           mother_name   = COALESCE(NULLIF(EXCLUDED.mother_name,   ''), student_profiles.mother_name),
+           date_of_birth = COALESCE(EXCLUDED.date_of_birth,             student_profiles.date_of_birth),
+           gender        = COALESCE(NULLIF(EXCLUDED.gender,        ''), student_profiles.gender),
+           updated_at    = CURRENT_TIMESTAMP`,
+        [
+          studentId,
+          name || student.name,
+          address || null,
+          father_name || null,
+          mother_name || null,
+          date_of_birth || null,
+          gender || null,
+        ],
+      );
+
+      await client.query('COMMIT');
+    } catch (txErr) {
+      await client.query('ROLLBACK');
+      throw txErr;
+    } finally {
+      client.release();
+    }
+
+    // Return the freshly-merged view so the mobile screen can refresh
+    // its state without a second round-trip.
+    const merged = await pool.query(
+      `SELECT u.id, u.name, u.email, u.phone,
+              sp.address, sp.father_name, sp.mother_name,
+              sp.date_of_birth, sp.gender, sp.photo_url
+         FROM users u
+         LEFT JOIN student_profiles sp ON sp.user_id = u.id
+        WHERE u.id = $1`,
+      [studentId],
+    );
+    res.json({ message: 'Student updated', student: merged.rows[0] });
+  } catch (err) {
+    console.error('updateStudentByAdmin error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };

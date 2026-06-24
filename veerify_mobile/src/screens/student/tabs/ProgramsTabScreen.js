@@ -30,6 +30,7 @@ import apiClient from '../../../api/client';
 import { useAuth } from '../../../context/AuthContext';
 import { useInstitution } from '../../../context/InstitutionContext';
 import { palette, spacing, radius, shadows, type } from '../../../theme';
+import { confirm } from '../../../components/ConfirmDialog';
 
 const ASSET_HOST = (apiClient.defaults.baseURL || '').replace(/\/api\/?$/, '');
 function resolveAssetUrl(src) {
@@ -109,24 +110,27 @@ export default function ProgramsTabScreen({ navigation }) {
 
   const handleEnroll = (program) => {
     if (isGuest) {
-      Alert.alert(
-        'Login to Continue Learning',
-        'Sign in to enroll in this program and start your journey.',
-        [
-          { text: 'Not now', style: 'cancel' },
-          { text: 'Login', onPress: () => navigation.getParent()?.navigate('Login') },
-        ],
-      );
+      confirm({
+        title: 'Login to Continue Learning',
+        message: 'Sign in to enroll in this program and start your journey.',
+        variant: 'destructive',
+        confirmText: 'Login',
+        cancelText: 'Not now',
+        onConfirm: () => {
+          try { navigation.navigate('Login'); return; } catch {}
+          try { navigation.getParent()?.navigate('Login'); } catch {}
+        },
+      });
       return;
     }
-    Alert.alert(
-      'Subscribe to Unlock',
-      'You need an active subscription to enroll. Pick a plan from your Profile.',
-      [
-        { text: 'Not now', style: 'cancel' },
-        { text: 'View Plans', onPress: () => navigation.navigate('Profile') },
-      ],
-    );
+    confirm({
+      title: 'Subscribe to Unlock',
+      message: 'You need an active subscription to enroll. Pick a plan from your Profile.',
+      variant: 'warning',
+      confirmText: 'View Plans',
+      cancelText: 'Not now',
+      onConfirm: () => navigation.navigate('Profile'),
+    });
   };
 
   // ─── No institution chosen yet ───

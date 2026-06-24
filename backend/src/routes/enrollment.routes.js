@@ -3,9 +3,15 @@ const router = express.Router();
 const enrollmentController = require('../controllers/enrollment.controller');
 const { verifyToken } = require('../middleware/auth.middleware');
 const { requireRole } = require('../middleware/role.middleware');
+const { requireActiveSubscription } = require('../utils/subscriptionGuard');
 
-// Student routes
-router.post('/', verifyToken, requireRole('student'), enrollmentController.enrollInBatch);
+// Enrollment create — allowed for BOTH students (self-enrolment from the
+// course detail screen) AND admins (institution-admin enrolling a student
+// via the Students-tab FAB → EnrollmentForm with adminMode=true). The
+// controller branches on req.user.role + admin_mode flag: students enrol
+// themselves directly, admins create a new student account first then
+// link the enrolment to that user.
+router.post('/', verifyToken, requireRole('student', 'admin'), requireActiveSubscription, enrollmentController.enrollInBatch);
 router.get('/my', verifyToken, requireRole('student'), enrollmentController.getMyEnrollments);
 router.get('/my-profile', verifyToken, requireRole('student'), enrollmentController.getMyProfile);
 router.delete('/:id', verifyToken, requireRole('student'), enrollmentController.cancelEnrollment);
@@ -27,5 +33,12 @@ router.get('/institution/me',
   verifyToken,
   requireRole('admin'),
   enrollmentController.getEnrollmentsForMyInstitution);
+
+// Admin-only — update a student's profile (name/email/phone + profile fields)
+// Used by StudentDetailScreen edit pencil.
+router.patch('/student/:userId',
+  verifyToken,
+  requireRole('admin'),
+  enrollmentController.updateStudentByAdmin);
 
 module.exports = router;

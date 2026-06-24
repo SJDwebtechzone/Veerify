@@ -14,10 +14,11 @@
 // Every item is tap-routable; for now each shows an alert until the dedicated
 // screens are built.
 
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet, Alert,
 } from 'react-native';
+import apiClient from '../../../api/client';
 import {
   UserCog, BookOpen, Building2, CalendarRange, Bell, Megaphone,
   MessageSquare, BarChart3, Palette, CreditCard, Settings, LifeBuoy,
@@ -26,6 +27,7 @@ import {
 
 import { useAuth } from '../../../context/AuthContext';
 import { palette, spacing, radius, shadows, type } from '../../../theme';
+import { confirm } from '../../../components/ConfirmDialog';
 
 // ─── Menu definition ─────────────────────────────────────────────────────────
 const MENU = [
@@ -51,6 +53,27 @@ export default function MoreTabScreen({ navigation }) {
   const { user, logout } = useAuth();
   const placeholder = (m) => Alert.alert(m, "We'll wire this up next.");
 
+  // Read the institution's actual plan name + status from /plans/usage
+  // (same endpoint the FAB gate uses). Falls back to a generic label
+  // while it's loading or if the request fails, so we never block the
+  // rest of the More screen on a slow network.
+  const [planLabel, setPlanLabel] = useState('Loading plan…');
+  useEffect(() => {
+    let cancelled = false;
+    apiClient.get('/plans/usage')
+      .then((r) => {
+        if (cancelled) return;
+        const name = r.data?.students?.plan_name || r.data?.trainers?.plan_name;
+        // Show "<Plan> Plan • Active" — matches the layout the screen
+        // had hard-coded before but now reflects the real DB value.
+        setPlanLabel(name ? `${name} Plan • Active` : 'Free Plan • Active');
+      })
+      .catch(() => {
+        if (!cancelled) setPlanLabel('Free Plan • Active');
+      });
+    return () => { cancelled = true; };
+  }, []);
+
   // Real navigation targets for tiles that already have screens built.
   const TILE_ROUTES = {
     courses:  'CoursesList',
@@ -58,6 +81,15 @@ export default function MoreTabScreen({ navigation }) {
     batches:  'BatchesList',
     settings: 'Settings',
     branches: null, // not built yet — keep placeholder
+    // Events tile opens the list of every event this institution has
+    // published (upcoming + past), with a FAB to add a new one. The
+    // create flow lives inside that screen.
+    events:   'EventsList',
+    // Pricing & Plans — shows current subscription + renewal + the
+    // catalog of other plans (super admin defined). "Renew" on current
+    // and "Upgrade/Downgrade/Switch" on alternates all route through to
+    // the existing PlanSelection payment flow.
+    pricing:  'PricingPlans',
   };
   const handleTile = (key, label) => {
     const route = TILE_ROUTES[key];
@@ -66,14 +98,14 @@ export default function MoreTabScreen({ navigation }) {
   };
 
   const handleSignOut = () => {
-    Alert.alert(
-      'Sign out?',
-      'You\'ll be returned to the welcome screen.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Sign out', style: 'destructive', onPress: () => logout() },
-      ],
-    );
+    confirm({
+      title: 'Sign out?',
+      message: 'You\'ll be returned to the welcome screen.',
+      variant: 'destructive',
+      confirmText: 'Sign out',
+      cancelText: 'Cancel',
+      onConfirm: () => logout(),
+    });
   };
 
   const initials = (user?.name || 'Academy')
@@ -113,7 +145,7 @@ export default function MoreTabScreen({ navigation }) {
           </Text>
           <View style={styles.planBadge}>
             <ShieldCheck size={11} color={palette.purple.on} strokeWidth={2.4} />
-            <Text style={styles.planBadgeText}>Pro Plan • Active</Text>
+            <Text style={styles.planBadgeText}>{planLabel}</Text>
           </View>
         </View>
         {/* Edit pencil removed per user request — the profile card
@@ -330,6 +362,7 @@ const styles = StyleSheet.create({
     ...type.caption,
     color: palette.textLight,
     textAlign: 'center',
-    marginBottom: spacing.lg,
+    marginTop: spacing.md,
   },
 });
+

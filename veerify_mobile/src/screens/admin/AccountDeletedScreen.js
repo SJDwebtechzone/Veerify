@@ -29,6 +29,7 @@ import { Trash2, RefreshCw, RotateCcw, LogOut } from 'lucide-react-native';
 import { useAuth } from '../../context/AuthContext';
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
+import { confirm } from '../../components/ConfirmDialog';
 
 export default function AccountDeletedScreen() {
   const { logout, refreshOnboardingStatus, institution } = useAuth();
@@ -97,10 +98,14 @@ export default function AccountDeletedScreen() {
   };
 
   const handleLogout = () => {
-    Alert.alert('Sign out?', 'You can sign back in any time with the same credentials.', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Sign out', style: 'destructive', onPress: () => logout() },
-    ]);
+    confirm({
+      title: 'Sign out?',
+      message: 'You can sign back in any time with the same credentials.',
+      variant: 'destructive',
+      confirmText: 'Sign out',
+      cancelText: 'Cancel',
+      onConfirm: () => logout(),
+    });
   };
 
   return (

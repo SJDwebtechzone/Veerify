@@ -16,10 +16,11 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView, Image,
   Alert, ActivityIndicator, StyleSheet, KeyboardAvoidingView, Platform,
+  Modal, FlatList,
 } from 'react-native';
 import {
   ArrowLeft, Camera, User, Calendar, Users, Phone, Mail, MapPin,
-  Briefcase, Heart, ChevronRight,
+  Briefcase, Heart, ChevronRight, ChevronDown, Check, Droplet, Award,
 } from 'lucide-react-native';
 // Older lucide versions don't have Ruler/Weight/Accessibility - they were
 // only imported, never rendered, but removing them removes the failure
@@ -28,6 +29,7 @@ import { launchImageLibrary, launchCamera } from 'react-native-image-picker';
 
 import apiClient from '../../api/client';
 import DateField from '../../components/DateField';
+import PlanLimitModal from '../../components/PlanLimitModal';
 
 // ─── Theme tokens ──────────────────────────────────────────────────────
 const BRAND = '#E63946';
@@ -127,10 +129,19 @@ export default function EnrollmentFormScreen({ route, navigation }) {
     belt_category_other: '',
     photo_url: '',
     photo_uri: '',
+    // Admin-mode only: how the fee was collected at the counter. The
+    // payload only includes this when adminMode=true, so self-enrolled
+    // students never trip the offline-paid branch on the server.
+    payment_mode: 'cash',
   });
   const [submitting, setSubmitting] = useState(false);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [loadingProfile, setLoadingProfile] = useState(true);
+  // Plan-cap modal — populated when the backend returns 402 PLAN_LIMIT_REACHED
+  // on submit. We mirror the same UI the Students-tab FAB shows so the admin
+  // gets one consistent upgrade prompt regardless of where they hit the cap.
+  const [planModalOpen, setPlanModalOpen] = useState(false);
+  const [planLimitInfo, setPlanLimitInfo] = useState(null);
 
   const set = (k, v) => setForm((p) => ({ ...p, [k]: v }));
 
@@ -269,6 +280,10 @@ export default function EnrollmentFormScreen({ route, navigation }) {
         // existing email's account), emails the login credentials, then
         // links the enrolment to that user instead of the admin's id.
         admin_mode: !!adminMode,
+        // Only attach payment_mode when the admin actually chose one —
+        // self-enrolled students must still flow through the online-pay
+        // path on the next screen.
+        payment_mode: adminMode ? (form.payment_mode || 'cash') : undefined,
         full_name:      form.full_name.trim(),
         date_of_birth:  form.date_of_birth || null,
         father_name:    form.father_name.trim() || null,
@@ -289,11 +304,48 @@ export default function EnrollmentFormScreen({ route, navigation }) {
         photo_url:      form.photo_url || null,
       });
       const enrollment = res.data?.enrollment;
+
+      // Admin-mode short-circuit: the backend has already marked the
+      // enrolment paid with the chosen offline mode, so we skip the
+      // EnrollmentPayment screen entirely and bounce back to the
+      // Students tab with a confirmation.
+      if (adminMode) {
+        const modeLabel = {
+          cash:   'Cash',
+          upi:    'UPI',
+          bank:   'Bank Transfer',
+          cheque: 'Cheque',
+        }[(form.payment_mode || 'cash').toLowerCase()] || 'Offline';
+        Alert.alert(
+          'Student Enrolled',
+          `${form.full_name.trim()} has been enrolled and the fee was recorded as ${modeLabel}.`,
+          [{ text: 'OK', onPress: () => navigation.goBack() }],
+        );
+        return;
+      }
+
       navigation.replace('EnrollmentPayment', {
         enrollment, batch, course, amount: coursePrice,
       });
     } catch (e) {
-      Alert.alert('Error', e.response?.data?.message || 'Enrollment failed');
+      // Plan-limit safety net: backend returns 402 PLAN_LIMIT_REACHED with
+      // { code, limit, current, plan_name } when the institution is at its
+      // student cap. Surface the same upgrade modal the Students tab FAB
+      // shows so the admin gets a consistent prompt, not a stark Alert.
+      const data = e?.response?.data || {};
+      const isPlanCap =
+        e?.response?.status === 402 ||
+        data.code === 'PLAN_LIMIT_REACHED';
+      if (isPlanCap && adminMode) {
+        setPlanLimitInfo({
+          limit:     data.limit,
+          current:   data.current,
+          plan_name: data.plan_name,
+        });
+        setPlanModalOpen(true);
+      } else {
+        Alert.alert('Error', data.message || 'Enrollment failed');
+      }
     } finally {
       setSubmitting(false);
     }
@@ -554,22 +606,28 @@ export default function EnrollmentFormScreen({ route, navigation }) {
           </Field>
         </View>
 
-        {/* Blood group — chip row with the 8 ABO/Rh options. */}
+        {/* Blood group — inline dropdown with the 8 ABO/Rh options. */}
         <Field label="Blood Group">
-          <ChipRow
+          <Dropdown
             options={BLOOD_GROUPS}
             value={form.blood_group}
             onChange={(v) => set('blood_group', v)}
+            placeholder="Select blood group"
+            icon={Droplet}
           />
         </Field>
 
-        {/* Current belt category — wraps onto multiple lines because
-            there are 13 options. "Other" reveals the free-text field. */}
+        {/* Current belt category — 13 options, served via an inline
+            dropdown so the form doesn't grow a 3-line chip wrap.
+            "Other" still reveals the free-text field below. The Award
+            icon hints at "rank / achievement" without taking space. */}
         <Field label="Current Belt Category" hint="Default is 'New student'. Pick the right rank if the student has prior training.">
-          <ChipRow
+          <Dropdown
             options={BELT_OPTIONS}
             value={form.belt_category}
             onChange={(v) => set('belt_category', v)}
+            placeholder="Select belt level"
+            icon={Award}
           />
         </Field>
         {form.belt_category === 'Other' ? (
@@ -597,6 +655,44 @@ export default function EnrollmentFormScreen({ route, navigation }) {
           />
         </Field>
 
+        {/* Admin-mode only: how the fee was collected at the counter.
+            Self-enrolled students don't see this — they continue to the
+            online Razorpay / mock-pay screen on submit. */}
+        {adminMode ? (
+          <Field
+            label="Mode of Payment *"
+            hint="How was the fee collected? The enrolment will be marked paid immediately."
+          >
+            <View style={styles.payModeRow}>
+              {[
+                { v: 'cash',   label: 'Cash' },
+                { v: 'upi',    label: 'UPI' },
+                { v: 'bank',   label: 'Bank Transfer' },
+                { v: 'cheque', label: 'Cheque' },
+              ].map((opt) => {
+                const active = form.payment_mode === opt.v;
+                return (
+                  <TouchableOpacity
+                    key={opt.v}
+                    style={[styles.payModeChip, active && styles.payModeChipActive]}
+                    onPress={() => set('payment_mode', opt.v)}
+                    activeOpacity={0.85}
+                  >
+                    <Text
+                      style={[
+                        styles.payModeChipText,
+                        active && styles.payModeChipTextActive,
+                      ]}
+                    >
+                      {opt.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </Field>
+        ) : null}
+
         <View style={{ height: 16 }} />
       </ScrollView>
 
@@ -619,12 +715,31 @@ export default function EnrollmentFormScreen({ route, navigation }) {
             <ActivityIndicator color="#fff" />
           ) : (
             <>
-              <Text style={styles.btnPrimaryText}>Continue to Pay</Text>
+              <Text style={styles.btnPrimaryText}>
+                {adminMode ? 'Submit' : 'Continue to Pay'}
+              </Text>
               <ChevronRight size={18} color="#fff" strokeWidth={2.6} />
             </>
           )}
         </TouchableOpacity>
       </View>
+
+      {/* Plan-cap modal — fires when /enrollments returns 402
+          PLAN_LIMIT_REACHED in admin mode. Dismissing keeps the user
+          on the form so they can fix what they had typed; tapping
+          "View plans" sends them to PlanSelection. */}
+      <PlanLimitModal
+        visible={planModalOpen}
+        kind="student"
+        limit={planLimitInfo?.limit}
+        current={planLimitInfo?.current}
+        planName={planLimitInfo?.plan_name}
+        onClose={() => setPlanModalOpen(false)}
+        onUpgrade={() => {
+          try { navigation.navigate('PlanSelection'); }
+          catch { navigation.getParent()?.navigate('PlanSelection'); }
+        }}
+      />
     </KeyboardAvoidingView>
   );
 }
@@ -667,6 +782,75 @@ function ChipRow({ options, value, onChange }) {
           </TouchableOpacity>
         );
       })}
+    </View>
+  );
+}
+
+// Inline dropdown — tap the trigger, options unfold right below it
+// (no modal, no bottom sheet). Used for Blood Group, Belt Category,
+// and any other single-select short list where the picker should sit
+// in-place. The leading `icon` prop is optional; pass any lucide icon
+// to tint the trigger row, or omit for a plain text trigger. Long
+// lists scroll inside the panel via `maxPanelHeight`.
+function Dropdown({
+  options, value, onChange,
+  placeholder = 'Select…',
+  icon: LeadingIcon = null,
+  maxPanelHeight = 260,
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <View>
+      <TouchableOpacity
+        style={[styles.dropdownTrigger, open && styles.dropdownTriggerOpen]}
+        onPress={() => setOpen((o) => !o)}
+        activeOpacity={0.85}
+      >
+        {LeadingIcon ? (
+          <LeadingIcon size={14} color={BRAND} strokeWidth={2.4} />
+        ) : null}
+        <Text style={[styles.dropdownText, !value && styles.dropdownPlaceholder]}>
+          {value || placeholder}
+        </Text>
+        <ChevronDown
+          size={16}
+          color={TEXT_MUTED}
+          strokeWidth={2.2}
+          style={{ transform: [{ rotate: open ? '180deg' : '0deg' }] }}
+        />
+      </TouchableOpacity>
+
+      {open ? (
+        <View style={[styles.dropdownPanel, { maxHeight: maxPanelHeight }]}>
+          <ScrollView
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+            nestedScrollEnabled
+          >
+            {options.map((opt) => {
+              const selected = opt === value;
+              return (
+                <TouchableOpacity
+                  key={opt}
+                  style={[styles.dropdownItem, selected && styles.dropdownItemActive]}
+                  onPress={() => { onChange(opt); setOpen(false); }}
+                  activeOpacity={0.7}
+                >
+                  <Text style={[
+                    styles.dropdownItemText,
+                    selected && styles.dropdownItemTextActive,
+                  ]}>
+                    {opt}
+                  </Text>
+                  {selected ? (
+                    <Check size={14} color={BRAND} strokeWidth={2.8} />
+                  ) : null}
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -814,6 +998,69 @@ const styles = StyleSheet.create({
   chipText: { fontSize: 12, color: TEXT_MUTED, fontWeight: '600' },
   chipTextOn: { color: '#fff', fontWeight: '700' },
 
+  // Dropdown — trigger row + inline expanding panel for short
+  // single-select lists like Blood Group. The panel pops up directly
+  // beneath the trigger and only takes as much room as it needs.
+  dropdownTrigger: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    backgroundColor: SURFACE,
+    borderRadius: 10,
+    borderWidth: 1, borderColor: BORDER,
+    paddingHorizontal: 12, paddingVertical: 12,
+  },
+  // Visual cue that the panel is open — flatten the bottom corners so the
+  // trigger reads as the lid of the dropdown panel below.
+  dropdownTriggerOpen: {
+    borderColor: BRAND,
+    borderBottomLeftRadius: 0,
+    borderBottomRightRadius: 0,
+  },
+  dropdownText: { flex: 1, fontSize: 14, color: TEXT, fontWeight: '600' },
+  dropdownPlaceholder: { color: TEXT_LIGHT, fontWeight: '500' },
+
+  // Inline panel that opens below the trigger
+  dropdownPanel: {
+    backgroundColor: SURFACE,
+    borderWidth: 1, borderColor: BRAND,
+    borderTopWidth: 0,
+    borderBottomLeftRadius: 10,
+    borderBottomRightRadius: 10,
+    paddingVertical: 4,
+    // Subtle shadow so it visibly lifts above the next form field.
+    shadowColor: '#0F172A',
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
+  },
+  dropdownItem: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingVertical: 10, paddingHorizontal: 14,
+  },
+  dropdownItemActive: { backgroundColor: BRAND_SOFT },
+  dropdownItemText: { fontSize: 14, color: TEXT, fontWeight: '600' },
+  dropdownItemTextActive: { color: BRAND, fontWeight: '800' },
+
+  // Payment-mode chips (admin only) — slightly larger than the belt
+  // chips because there are only four and they benefit from breathing
+  // room on a key decision field.
+  payModeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  payModeChip: {
+    paddingHorizontal: 16, paddingVertical: 11,
+    backgroundColor: SURFACE,
+    borderRadius: 10,
+    borderWidth: 1.5, borderColor: BORDER,
+    minWidth: 90, alignItems: 'center',
+  },
+  payModeChipActive: {
+    backgroundColor: BRAND_SOFT,
+    borderColor: BRAND,
+  },
+  payModeChipText: { fontSize: 13, color: TEXT, fontWeight: '700' },
+  payModeChipTextActive: { color: BRAND, fontWeight: '800' },
+
+  // Sticky bottom action bar — Cancel on the left, primary submit on
+  // the right.
   footer: {
     flexDirection: 'row', gap: 10,
     paddingHorizontal: 16, paddingVertical: 12, paddingBottom: 22,

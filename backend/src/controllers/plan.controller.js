@@ -18,12 +18,14 @@ exports.getUsage = async (req, res) => {
     ]);
     // Diagnostic log — visible in the backend terminal. Helps catch
     // the "why didn't the cap fire?" case (usually missing plan_id or
-    // a plan row with max_trainers >= 999).
+    // a plan row with max_students/max_trainers >= 999).
     // eslint-disable-next-line no-console
     console.log(
-      `[plans/usage] inst=${institutionId} trainers ` +
-      `${trainers.current}/${trainers.limit ?? '∞'} ` +
-      `(plan="${trainers.plan_name || 'none'}", unlimited=${trainers.unlimited})`,
+      `[plans/usage] inst=${institutionId} ` +
+      `students ${students.current}/${students.limit ?? '∞'} ` +
+      `(unlimited=${students.unlimited}) | ` +
+      `trainers ${trainers.current}/${trainers.limit ?? '∞'} ` +
+      `(unlimited=${trainers.unlimited}) | plan="${students.plan_name || 'none'}"`,
     );
     res.json({ students, trainers });
   } catch (err) {

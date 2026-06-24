@@ -3,6 +3,7 @@ const router = express.Router();
 const trainerController = require('../controllers/trainer.controller');
 const { verifyToken } = require('../middleware/auth.middleware');
 const { requireRole } = require('../middleware/role.middleware');
+const { requireActiveSubscription } = require('../utils/subscriptionGuard');
 
 // Trainer's own profile (must come before /:id so it's not captured as an id).
 router.get('/me', verifyToken, requireRole('trainer'), trainerController.getMe);
@@ -12,7 +13,7 @@ router.get('/me', verifyToken, requireRole('trainer'), trainerController.getMe);
 router.get('/all', verifyToken, trainerController.getAllTrainers);
 
 // All other trainer routes are admin-only
-router.post('/', verifyToken, requireRole('admin'), trainerController.createTrainer);
+router.post('/', verifyToken, requireRole('admin'), requireActiveSubscription, trainerController.createTrainer);
 router.get('/', verifyToken, requireRole('admin'), trainerController.getMyTrainers);
 router.get('/:id', verifyToken, requireRole('admin'), trainerController.getTrainerById);
 router.put('/:id', verifyToken, requireRole('admin'), trainerController.updateTrainer);

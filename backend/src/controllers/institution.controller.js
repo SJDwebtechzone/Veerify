@@ -334,30 +334,186 @@ exports.getInstitutionLiveClasses = async (_req, res) => {
 };
 
 // GET /api/institutions/:id/events
-// Pulls from the CMS-managed mobile_events table, filtered to active events
-// that haven't passed yet. mobile_events is currently global (not scoped to
-// an institution); when we add institution_id to it, the filter goes here.
+//
+// Returns the union of:
+//   1. Events scoped to this institution (institution_id = :id)
+//   2. Global events curated by the super admin (institution_id IS NULL)
+//
+// Both are filtered to active rows whose event_date hasn't passed.
+// Institution-scoped rows surface for that academy's students AND its
+// trainers; global rows surface for everyone.
 exports.getInstitutionEvents = async (req, res) => {
   try {
+    const { id } = req.params;
     const result = await pool.query(
       `SELECT
          id,
          title,
          subtitle,
+         description,
          image_url,
          event_date,
          location,
          link,
-         sort_order
+         sort_order,
+         institution_id,
+         CASE WHEN institution_id IS NULL THEN 'global' ELSE 'institution' END AS source
        FROM mobile_events
        WHERE is_active = TRUE
          AND event_date >= CURRENT_DATE
+         AND (institution_id = $1 OR institution_id IS NULL)
        ORDER BY event_date ASC
        LIMIT 50`,
+      [id],
     );
     res.json({ count: result.rows.length, events: result.rows });
   } catch (err) {
     console.error('getInstitutionEvents error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// POST /api/institutions/me/events
+//
+// Institution-admin endpoint — creates an event scoped to the caller's
+// own institution. The event automatically appears on the home screen of
+// every student AND trainer linked to that institution via the
+// /institutions/:id/events read above.
+//
+// Required fields: title, event_date. Everything else is optional.
+exports.createInstitutionEvent = async (req, res) => {
+  try {
+    const adminId = req.user.id;
+    const u = await pool.query(
+      `SELECT institution_id FROM users WHERE id = $1`,
+      [adminId],
+    );
+    const institutionId = u.rows[0]?.institution_id;
+    if (!institutionId) {
+      return res.status(403).json({ message: 'No institution linked to this admin.' });
+    }
+
+    const {
+      title,
+      subtitle,
+      description,
+      event_date,
+      location,
+      image_url,
+      link,
+      registration_closing_date,
+    } = req.body || {};
+
+    if (!title || !String(title).trim()) {
+      return res.status(400).json({ field: 'title', message: 'Title is required.' });
+    }
+    if (!event_date) {
+      return res.status(400).json({ field: 'event_date', message: 'Event date is required.' });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO mobile_events
+         (title, subtitle, description, location, event_date,
+          registration_closing_date, image_url, link,
+          institution_id, created_by, is_active, sort_order)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, 0)
+       RETURNING *`,
+      [
+        String(title).trim(),
+        subtitle ? String(subtitle).trim() : null,
+        description ? String(description).trim() : null,
+        location ? String(location).trim() : null,
+        event_date,
+        registration_closing_date || null,
+        image_url || null,
+        link || null,
+        institutionId,
+        adminId,
+      ],
+    );
+
+    res.status(201).json({
+      message: 'Event created. Your students and trainers will see it on their home screen.',
+      event: result.rows[0],
+    });
+  } catch (err) {
+    console.error('createInstitutionEvent error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// GET /api/institutions/me/events/all
+//
+// Admin-only history view — returns EVERY event the caller's institution
+// has ever created, including past ones. Used by the EventsList screen
+// on the More tab so the admin can see what they've published and what's
+// still upcoming in one list, sorted newest event first.
+exports.listMyInstitutionEvents = async (req, res) => {
+  try {
+    const u = await pool.query(
+      `SELECT institution_id FROM users WHERE id = $1`,
+      [req.user.id],
+    );
+    const institutionId = u.rows[0]?.institution_id;
+    if (!institutionId) {
+      return res.status(403).json({ message: 'No institution linked to this admin.' });
+    }
+    const result = await pool.query(
+      `SELECT
+         id, title, subtitle, description, image_url, event_date,
+         registration_closing_date, location, link, is_active, sort_order,
+         institution_id, created_at,
+         CASE WHEN event_date >= CURRENT_DATE THEN 'upcoming' ELSE 'past' END AS status
+       FROM mobile_events
+       WHERE institution_id = $1
+       ORDER BY event_date DESC
+       LIMIT 200`,
+      [institutionId],
+    );
+    res.json({ count: result.rows.length, events: result.rows });
+  } catch (err) {
+    console.error('listMyInstitutionEvents error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// GET /api/events/my
+//
+// Convenience endpoint for the trainer + student home screens — returns
+// the same union as getInstitutionEvents but uses the caller's own
+// institution_id from their JWT instead of requiring it in the URL.
+// Lets the trainer/student app fetch events without knowing their
+// institution id up front.
+exports.getMyEvents = async (req, res) => {
+  try {
+    const u = await pool.query(
+      `SELECT institution_id FROM users WHERE id = $1`,
+      [req.user.id],
+    );
+    const institutionId = u.rows[0]?.institution_id;
+
+    // Even guests / un-linked users can fetch — they just get globals only.
+    const params = institutionId ? [institutionId] : [];
+    const where  = institutionId
+      ? `(institution_id = $1 OR institution_id IS NULL)`
+      : `institution_id IS NULL`;
+
+    const result = await pool.query(
+      `SELECT
+         id, title, subtitle, description, image_url, event_date,
+         location, link, sort_order, institution_id,
+         CASE WHEN institution_id IS NULL THEN 'global' ELSE 'institution' END AS source
+       FROM mobile_events
+       WHERE is_active = TRUE
+         AND event_date >= CURRENT_DATE
+         AND ${where}
+       ORDER BY event_date ASC
+       LIMIT 50`,
+      params,
+    );
+    res.json({ count: result.rows.length, events: result.rows });
+  } catch (err) {
+    console.error('getMyEvents error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };

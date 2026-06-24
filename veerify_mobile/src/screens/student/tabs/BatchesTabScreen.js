@@ -27,6 +27,7 @@ import apiClient from '../../../api/client';
 import { useAuth } from '../../../context/AuthContext';
 import { useInstitution } from '../../../context/InstitutionContext';
 import { palette, spacing, radius, shadows, type } from '../../../theme';
+import { confirm } from '../../../components/ConfirmDialog';
 
 const ACCENTS = [palette.purple, palette.blue, palette.green, palette.orange, palette.pink, palette.teal];
 const cycleAccent = (i) => ACCENTS[i % ACCENTS.length];
@@ -119,24 +120,27 @@ export default function BatchesTabScreen({ navigation }) {
 
   const handleJoin = (batch) => {
     if (isGuest) {
-      Alert.alert(
-        'Login + Subscription Required',
-        'Sign in and subscribe to join this batch.',
-        [
-          { text: 'Not now', style: 'cancel' },
-          { text: 'Login', onPress: () => navigation.getParent()?.navigate('Login') },
-        ],
-      );
+      confirm({
+        title: 'Login to Continue Learning',
+        message: 'Sign in to join this batch and unlock your training.',
+        variant: 'destructive',
+        confirmText: 'Login',
+        cancelText: 'Not now',
+        onConfirm: () => {
+          try { navigation.navigate('Login'); return; } catch {}
+          try { navigation.getParent()?.navigate('Login'); } catch {}
+        },
+      });
       return;
     }
-    Alert.alert(
-      'Subscribe to Join',
-      'You need an active subscription to enroll in a batch. Pick a plan from your Profile.',
-      [
-        { text: 'Not now', style: 'cancel' },
-        { text: 'View Plans', onPress: () => navigation.navigate('Profile') },
-      ],
-    );
+    confirm({
+      title: 'Subscribe to Join',
+      message: 'You need an active subscription to enroll in a batch. Pick a plan from your Profile.',
+      variant: 'warning',
+      confirmText: 'View Plans',
+      cancelText: 'Not now',
+      onConfirm: () => navigation.navigate('Profile'),
+    });
   };
 
   // ─── No academy chosen ───

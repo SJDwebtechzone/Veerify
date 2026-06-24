@@ -86,18 +86,23 @@ export default function MyDashboard({ navigation }) {
   // wants the dashboard to surface what the student has finished, not
   // the open todo list.
   const [progressByCourse, setProgressByCourse] = useState({});
+  // Upcoming institution events — published by the academy admin via
+  // /institutions/me/events. Same source the trainer dashboard uses.
+  const [events, setEvents] = useState([]);
 
   const load = useCallback(async () => {
     try {
-      const [enrRes, vidRes, meRes] = await Promise.all([
+      const [enrRes, vidRes, meRes, eventsRes] = await Promise.all([
         apiClient.get('/enrollments/my').catch(() => ({ data: { enrollments: [] } })),
         apiClient.get('/students/my-videos').catch(() => ({ data: { videos: [] } })),
         apiClient.get('/students/me').catch(() => ({ data: { student: null } })),
+        apiClient.get('/institutions/me/events').catch(() => ({ data: { events: [] } })),
       ]);
       const enrs = enrRes.data?.enrollments || [];
       setEnrollments(enrs);
       setVideos(vidRes.data?.videos || []);
       setMe(meRes.data?.student || null);
+      setEvents(eventsRes.data?.events || []);
 
       // Fan out one curriculum-progress fetch per unique paid course.
       // Errors fall through silently (e.g. a course with no curriculum
@@ -278,6 +283,25 @@ export default function MyDashboard({ navigation }) {
           );
         })()}
 
+        {/* ───── Upcoming Events ─────
+            Institution events published by the academy admin via the
+            More tab → Events tile. Renders nothing when the list is
+            empty so the section doesn't take up dead space. */}
+        {events.length > 0 ? (
+          <>
+            <SectionHeader title="Upcoming Events" subtitle="From your academy" />
+            <View style={{ paddingHorizontal: 16, marginBottom: 16 }}>
+              {events.slice(0, 5).map((ev) => (
+                <EventRow
+                  key={ev.id}
+                  event={ev}
+                  onPress={() => navigation.navigate('EventDetail', { event: ev })}
+                />
+              ))}
+            </View>
+          </>
+        ) : null}
+
         {/* ───── Recorded Videos ───── */}
         <SectionHeader title="Recorded Videos" subtitle="Shared by your trainers" />
 
@@ -322,6 +346,54 @@ function SectionHeader({ title, subtitle }) {
   );
 }
 
+// Compact event card — same shape used on the trainer dashboard, kept
+// inline here so MyDashboard stays self-contained. Tap to open the
+// shared EventDetail screen.
+function EventRow({ event, onPress }) {
+  const d = event.event_date ? new Date(event.event_date) : null;
+  const day = d ? String(d.getDate()).padStart(2, '0') : '--';
+  const mon = d ? d.toLocaleString('en-US', { month: 'short' }).toUpperCase() : '---';
+  return (
+    <TouchableOpacity
+      onPress={onPress}
+      activeOpacity={0.85}
+      style={{
+        flexDirection: 'row', alignItems: 'center', gap: 12,
+        padding: 12, marginBottom: 8,
+        backgroundColor: '#FFFFFF',
+        borderRadius: 12,
+        borderWidth: 1, borderColor: '#E5E7EB',
+      }}
+    >
+      <View
+        style={{
+          width: 48, height: 56, borderRadius: 10,
+          backgroundColor: '#FFE4E6',
+          alignItems: 'center', justifyContent: 'center',
+        }}
+      >
+        <Text style={{ fontSize: 16, fontWeight: '900', color: '#E63946' }}>{day}</Text>
+        <Text style={{ fontSize: 9, fontWeight: '800', color: '#E63946', letterSpacing: 0.5 }}>{mon}</Text>
+      </View>
+      <View style={{ flex: 1 }}>
+        <Text style={{ fontSize: 14, fontWeight: '800', color: '#111827' }} numberOfLines={1}>
+          {event.title}
+        </Text>
+        {event.subtitle ? (
+          <Text style={{ fontSize: 12, color: '#6B7280', marginTop: 2, fontWeight: '600' }} numberOfLines={1}>
+            {event.subtitle}
+          </Text>
+        ) : null}
+        {event.location ? (
+          <Text style={{ fontSize: 11, color: '#9CA3AF', marginTop: 2 }} numberOfLines={1}>
+            📍 {event.location}
+          </Text>
+        ) : null}
+      </View>
+    </TouchableOpacity>
+  );
+}
+
 function Stat({ icon: Icon, label, value, accent }) {
   return (
     <View style={styles.statTile}>
@@ -349,12 +421,14 @@ function CourseCard({ enrollment, onPress }) {
       onPress={onPress}
       activeOpacity={0.85}
     >
+      {/* Banner sits on top as a wide hero image. The PAID badge moves
+          to the top-right so it doesn't overlap with the title below. */}
       <View style={styles.courseBannerWrap}>
         {banner ? (
           <Image source={{ uri: banner }} style={styles.courseBanner} />
         ) : (
           <View style={[styles.courseBanner, styles.courseBannerFallback]}>
-            <BookOpen size={28} color={BRAND} strokeWidth={2} />
+            <BookOpen size={36} color={BRAND} strokeWidth={2} />
           </View>
         )}
         <View style={styles.paidBadge}>
@@ -363,23 +437,24 @@ function CourseCard({ enrollment, onPress }) {
         </View>
       </View>
 
+      {/* Content stacked below the banner */}
       <View style={styles.courseBody}>
         <Text style={styles.courseName} numberOfLines={2}>{courseName}</Text>
         {institution ? (
           <View style={styles.metaRow}>
-            <Building2 size={11} color={TEXT_MUTED} strokeWidth={2.2} />
+            <Building2 size={12} color={TEXT_MUTED} strokeWidth={2.2} />
             <Text style={styles.metaText} numberOfLines={1}>{institution}</Text>
           </View>
         ) : null}
         {batchName ? (
           <View style={styles.metaRow}>
-            <GraduationCap size={11} color={TEXT_MUTED} strokeWidth={2.2} />
+            <GraduationCap size={12} color={TEXT_MUTED} strokeWidth={2.2} />
             <Text style={styles.metaText} numberOfLines={1}>{batchName}</Text>
           </View>
         ) : null}
         {(days || time) ? (
           <View style={styles.metaRow}>
-            <Calendar size={11} color={TEXT_MUTED} strokeWidth={2.2} />
+            <Calendar size={12} color={TEXT_MUTED} strokeWidth={2.2} />
             <Text style={styles.metaText} numberOfLines={1}>
               {days}{days && time ? ' · ' : ''}{time}
             </Text>
@@ -387,13 +462,11 @@ function CourseCard({ enrollment, onPress }) {
         ) : null}
         {trainer ? (
           <View style={styles.metaRow}>
-            <User size={11} color={TEXT_MUTED} strokeWidth={2.2} />
+            <User size={12} color={TEXT_MUTED} strokeWidth={2.2} />
             <Text style={styles.metaText} numberOfLines={1}>{trainer}</Text>
           </View>
         ) : null}
       </View>
-
-      <ChevronRight size={16} color={TEXT_LIGHT} strokeWidth={2.2} style={{ alignSelf: 'center', marginRight: 12 }} />
     </TouchableOpacity>
   );
 }
@@ -585,37 +658,55 @@ const styles = StyleSheet.create({
   sectionTitle: { fontSize: 16, color: TEXT, fontWeight: '800' },
   sectionSub: { fontSize: 11, color: TEXT_MUTED, marginTop: 2, fontWeight: '600' },
 
-  // Course card
+  // Course card — vertical layout: wide hero banner on top, content below.
+  // (Earlier this was a row with a 90px image on the left; switched to a
+  // stacked layout so the artwork has room to breathe.)
   courseCard: {
-    flexDirection: 'row',
     backgroundColor: SURFACE,
-    borderRadius: 14,
+    borderRadius: 16,
     overflow: 'hidden',
     shadowColor: '#000',
-    shadowOpacity: 0.05,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 1,
+    shadowOpacity: 0.07,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 2,
+    borderWidth: 1,
+    borderColor: BORDER,
   },
   courseBannerWrap: { position: 'relative' },
-  courseBanner: { width: 90, height: 110 },
+  courseBanner: {
+    width: '100%',
+    height: 160,
+    backgroundColor: BRAND_SOFT,
+  },
   courseBannerFallback: {
     backgroundColor: BRAND_SOFT,
     alignItems: 'center', justifyContent: 'center',
   },
+  // Top-right now so it doesn't fight the title which sits below the
+  // banner on its own line.
   paidBadge: {
-    position: 'absolute', top: 6, left: 6,
-    flexDirection: 'row', alignItems: 'center', gap: 3,
+    position: 'absolute', top: 10, right: 10,
+    flexDirection: 'row', alignItems: 'center', gap: 4,
     backgroundColor: GREEN,
-    paddingHorizontal: 6, paddingVertical: 3,
+    paddingHorizontal: 9, paddingVertical: 4,
     borderRadius: 999,
+    shadowColor: '#000',
+    shadowOpacity: 0.18,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 3,
   },
-  paidBadgeText: { fontSize: 9, color: '#fff', fontWeight: '900', letterSpacing: 0.5 },
+  paidBadgeText: { fontSize: 10, color: '#fff', fontWeight: '900', letterSpacing: 0.5 },
 
-  courseBody: { flex: 1, padding: 12, gap: 4 },
-  courseName: { fontSize: 14, fontWeight: '800', color: TEXT },
-  metaRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  metaText: { fontSize: 11, color: TEXT_MUTED, fontWeight: '600', flex: 1 },
+  // Content area sits beneath the banner with comfortable padding.
+  courseBody: { padding: 14, gap: 6 },
+  courseName: {
+    fontSize: 16, fontWeight: '800', color: TEXT,
+    marginBottom: 4, letterSpacing: -0.1,
+  },
+  metaRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  metaText: { fontSize: 12, color: TEXT_MUTED, fontWeight: '600', flex: 1 },
 
   // Video card
   videoCard: {
@@ -720,31 +811,28 @@ const styles = StyleSheet.create({
     color: TEXT,
     fontWeight: '700',
   },
+  // Small date chip — sits at the end of a completed lesson row, shows
+  // when the trainer ticked the lesson off.
   progressDateChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 3,
-    paddingHorizontal: 7,
-    paddingVertical: 2,
+    gap: 4,
     backgroundColor: BG,
+    paddingHorizontal: 8, paddingVertical: 3,
     borderRadius: 999,
   },
-  progressDateText: { fontSize: 10, color: TEXT_MUTED, fontWeight: '700' },
-  progressMore: {
-    fontSize: 11,
-    color: TEXT_MUTED,
-    fontWeight: '700',
-    marginTop: 2,
-    paddingLeft: 26,
+  progressDateText: {
+    fontSize: 10, color: TEXT_MUTED, fontWeight: '700',
   },
 
-  // Empty inline
+  // Empty-state inline card — icon + helper text on one row. Used when
+  // a section has no rows yet (no recorded videos, no progress, etc).
   emptyInline: {
-    flexDirection: 'row', alignItems: 'center', gap: 8,
-    marginHorizontal: 16,
-    padding: 14,
+    flexDirection: 'row',
+    alignItems: 'center', gap: 10,
+    marginHorizontal: 16, marginBottom: 16,
+    padding: 14, borderRadius: 12,
     backgroundColor: SURFACE,
-    borderRadius: 12,
     borderWidth: 1, borderColor: BORDER,
   },
   emptyInlineText: { flex: 1, fontSize: 12, color: TEXT_MUTED, fontWeight: '600', lineHeight: 17 },

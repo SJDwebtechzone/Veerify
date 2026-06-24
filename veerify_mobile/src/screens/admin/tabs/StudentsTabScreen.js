@@ -25,6 +25,7 @@ import {
 import apiClient from '../../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../../theme';
 import FAB from '../../../components/FAB';
+import PlanLimitModal from '../../../components/PlanLimitModal';
 
 const TABS = ['All', 'Active', 'Inactive'];
 
@@ -49,6 +50,26 @@ export default function StudentsTabScreen({ navigation }) {
   const [loading,    setLoading]    = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [students,   setStudents]   = useState([]);
+
+  // ── Plan-limit gate ─────────────────────────────────────────────
+  // Same shape as TrainersListScreen: cache the latest usage so the
+  // FAB can render a chip when capped, then re-check on every tap so
+  // a stale cache can never let an admin slip past the limit.
+  const [studentUsage,  setStudentUsage]  = useState(null);
+  const [planModalOpen, setPlanModalOpen] = useState(false);
+  const [checkingCap,   setCheckingCap]   = useState(false);
+
+  const refreshUsage = useCallback(async () => {
+    try {
+      const r = await apiClient.get('/plans/usage');
+      const u = r?.data?.students || null;
+      if (u) setStudentUsage(u);
+      return u;
+    } catch (err) {
+      console.log('[StudentsTab] usage refresh failed:', err?.message);
+      return null;
+    }
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -88,7 +109,30 @@ export default function StudentsTabScreen({ navigation }) {
     }
   }, []);
 
-  useFocusEffect(useCallback(() => { load(); }, [load]));
+  useFocusEffect(useCallback(() => {
+    load();
+    refreshUsage();
+  }, [load, refreshUsage]));
+
+  // FAB tap — re-check /plans/usage synchronously so a stale cache or
+  // late-arriving initial fetch can never let an admin past the cap.
+  // Server-side enrolment still returns 402 PLAN_LIMIT_REACHED as the
+  // ultimate safety net, but blocking here keeps the user from filling
+  // out the whole enrolment form before being told there's no room.
+  const handleAddStudentPress = async () => {
+    if (checkingCap) return;
+    setCheckingCap(true);
+    try {
+      const u = await refreshUsage();
+      if (u && !u.unlimited && u.current >= u.limit) {
+        setPlanModalOpen(true);
+        return;
+      }
+    } finally {
+      setCheckingCap(false);
+    }
+    navigation.navigate('EnrollmentForm', { adminMode: true });
+  };
 
   const counts = useMemo(() => ({
     All:      students.length,
@@ -220,12 +264,33 @@ export default function StudentsTabScreen({ navigation }) {
 
       {/* Opens the same EnrollmentForm a student fills when buying a
           course. adminMode: true tells the form to show an inline batch
-          picker at the top so the admin can pick the batch first. */}
+          picker at the top so the admin can pick the batch first.
+
+          handleAddStudentPress re-fetches /plans/usage on every tap;
+          when the institution is already at its cap it pops the
+          PlanLimitModal instead of opening the form, so the admin
+          can't even start filling fields before being told to upgrade. */}
       <FAB
         icon={UserPlus}
         bottom={92}
-        onPress={() => navigation.navigate('EnrollmentForm', { adminMode: true })}
+        onPress={handleAddStudentPress}
         accent={palette.purple}
+      />
+
+      {/* Upgrade-plan modal — fires when /plans/usage shows the
+          institution at or over its student cap. Mirrors the
+          equivalent flow in TrainersListScreen. */}
+      <PlanLimitModal
+        visible={planModalOpen}
+        kind="student"
+        limit={studentUsage?.limit}
+        current={studentUsage?.current}
+        planName={studentUsage?.plan_name}
+        onClose={() => setPlanModalOpen(false)}
+        onUpgrade={() => {
+          try { navigation.navigate('PlanSelection'); }
+          catch { navigation.getParent()?.navigate('PlanSelection'); }
+        }}
       />
     </View>
   );

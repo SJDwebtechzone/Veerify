@@ -30,6 +30,7 @@ import {
 import apiClient from '../../api/client';
 import { useAuth } from '../../context/AuthContext';
 import { palette, spacing, radius, shadows, type } from '../../theme';
+import { confirm } from '../../components/ConfirmDialog';
 
 export default function StaffProfileScreen({ navigation }) {
   const { user, logout } = useAuth();
@@ -55,10 +56,14 @@ export default function StaffProfileScreen({ navigation }) {
   useEffect(() => { load(); }, [load]);
 
   const confirmLogout = () => {
-    Alert.alert('Sign out?', 'You\'ll need to log in again to access the app.', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Sign out', style: 'destructive', onPress: () => logout() },
-    ]);
+    confirm({
+      title: 'Sign out?',
+      message: 'You\'ll need to log in again to access the app.',
+      variant: 'destructive',
+      confirmText: 'Sign out',
+      cancelText: 'Cancel',
+      onConfirm: () => logout(),
+    });
   };
 
   // ── Render ──

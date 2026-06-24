@@ -1,8 +1,21 @@
 const pool = require('../config/db');
-const { sendApprovalEmail, sendActivationEmail } = require('../utils/mailer');
+const bcrypt = require('bcrypt');
+const crypto = require('crypto');
+const {
+  sendApprovalEmail, sendActivationEmail, sendBranchSetupEmail,
+} = require('../utils/mailer');
 const { createPaymentLink, verifyWebhookSignature } = require('../utils/razorpay');
 const { insertNotification } = require('./notification.controller');
 const { creditReferralReward, consumeDiscount } = require('./referral.controller');
+
+// Same generator as the enrollment controller — 10-char mixed alphanum
+// with confusable chars stripped (no O, 0, I, l, 1).
+function generateTempPassword() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  let pw = '';
+  for (let i = 0; i < 10; i++) pw += chars[crypto.randomInt(0, chars.length)];
+  return pw;
+}
 
 // STEP 1: Admin selects a plan
 exports.selectPlan = async (req, res) => {
@@ -294,7 +307,23 @@ exports.setupAcademy = async (req, res) => {
     }
 
     // Normalise array / json inputs so pg doesn't blow up on bad shapes.
-    const safeBranches = Array.isArray(branches) ? JSON.stringify(branches) : '[]';
+    // Branches now carry per-row email + contact_number (added on mobile);
+    // we whitelist the known fields so a typo / extra prop on the client
+    // can't bloat the jsonb.
+    const sanitiseBranches = (raw) => {
+      if (!Array.isArray(raw)) return [];
+      return raw.map((b) => ({
+        name:           (b?.name || '').toString().trim(),
+        address:        (b?.address || '').toString().trim(),
+        city:           (b?.city || '').toString().trim(),
+        pincode:        (b?.pincode || '').toString().trim(),
+        email:          (b?.email || '').toString().trim(),
+        contact_number: (b?.contact_number || '').toString().trim(),
+        latitude:       (b?.latitude  != null && b.latitude  !== '') ? Number(b.latitude)  : null,
+        longitude:      (b?.longitude != null && b.longitude !== '') ? Number(b.longitude) : null,
+      }));
+    };
+    const safeBranches = JSON.stringify(sanitiseBranches(branches));
     const safeMedium = Array.isArray(medium_of_instruction)
       ? medium_of_instruction
       : (medium_of_instruction ? [String(medium_of_instruction)] : null);
@@ -432,6 +461,123 @@ exports.setupAcademy = async (req, res) => {
       ]
     );
 
+    // ── Provision each branch as an independent institution ────────────
+    // Each branch with a non-empty email becomes:
+    //   1. A fresh `users` row (admin role, auto-generated password).
+    //   2. A child `institutions` row that inherits the parent's plan,
+    //      paid_at, subscription_end and onboarding_status so it lights
+    //      up the moment the parent does. parent_institution_id links
+    //      it back to the head office.
+    // The branch admin gets an email with their own login credentials.
+    // We fire each branch email without awaiting so a slow SMTP doesn't
+    // block the setup response, but the DB inserts ARE awaited so the
+    // child rows exist before we return.
+    try {
+      const branchRows = sanitiseBranches(branches);
+      const ownerRow = await pool.query(
+        'SELECT name, email FROM users WHERE id = $1',
+        [req.user.id],
+      );
+      const ownerName = ownerRow.rows[0]?.name || '';
+      const parentInst = updated.rows[0];
+
+      for (const b of branchRows) {
+        if (!b.email) continue;
+        const branchEmail = b.email.toLowerCase().trim();
+
+        // Skip if this branch email is already a user — avoids dup-key
+        // crashes on rerun and keeps the provisioning idempotent.
+        const existing = await pool.query(
+          'SELECT id, institution_id FROM users WHERE LOWER(email) = $1',
+          [branchEmail],
+        );
+        if (existing.rows.length > 0) {
+          console.log(`[setup] branch ${branchEmail} already has a user — skipping provision`);
+          continue;
+        }
+
+        // 1. Create the branch admin user.
+        const tempPassword = generateTempPassword();
+        const hashed = await bcrypt.hash(tempPassword, 10);
+        const branchAdminName = `${b.name || 'Branch'} Admin`;
+        const newUser = await pool.query(
+          `INSERT INTO users (name, email, phone, password, role, status)
+           VALUES ($1, $2, $3, $4, 'admin', 'active')
+           RETURNING id`,
+          [branchAdminName, branchEmail, b.contact_number || null, hashed],
+        );
+        const branchUserId = newUser.rows[0].id;
+
+        // 2. Create a child institutions row inheriting parent's plan +
+        //    lifecycle so the subscription guard and plan-cap checks
+        //    pass for the branch without a second payment.
+        const childInst = await pool.query(
+          `INSERT INTO institutions (
+             owner_user_id, parent_institution_id, name, brand_name,
+             institution_type, institution_types,
+             address, city, pincode, email, phone,
+             plan_id, onboarding_status, status,
+             paid_at, subscription_start, subscription_end,
+             trial_starts_at, trial_ends_at, grace_ends_at
+           )
+           VALUES (
+             $1, $2, $3, $4,
+             $5, $6,
+             $7, $8, $9, $10, $11,
+             $12, $13, $14,
+             $15, $16, $17,
+             $18, $19, $20
+           )
+           RETURNING id`,
+          [
+            branchUserId,
+            parentInst.id,
+            b.name || `${name} - Branch`,
+            parentInst.brand_name,
+            parentInst.institution_type,
+            parentInst.institution_types,
+            b.address || parentInst.address,
+            b.city || parentInst.city,
+            b.pincode || parentInst.pincode,
+            branchEmail,
+            b.contact_number || parentInst.phone,
+            parentInst.plan_id,
+            parentInst.onboarding_status,
+            parentInst.status,
+            parentInst.paid_at,
+            parentInst.subscription_start,
+            parentInst.subscription_end,
+            parentInst.trial_starts_at,
+            parentInst.trial_ends_at,
+            parentInst.grace_ends_at,
+          ],
+        );
+
+        // Back-link the user row to its institution so JWT scoping works.
+        await pool.query(
+          'UPDATE users SET institution_id = $1 WHERE id = $2',
+          [childInst.rows[0].id, branchUserId],
+        );
+
+        // 3. Email the branch admin their credentials (fire-and-forget).
+        const branchAddress = [b.address, b.city, b.pincode].filter(Boolean).join(', ');
+        sendBranchSetupEmail({
+          to:              branchEmail,
+          branchName:      b.name,
+          branchAddress,
+          institutionName: name,
+          ownerName,
+          loginEmail:      branchEmail,
+          loginPassword:   tempPassword,
+        }).catch((err) => console.error('[setup] branch email failed:', err?.message));
+      }
+    } catch (err) {
+      // Don't fail the whole setup if branch provisioning blows up — the
+      // head office is still saved, super admin can re-run via a future
+      // "Resend branch credentials" tool.
+      console.error('[setup] branch provisioning loop failed:', err?.message);
+    }
+
     res.json({
       message: 'Academy details submitted successfully',
       institution: updated.rows[0]
@@ -544,10 +690,13 @@ exports.getSubscriptionStatus = async (req, res) => {
               sp.id    AS plan_id,
               sp.name  AS plan_name,
               sp.price AS plan_price,
+              sp.billing_cycle    AS plan_billing_cycle,
               sp.trial_days       AS plan_trial_days,
               sp.grace_days       AS plan_grace_days,
               sp.discount_enabled AS plan_discount_enabled,
-              sp.discount_percent AS plan_discount_percent
+              sp.discount_percent AS plan_discount_percent,
+              sp.max_students     AS plan_max_students,
+              sp.max_trainers     AS plan_max_trainers
        FROM institutions i
        LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
        WHERE i.owner_user_id = $1`,
@@ -590,6 +739,37 @@ exports.getSubscriptionStatus = async (req, res) => {
       ? Math.round(basePrice * (1 - discountPct / 100))
       : basePrice;
 
+    // ── Derived dates for the Pricing & Plans screen ────────────────
+    // subscription_started_at: when this academy entered its current
+    // billing window. After payment it's paid_at; during trial it's
+    // trial_starts_at; otherwise unknown.
+    const subscriptionStartedAt = r.paid_at || r.trial_starts_at || null;
+
+    // next_renewal_at:
+    //   - Paid: started + 1 month (or 1 year if yearly billing)
+    //   - Trial: trial_ends_at (i.e. when they need to pay to continue)
+    //   - Grace: grace_ends_at (hard cut-off)
+    //   - Pending/locked: null
+    const addPeriod = (iso, cycle) => {
+      if (!iso) return null;
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return null;
+      if (String(cycle).toLowerCase() === 'yearly') {
+        d.setFullYear(d.getFullYear() + 1);
+      } else {
+        d.setMonth(d.getMonth() + 1);
+      }
+      return d.toISOString();
+    };
+    let nextRenewalAt = null;
+    if (phase === 'paid' && r.paid_at) {
+      nextRenewalAt = addPeriod(r.paid_at, r.plan_billing_cycle);
+    } else if (phase === 'trial') {
+      nextRenewalAt = r.trial_ends_at;
+    } else if (phase === 'grace') {
+      nextRenewalAt = r.grace_ends_at;
+    }
+
     res.json({
       phase,
       institution_id: r.id,
@@ -604,15 +784,20 @@ exports.getSubscriptionStatus = async (req, res) => {
         id: r.plan_id,
         name: r.plan_name,
         price: basePrice,
+        billing_cycle: r.plan_billing_cycle || 'monthly',
         trial_days: Number(r.plan_trial_days) || 0,
         grace_days: Number(r.plan_grace_days) || 0,
         discount_enabled: discountOn,
         discount_percent: discountPct,
         effective_price: effectivePrice,
+        max_students: r.plan_max_students,
+        max_trainers: r.plan_max_trainers,
       },
       payment_link_url:    r.payment_link_url || null,
       payment_link_status: r.payment_link_status || null,
       paid_at:             r.paid_at || null,
+      subscription_started_at: subscriptionStartedAt,
+      next_renewal_at:         nextRenewalAt,
     });
   } catch (err) {
     console.error('Subscription status error:', err);
@@ -1034,26 +1219,26 @@ exports.approveInstitution = async (req, res) => {
       warnings.push(`Payment link not created: ${linkResult.error}`);
     }
 
-    // 4. Email the owner (only if we have a link to send). The mailer branches
-    //    on trialDays: with a trial it sends a "free trial started" email
-    //    instead of a "please pay" email.
-    if (linkResult.ok) {
-      const mailResult = await sendApprovalEmail({
-        to:              institution.owner_email,
-        ownerName:       institution.owner_name,
-        institutionName: institution.name,
-        planName:        institution.plan_name,
-        planPrice:       institution.plan_price,
-        paymentUrl:      linkResult.link.short_url,
-        trialDays,
-        graceDays,
-        effectivePrice,
-        discountEnabled: discountOn,
-        discountPercent: discountPct,
-      });
-      if (!mailResult.ok) {
-        warnings.push(`Email not sent: ${mailResult.error}`);
-      }
+    // 4. Email the owner. Previously this was gated on `linkResult.ok` which
+    //    meant a Razorpay misconfiguration silently swallowed the approval
+    //    notice. Now the email always goes out — when there's no link we send
+    //    a "you've been approved, payment link to follow" version so the
+    //    institution at least knows the super admin acted on their request.
+    const mailResult = await sendApprovalEmail({
+      to:              institution.owner_email,
+      ownerName:       institution.owner_name,
+      institutionName: institution.name,
+      planName:        institution.plan_name,
+      planPrice:       institution.plan_price,
+      paymentUrl:      linkResult.ok ? linkResult.link.short_url : null,
+      trialDays,
+      graceDays,
+      effectivePrice,
+      discountEnabled: discountOn,
+      discountPercent: discountPct,
+    });
+    if (!mailResult.ok) {
+      warnings.push(`Email not sent: ${mailResult.error}`);
     }
 
     // Return the fresh row so the admin UI re-renders correctly.
@@ -1961,7 +2146,6 @@ exports.getOnboardingCounts = async (_req, res) => {
       `),
     ]);
 
-    // pg returns COUNT(*) as a string; coerce to numbers for the client.
     const c = summary.rows[0] || {};
     const p = peopleCounts.rows[0] || {};
     const m = mrrRow.rows[0] || {};
@@ -1983,10 +2167,70 @@ exports.getOnboardingCounts = async (_req, res) => {
     });
   } catch (err) {
     console.error('getOnboardingCounts error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
 
-    res.status(500).json({
-      message: 'Server error',
-      error: err.message,
+// ─── Generate a Razorpay renewal payment link for the logged-in admin ──────
+// POST /api/onboarding/renew
+exports.createRenewalPaymentLink = async (req, res) => {
+  try {
+    const userId = req.user?.id || req.user?.userId;
+    if (!userId) {
+      return res.status(401).json({ message: 'Not authenticated' });
+    }
+
+    const { rows } = await pool.query(
+      `SELECT i.*, u.email AS owner_email, u.name AS owner_name, u.phone AS owner_phone,
+              sp.name AS plan_name, sp.price AS plan_price,
+              sp.discount_enabled AS plan_discount_enabled,
+              sp.discount_percent AS plan_discount_percent
+         FROM institutions i
+         JOIN users u ON i.owner_user_id = u.id
+         LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
+        WHERE u.id = $1
+           OR i.id = (SELECT institution_id FROM users WHERE id = $1)
+        LIMIT 1`,
+      [userId],
+    );
+    const institution = rows[0];
+    if (!institution) {
+      return res.status(404).json({ message: 'Institution not found for this account' });
+    }
+    if (!institution.plan_price) {
+      return res.status(400).json({ message: 'No active plan to renew. Please pick a plan first.' });
+    }
+
+    const discountOn  = !!institution.plan_discount_enabled;
+    const discountPct = Number(institution.plan_discount_percent) || 0;
+    const basePrice   = Number(institution.plan_price);
+    const effectivePrice = discountOn && discountPct > 0
+      ? Math.round(basePrice * (1 - discountPct / 100))
+      : basePrice;
+
+    const linkResult = await createPaymentLink({ amountInRupees: effectivePrice, institution });
+    if (!linkResult.ok) {
+      return res.status(502).json({ message: `Could not create payment link: ${linkResult.error}` });
+    }
+
+    await pool.query(
+      `UPDATE institutions SET
+         payment_link_id     = $1,
+         payment_link_url    = $2,
+         payment_link_status = 'pending',
+         payment_amount      = $3
+       WHERE id = $4`,
+      [linkResult.link.id, linkResult.link.short_url, linkResult.link.amountPaise, institution.id],
+    );
+
+    res.json({
+      message: 'Renewal payment link created',
+      payment_link_url: linkResult.link.short_url,
+      amount: effectivePrice,
+      plan_name: institution.plan_name,
     });
+  } catch (err) {
+    console.error('createRenewalPaymentLink error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
   }
 };

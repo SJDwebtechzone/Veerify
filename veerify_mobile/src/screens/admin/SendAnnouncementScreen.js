@@ -16,10 +16,11 @@ import {
 } from 'react-native';
 import {
   ArrowLeft, Megaphone, Users, GraduationCap, CheckCircle, ChevronRight,
-  Send, Sparkles, UserCircle,
+  Send, Sparkles,
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
+import { confirm } from '../../components/ConfirmDialog';
 
 // ─── Theme tokens ──────────────────────────────────────────────────────
 const BRAND = '#E63946';
@@ -33,23 +34,21 @@ const BORDER = '#E5E7EB';
 const GREEN = '#10B981';
 
 const AUDIENCES = [
-  { key: 'staff',    label: 'Staff',    icon: GraduationCap, sub: 'All trainers' },
   { key: 'students', label: 'Students', icon: Users,         sub: 'All enrolled' },
-  { key: 'parents',  label: 'Parents',  icon: UserCircle,    sub: 'Linked parents' },
-  { key: 'all',      label: 'Everyone', icon: Megaphone,     sub: 'Staff · students · parents' },
+  { key: 'staff',    label: 'Staff',    icon: GraduationCap, sub: 'All trainers' },
+  { key: 'all',      label: 'Everyone', icon: Megaphone,     sub: 'Staff · students' },
 ];
 
 const MAX_TITLE = 120;
 const MAX_MESSAGE = 800;
 
 export default function SendAnnouncementScreen({ navigation }) {
-  const [audience, setAudience] = useState('staff');
+  const [audience, setAudience] = useState('students');
   const [title, setTitle] = useState('');
   const [message, setMessage] = useState('');
-  const [counts, setCounts] = useState({ staff: 0, students: 0, parents: 0, all: 0 });
+  const [counts, setCounts] = useState({ staff: 0, students: 0, all: 0 });
   const [loadingCounts, setLoadingCounts] = useState(true);
   const [sending, setSending] = useState(false);
-  const [sent, setSent] = useState(null); // { delivered_count, audience }
 
   // Fetch recipient counts so the composer shows "Will reach N people"
   // before the admin hits Send.
@@ -57,7 +56,7 @@ export default function SendAnnouncementScreen({ navigation }) {
     (async () => {
       try {
         const res = await apiClient.get('/announcements/audience-counts');
-        setCounts(res.data?.counts || { staff: 0, students: 0, parents: 0, all: 0 });
+        setCounts(res.data?.counts || { staff: 0, students: 0, all: 0 });
       } catch (err) {
         console.log('[Announcement] counts fetch failed:', err?.message);
       } finally {
@@ -76,88 +75,72 @@ export default function SendAnnouncementScreen({ navigation }) {
     const t = title.trim();
     const m = message.trim();
     if (!t) {
-      Alert.alert('Title required', 'Type a short title so recipients see what the announcement is about.');
+      confirm({
+        title: 'Title required',
+        message: 'Type a short title so recipients see what the announcement is about.',
+        variant: 'info',
+        hideCancel: true,
+        confirmText: 'OK',
+      });
       return;
     }
     if (recipientCount === 0) {
-      Alert.alert('No recipients', 'There are no users in this audience to send to.');
+      confirm({
+        title: 'No recipients',
+        message: 'There are no users in this audience to send to.',
+        variant: 'info',
+        hideCancel: true,
+        confirmText: 'OK',
+      });
       return;
     }
 
-    Alert.alert(
-      'Send announcement?',
-      `This will deliver "${t}" to ${recipientCount} ${recipientCount === 1 ? 'person' : 'people'}. You can't undo a send.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Send',
-          onPress: async () => {
-            setSending(true);
-            try {
-              const res = await apiClient.post('/announcements', {
-                audience, title: t, message: m || null,
-                category: 'announcement',
-              });
-              setSent({
-                // status='pending' when the backend gated this for admin
-                // approval (e.g. trainer submitting). delivered_count
-                // stays absent in that case, so the success screen
-                // branches into the "Awaiting approval" copy.
-                pending:         res.data?.status === 'pending',
-                delivered_count: res.data?.delivered_count || recipientCount,
-                audience,
-              });
-            } catch (err) {
-              Alert.alert('Send failed', err?.response?.data?.message || 'Please try again.');
-            } finally {
-              setSending(false);
-            }
-          },
-        },
-      ],
-    );
-  };
+    confirm({
+      title: 'Send announcement?',
+      message: `This will deliver "${t}" to ${recipientCount} ${recipientCount === 1 ? 'person' : 'people'}. You can't undo a send.`,
+      variant: 'warning',
+      confirmText: `Send to ${recipientCount}`,
+      cancelText: 'Cancel',
+      onConfirm: async () => {
+        setSending(true);
+        try {
+          const res = await apiClient.post('/announcements', {
+            audience, title: t, message: m || null,
+            category: 'announcement',
+          });
+          const pending  = res.data?.status === 'pending';
+          const delivered = res.data?.delivered_count || recipientCount;
 
-  // ── Success screen ────────────────────────────────────────────────────
-  if (sent) {
-    return (
-      <View style={styles.screen}>
-        <ScrollView contentContainerStyle={styles.successBody}>
-          <View style={styles.successCircle}>
-            <CheckCircle size={56} color="#fff" strokeWidth={2.4} />
-          </View>
-          <Text style={styles.successTitle}>
-            {sent.pending ? 'Submitted for approval' : 'Announcement sent'}
-          </Text>
-          <Text style={styles.successSub}>
-            {sent.pending
-              ? 'Your institution admin will review and approve this before it reaches students. You\'ll get a notification once they decide.'
-              : `Delivered to ${sent.delivered_count} ${sent.delivered_count === 1 ? 'person' : 'people'}. They'll see it in their notifications inbox.`}
-          </Text>
-
-          <TouchableOpacity
-            style={[styles.btn, styles.btnPrimary, { marginTop: 24 }]}
-            onPress={() => {
-              setSent(null);
+          // Branded success popup — no longer a full-screen takeover.
+          confirm({
+            title: pending ? 'Submitted for approval' : 'Announcement sent',
+            message: pending
+              ? "Your institution admin will review and approve this before it reaches students. You'll get a notification once they decide."
+              : `Delivered to ${delivered} ${delivered === 1 ? 'person' : 'people'}. They'll see it in their notifications inbox.`,
+            variant: 'success',
+            hideCancel: true,
+            confirmText: 'Done',
+            onConfirm: () => {
+              // Reset the form so the admin can compose another without
+              // losing their place. Keep them on the compose screen.
               setTitle('');
               setMessage('');
-            }}
-            activeOpacity={0.85}
-          >
-            <Sparkles size={16} color="#fff" strokeWidth={2.4} />
-            <Text style={styles.btnPrimaryText}>Send another</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.btn, styles.btnGhost, { marginTop: 8 }]}
-            onPress={() => navigation.goBack()}
-            activeOpacity={0.85}
-          >
-            <Text style={styles.btnGhostText}>Back to Dashboard</Text>
-          </TouchableOpacity>
-        </ScrollView>
-      </View>
-    );
-  }
+            },
+          });
+        } catch (err) {
+          confirm({
+            title: 'Send failed',
+            message: err?.response?.data?.message || 'Please try again.',
+            variant: 'destructive',
+            hideCancel: true,
+            confirmText: 'OK',
+          });
+        } finally {
+          setSending(false);
+        }
+      },
+    });
+  };
 
   // ── Compose screen ───────────────────────────────────────────────────
   return (
@@ -478,3 +461,4 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
   },
 });
+

@@ -234,6 +234,64 @@ function approvalEmailHtml({
   </div>`;
 }
 
+// "Approved, payment link to follow" template — used when Razorpay was
+// down or unconfigured at approval time. The institution at least learns
+// they were approved; super admin can re-trigger the payment link once
+// Razorpay is fixed (Resend Payment Link in the admin web).
+function approvalNoLinkEmailHtml({
+  ownerName, institutionName, planName, planPrice,
+  effectivePrice = null, discountEnabled = false, discountPercent = 0,
+}) {
+  const chargedAmount = effectivePrice != null ? effectivePrice : planPrice;
+  const discountLine = discountEnabled && discountPercent > 0
+    ? `<div style="font-size:12px;color:#16a34a;margin-top:4px;">
+         ${discountPercent}% discount applied — was ${rupees(planPrice)}
+       </div>`
+    : '';
+  return `
+  <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+              max-width:560px;margin:0 auto;padding:24px;color:#0f172a;background:#f8fafc;">
+    <div style="background:#fff;border-radius:14px;padding:32px;border:1px solid #e2e8f0;">
+      <div style="display:inline-block;background:#16a34a;color:#fff;font-weight:600;
+                  font-size:12px;padding:6px 12px;border-radius:999px;letter-spacing:.5px;">
+        ✓ APPROVED
+      </div>
+      <h1 style="font-size:22px;margin:18px 0 8px;">Hi ${ownerName || 'there'},</h1>
+      <p style="font-size:15px;line-height:1.6;color:#334155;margin:0 0 16px;">
+        Great news — your academy <b>${institutionName}</b> has been approved on Veerify
+        on the ${planName || 'Subscription'} plan.
+      </p>
+
+      <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;
+                  padding:16px;margin:18px 0;">
+        <div style="font-size:13px;color:#92400e;line-height:1.6;">
+          <b>Your payment link is on the way.</b><br/>
+          We're finalising the secure payment link from our gateway and will email it to
+          you separately within a short while. No action needed from your side right now.
+        </div>
+      </div>
+
+      <div style="background:#f1f5f9;border-radius:10px;padding:16px;margin:20px 0;">
+        <div style="font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;">
+          Plan
+        </div>
+        <div style="font-size:18px;font-weight:600;margin-top:4px;">
+          ${planName || 'Subscription'} — ${rupees(chargedAmount)}
+        </div>
+        ${discountLine}
+      </div>
+
+      <p style="font-size:12px;color:#94a3b8;margin:24px 0 0;">
+        Questions? Reply to this email or write to
+        <a href="mailto:${SUPPORT_EMAIL}" style="color:#64748b;">${SUPPORT_EMAIL}</a>.
+      </p>
+    </div>
+    <p style="font-size:11px;color:#94a3b8;text-align:center;margin-top:16px;">
+      Veerify — the command center for martial arts academies.
+    </p>
+  </div>`;
+}
+
 function activationEmailHtml({ ownerName, institutionName, subscriptionEnd }) {
   const expires = subscriptionEnd
     ? new Date(subscriptionEnd).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
@@ -290,14 +348,22 @@ async function sendApprovalEmail({
   const t = getTransporter();
   if (!t) return { ok: false, error: 'SMTP not configured' };
   try {
-    const hasTrial = Number(trialDays) > 0;
-    const subject = hasTrial
-      ? `${institutionName} approved on Veerify — your ${trialDays}-day free trial is live`
-      : `${institutionName} approved on Veerify — complete payment to go live`;
-    const html = approvalEmailHtml({
-      ownerName, institutionName, planName, planPrice, paymentUrl,
-      trialDays, graceDays, effectivePrice, discountEnabled, discountPercent,
-    });
+    const hasTrial   = Number(trialDays) > 0;
+    const hasLink    = !!paymentUrl;
+    const subject = !hasLink
+      ? `${institutionName} approved on Veerify — payment link coming shortly`
+      : hasTrial
+        ? `${institutionName} approved on Veerify — your ${trialDays}-day free trial is live`
+        : `${institutionName} approved on Veerify — complete payment to go live`;
+    const html = hasLink
+      ? approvalEmailHtml({
+          ownerName, institutionName, planName, planPrice, paymentUrl,
+          trialDays, graceDays, effectivePrice, discountEnabled, discountPercent,
+        })
+      : approvalNoLinkEmailHtml({
+          ownerName, institutionName, planName, planPrice,
+          effectivePrice, discountEnabled, discountPercent,
+        });
     const info = await t.sendMail({
       from: `"${FROM_NAME}" <${SMTP_USER}>`,
       to,
@@ -586,11 +652,100 @@ async function sendStudentCredentialsEmail({
   }
 }
 
+// ---------- Branch setup notification ----------
+// Sent to each branch's email when the head office adds it during the
+// setup wizard. The branch login itself is the institution owner's
+// credentials (we don't have a separate per-branch user yet), so the
+// email lists the head-office login plus the branch name/address as
+// proof the branch is registered. This gives the branch manager a
+// receipt and a clear "use these credentials in the Veerify app".
+function branchSetupEmailHtml({
+  branchName, branchAddress, institutionName,
+  ownerName, loginEmail, loginPassword,
+}) {
+  return `
+  <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;
+              max-width:560px;margin:0 auto;padding:24px;color:#1f2937;background:#ffffff;">
+    <p style="font-size:15px;margin:0 0 16px;">Hi there,</p>
+
+    <p style="font-size:15px;line-height:1.6;color:#1f2937;margin:0 0 16px;">
+      <b>${branchName || 'Your branch'}</b> has been registered under
+      <b>${institutionName || 'your academy'}</b> on Veerify. ${ownerName ? `${ownerName} (head admin) added this branch.` : ''}
+    </p>
+
+    ${branchAddress ? `
+    <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;
+                padding:14px;margin:16px 0;font-size:13px;color:#374151;line-height:1.6;">
+      <div style="font-weight:600;color:#111827;margin-bottom:4px;">${branchName || 'Branch'}</div>
+      ${branchAddress}
+    </div>` : ''}
+
+    <p style="font-size:15px;line-height:1.6;color:#1f2937;margin:0 0 16px;">
+      To manage students, classes and reports for this branch, sign in to the
+      <b>Veerify mobile app</b> using your head office's admin credentials:
+    </p>
+
+    <table style="font-size:14px;line-height:1.6;color:#1f2937;margin:0 0 16px;">
+      <tr>
+        <td style="padding:4px 12px 4px 0;color:#4b5563;">Email:</td>
+        <td style="font-family:Consolas,'SF Mono','Monaco',monospace;">${loginEmail || '(head admin email)'}</td>
+      </tr>
+      ${loginPassword ? `
+      <tr>
+        <td style="padding:4px 12px 4px 0;color:#4b5563;">Password:</td>
+        <td style="font-family:Consolas,'SF Mono','Monaco',monospace;">${loginPassword}</td>
+      </tr>` : ''}
+    </table>
+
+    ${!loginPassword ? `
+    <p style="font-size:13px;line-height:1.6;color:#6b7280;margin:0 0 16px;">
+      Use the same password the head admin already set during registration.
+      If you've forgotten it, use "Forgot password" on the app's login screen.
+    </p>` : ''}
+
+    <p style="font-size:13px;line-height:1.6;color:#6b7280;margin:0 0 8px;">
+      Need a separate login for this branch? Reply to this email — we'll set up branch-level admins soon.
+    </p>
+
+    <p style="font-size:14px;line-height:1.6;color:#4b5563;margin:16px 0 8px;">
+      Thanks,<br/>
+      The Veerify team
+    </p>
+  </div>`;
+}
+
+async function sendBranchSetupEmail({
+  to, branchName, branchAddress, institutionName,
+  ownerName, loginEmail, loginPassword,
+}) {
+  const t = getTransporter();
+  if (!t) return { ok: false, error: 'SMTP not configured' };
+  try {
+    const html = branchSetupEmailHtml({
+      branchName, branchAddress, institutionName, ownerName, loginEmail, loginPassword,
+    });
+    const info = await t.sendMail({
+      from: `"${FROM_NAME}" <${SMTP_USER}>`,
+      to,
+      subject: `${branchName || 'Your branch'} added on Veerify — login details`,
+      replyTo: SUPPORT_EMAIL,
+      html,
+      text: toPlainText(html),
+      headers: transactionalHeaders(),
+    });
+    return { ok: true, messageId: info.messageId };
+  } catch (err) {
+    console.error('[mailer] sendBranchSetupEmail failed:', err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
 module.exports = {
   sendApprovalEmail,
   sendActivationEmail,
   sendPasswordResetEmail,
   sendTrainerCredentialsEmail,
   sendStudentCredentialsEmail,
+  sendBranchSetupEmail,
   verifyTransporter,
 };

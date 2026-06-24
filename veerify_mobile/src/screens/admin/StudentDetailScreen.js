@@ -18,11 +18,12 @@
 // route.params.student (passed from the Students list); if absent we render
 // a friendly empty state instead of crashing.
 
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, Image,
   StyleSheet, StatusBar, Alert,
 } from 'react-native';
+import apiClient from '../../api/client';
 import {
   ArrowLeft, MoreHorizontal, Edit3, Phone, Mail, MapPin,
   CalendarRange, GraduationCap, ClipboardCheck, Wallet, TrendingUp,
@@ -32,28 +33,61 @@ import {
 import { palette, spacing, radius, shadows, type } from '../../theme';
 
 // ─── Placeholder timeline / payments — replaced when wired to backend ────────
-const ATTENDANCE = [
-  { date: '17 May',  day: 'Sat', status: 'present' },
-  { date: '15 May',  day: 'Thu', status: 'present' },
-  { date: '13 May',  day: 'Tue', status: 'late'    },
-  { date: '11 May',  day: 'Sun', status: 'present' },
-  { date: '10 May',  day: 'Sat', status: 'absent'  },
-  { date: '08 May',  day: 'Thu', status: 'present' },
-  { date: '06 May',  day: 'Tue', status: 'present' },
-];
+// Placeholder rows have been removed. Until the real
+// /attendance/student/:id and /payments/student/:id endpoints are
+// wired, these arrays stay empty so newly-enrolled students don't
+// see fabricated history (the previous defaults claimed "86% attendance"
+// and "Mr. Sharma (Father)" for every student regardless of who they
+// were). The summary cards now correctly render zeros.
+const ATTENDANCE = [];
+const ATTENDANCE_BARS = [0, 0, 0, 0, 0, 0, 0, 0];
 
-const PAYMENTS = [
-  { id: 1, month: 'May 2026',   amount: 2500, status: 'paid',    date: '05 May' },
-  { id: 2, month: 'Apr 2026',   amount: 2500, status: 'paid',    date: '04 Apr' },
-  { id: 3, month: 'Mar 2026',   amount: 2500, status: 'paid',    date: '06 Mar' },
-  { id: 4, month: 'Feb 2026',   amount: 2500, status: 'pending', date: '— ' },
-];
-
-// 8-week attendance counts (placeholder for the mini chart)
-const ATTENDANCE_BARS = [3, 2, 3, 3, 1, 3, 2, 3];
+// Display labels for the payment_mode column written by the enrollment form.
+const PAYMENT_MODE_LABELS = {
+  cash:   'Cash',
+  online: 'Online',
+  upi:    'UPI',
+  card:   'Card',
+  bank:   'Bank Transfer',
+};
 
 export default function StudentDetailScreen({ navigation, route }) {
   const student = route?.params?.student;
+
+  // Live payment rows for THIS student, derived from
+  // /enrollments/institution/me. Replaces the empty PAYMENTS placeholder
+  // so cash/online payments captured on the enrollment form actually
+  // appear in the Recent Payments card and the Year-to-date summary.
+  const [payments, setPayments] = useState([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!student) return;
+      try {
+        const res  = await apiClient.get('/enrollments/institution/me');
+        const rows = res.data?.enrollments || [];
+        const sid  = student.id ?? student.student_id ?? student.user_id;
+        const mine = rows.filter((e) => e.student_id === sid);
+        const mapped = mine.map((e) => ({
+          id:     e.id,
+          course: e.course_name || '—',
+          amount: Number(e.payment_amount) || 0,
+          status: e.payment_status || 'pending',
+          mode:   e.payment_mode || null,
+          date:   e.paid_at
+            ? new Date(e.paid_at).toLocaleDateString('en-IN', {
+                day: '2-digit', month: 'short', year: 'numeric',
+              })
+            : null,
+        }));
+        if (!cancelled) setPayments(mapped);
+      } catch (err) {
+        console.log('[StudentDetail] payments load error:', err?.message);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [student]);
 
   // Defensive fallback so a fresh route doesn't crash if we forgot to pass data.
   if (!student) {
@@ -71,33 +105,66 @@ export default function StudentDetailScreen({ navigation, route }) {
   const placeholder = (m) => Alert.alert(m, "We'll wire this up next.");
 
   const attendanceStats = computeAttendanceStats(ATTENDANCE);
-  const paymentStats    = computePaymentStats(PAYMENTS);
+  const paymentStats    = computePaymentStats(payments);
 
   return (
     <View style={styles.screen}>
-      <StatusBar barStyle="dark-content" backgroundColor={palette.bg} />
+      <StatusBar barStyle="dark-content" backgroundColor={palette.surface} />
 
-      {/* ───── Gradient header strip ───── */}
+      {/* ───── Top app bar — sits ABOVE the coloured header band ───── */}
+      <View style={styles.topBar}>
+        <RoundButton icon={ArrowLeft} onPress={() => navigation.goBack()} />
+        <Text style={styles.headerTitle}>Student Details</Text>
+        <RoundButton
+          icon={Edit3}
+          onPress={() => navigation.navigate('EditStudent', { student })}
+        />
+      </View>
+
+      {/* Coloured background band — visible behind the profile section,
+          starts BELOW the top bar so the title doesn't sit on the pink. */}
       <View style={[styles.headerBand, { backgroundColor: accent.soft }]} />
+
+      {/* Status pill — pinned to the bottom-right of the pink header band.
+          Lives outside the ScrollView so its absolute position is relative
+          to the screen, not the scrolling content. */}
+      <View
+        pointerEvents="none"
+        style={[
+          styles.statusPillFloating,
+          {
+            backgroundColor: student.active ? palette.green.soft : palette.borderSoft,
+          },
+        ]}
+      >
+        <View
+          style={[
+            styles.statusDot,
+            { backgroundColor: student.active ? palette.green.vivid : palette.textLight },
+          ]}
+        />
+        <Text
+          style={[
+            styles.statusPillText,
+            { color: student.active ? palette.green.on : palette.textMuted },
+          ]}
+        >
+          {student.active ? 'Active' : 'Inactive'}
+        </Text>
+      </View>
 
       <ScrollView
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        {/* ───── Top action row ───── */}
-        <View style={styles.actionRow}>
-          <RoundButton icon={ArrowLeft} onPress={() => navigation.goBack()} />
-          <View style={{ flexDirection: 'row', gap: spacing.sm }}>
-            <RoundButton icon={Edit3} onPress={() => placeholder('Edit Student')} />
-            <RoundButton icon={MoreHorizontal} onPress={() => placeholder('More actions')} />
-          </View>
-        </View>
-
         {/* ───── Profile section ───── */}
         <View style={styles.profileSection}>
           <View style={styles.avatarWrap}>
-            {student.avatar ? (
-              <Image source={{ uri: student.avatar }} style={styles.avatar} />
+            {student.avatar || student.photo_url ? (
+              <Image
+                source={{ uri: student.avatar || student.photo_url }}
+                style={styles.avatar}
+              />
             ) : (
               <View style={[styles.avatar, { backgroundColor: accent.vivid }]}>
                 <Text style={styles.avatarInitial}>
@@ -105,39 +172,11 @@ export default function StudentDetailScreen({ navigation, route }) {
                 </Text>
               </View>
             )}
-            <TouchableOpacity
-              style={styles.avatarEditButton}
-              activeOpacity={0.85}
-              onPress={() => placeholder('Change Photo')}
-            >
-              <Edit3 size={12} color="#fff" strokeWidth={2.4} />
-            </TouchableOpacity>
           </View>
           <Text style={styles.name}>{student.name}</Text>
-          <Text style={styles.studentId}>{student.id}</Text>
-          <View
-            style={[
-              styles.statusPill,
-              {
-                backgroundColor: student.active ? palette.green.soft : palette.borderSoft,
-              },
-            ]}
-          >
-            <View
-              style={[
-                styles.statusDot,
-                { backgroundColor: student.active ? palette.green.vivid : palette.textLight },
-              ]}
-            />
-            <Text
-              style={[
-                styles.statusPillText,
-                { color: student.active ? palette.green.on : palette.textMuted },
-              ]}
-            >
-              {student.active ? 'Active' : 'Inactive'}
-            </Text>
-          </View>
+          {student.course ? (
+            <Text style={styles.studentId}>{student.course}</Text>
+          ) : null}
         </View>
 
         {/* ───── Quick stats (3-up) ───── */}
@@ -162,30 +201,59 @@ export default function StudentDetailScreen({ navigation, route }) {
           />
         </View>
 
-        {/* ───── Contact info ───── */}
+        {/* ───── Contact info ─────
+            Everything below now reads from the real student row from
+            /enrollments/institution/me (which carries student_email,
+            student_phone, address, father_name, mother_name etc). Falls
+            back to "—" when the field is empty so we never invent a
+            value like the previous Mr. Sharma / Bengaluru hard-codes. */}
         <Card title="Contact" subtitle="Reach out if needed">
-          <InfoRow icon={Phone}  label="Phone"   value="+91 98765 43210" onPress={() => placeholder('Call')} />
+          <InfoRow
+            icon={Phone}
+            label="Phone"
+            value={student.phone || '—'}
+            onPress={student.phone ? (() => placeholder('Call')) : undefined}
+          />
           <Divider />
-          <InfoRow icon={Mail}   label="Email"   value={`${student.name?.split(' ')[0].toLowerCase()}@example.com`} />
+          <InfoRow icon={Mail}   label="Email"   value={student.email || '—'} />
           <Divider />
-          <InfoRow icon={MapPin} label="Address" value="Bengaluru, KA — 560001" />
+          <InfoRow icon={MapPin} label="Address" value={student.address || '—'} />
           <Divider />
-          <InfoRow icon={MessageCircle} label="Guardian" value="Mr. Sharma (Father) — +91 98765 12345" />
+          <InfoRow
+            icon={MessageCircle}
+            label="Guardian"
+            value={
+              student.father_name
+                ? `${student.father_name} (Father)`
+                : student.mother_name
+                  ? `${student.mother_name} (Mother)`
+                  : '—'
+            }
+          />
         </Card>
 
         {/* ───── Enrollment ───── */}
         <Card title="Enrollment" subtitle="Course and batch details">
-          <InfoRow icon={GraduationCap} label="Course" value={student.course} accent={accent} />
+          <InfoRow icon={GraduationCap} label="Course" value={student.course || '—'} accent={accent} />
           <Divider />
-          <InfoRow icon={Award}        label="Level"  value={student.level} />
+          <InfoRow icon={Award} label="Level" value={student.level || student.belt_category || '—'} />
           <Divider />
-          <InfoRow icon={CalendarRange} label="Joined" value="12 Jan 2026" />
+          <InfoRow
+            icon={CalendarRange}
+            label="Joined"
+            value={
+              student.enrolled_at
+                ? new Date(student.enrolled_at).toLocaleString('en-IN', {
+                    day: '2-digit', month: 'short', year: 'numeric',
+                  })
+                : '—'
+            }
+          />
           <Divider />
           <InfoRow
             icon={CalendarRange}
             label="Current Batch"
-            value="Batch B-12 • Mon/Wed/Fri • 6:00 PM"
-            onPress={() => placeholder('Open Batch')}
+            value={student.batch || '—'}
           />
         </Card>
 
@@ -238,22 +306,22 @@ export default function StudentDetailScreen({ navigation, route }) {
         </Card>
 
         {/* ───── Payment summary ───── */}
-        <Card title="Payment Summary" subtitle="Year-to-date">
+        <Card title="Payment Summary" subtitle="All enrollments">
           <View style={styles.paySummary}>
-            <PaySummaryItem label="Paid"     value={`₹${(paymentStats.paid / 1000).toFixed(0)}k`} color={palette.green} />
+            <PaySummaryItem label="Paid"    value={formatRupees(paymentStats.paid)}    color={palette.green} />
             <View style={styles.paySplit} />
-            <PaySummaryItem label="Pending"  value={`₹${(paymentStats.pending / 1000).toFixed(1)}k`} color={palette.orange} />
+            <PaySummaryItem label="Pending" value={formatRupees(paymentStats.pending)} color={palette.orange} />
             <View style={styles.paySplit} />
-            <PaySummaryItem label="Next Due" value="05 Jun" color={palette.blue} />
+            <PaySummaryItem label="Enrolments" value={String(payments.length)} color={palette.blue} />
           </View>
         </Card>
 
         {/* ───── Recent payments ───── */}
-        <Card title="Recent Payments" subtitle="Most recent first">
-          {PAYMENTS.map((p, idx) => (
+        <Card title="Recent Payments" subtitle={payments.length ? 'Most recent first' : 'No payments yet'}>
+          {payments.map((p, idx) => (
             <View key={p.id}>
               <PaymentRow payment={p} />
-              {idx < PAYMENTS.length - 1 ? <Divider /> : null}
+              {idx < payments.length - 1 ? <Divider /> : null}
             </View>
           ))}
         </Card>
@@ -359,20 +427,32 @@ function PaymentRow({ payment }) {
     paid:    { color: palette.green,  label: 'Paid'    },
     pending: { color: palette.orange, label: 'Pending' },
     overdue: { color: palette.rose,   label: 'Overdue' },
+    failed:  { color: palette.rose,   label: 'Failed'  },
   };
   const m = map[payment.status] || map.pending;
+  const modeLabel = payment.mode ? (PAYMENT_MODE_LABELS[payment.mode] || payment.mode) : null;
+  const subtitle = payment.status === 'paid'
+    ? `${modeLabel ? `${modeLabel} • ` : ''}${payment.date ? `Paid on ${payment.date}` : 'Paid'}`
+    : 'Due';
   return (
     <View style={styles.payRow}>
       <View style={{ flex: 1 }}>
-        <Text style={styles.payMonth}>{payment.month}</Text>
-        <Text style={styles.payDate}>{payment.status === 'paid' ? `Paid on ${payment.date}` : 'Due'}</Text>
+        <Text style={styles.payMonth}>{payment.course || 'Enrolment'}</Text>
+        <Text style={styles.payDate}>{subtitle}</Text>
       </View>
-      <Text style={styles.payAmount}>₹{payment.amount.toLocaleString()}</Text>
+      <Text style={styles.payAmount}>{formatRupees(payment.amount)}</Text>
       <View style={[styles.payPill, { backgroundColor: m.color.soft }]}>
         <Text style={[styles.payPillText, { color: m.color.on }]}>{m.label}</Text>
       </View>
     </View>
   );
+}
+
+// Formats a rupee amount with thousand separators. ₹0 stays as ₹0 so an
+// unpaid enrolment doesn't render as "₹—".
+function formatRupees(n) {
+  const v = Number(n) || 0;
+  return `₹${v.toLocaleString('en-IN')}`;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -397,23 +477,38 @@ const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: palette.bg },
   muted: { ...type.body, color: palette.textMuted },
 
+  // Top app bar — solid white surface above the coloured band so the
+  // back / title / edit buttons sit on a clean header strip.
+  topBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: spacing.xl,
+    paddingTop: (StatusBar.currentHeight || 24) + spacing.sm,
+    paddingBottom: spacing.md,
+    backgroundColor: palette.surface,
+    borderBottomWidth: 1,
+    borderBottomColor: palette.borderSoft,
+    zIndex: 2,
+  },
+  headerTitle: {
+    ...type.h3,
+    color: palette.text,
+    flex: 1,
+    textAlign: 'center',
+    marginHorizontal: spacing.sm,
+  },
+
+  // Coloured band sits BELOW the top bar (no longer absolute‑positioned at y=0)
   headerBand: {
     position: 'absolute',
-    top: 0, left: 0, right: 0,
-    height: 220,
+    left: 0, right: 0,
+    top: (StatusBar.currentHeight || 24) + 60,
+    height: 180,
   },
 
   scrollContent: {
-    paddingTop: spacing.xxl + 10,
+    paddingTop: spacing.lg,
     paddingHorizontal: spacing.xl,
-  },
-
-  // Top action row
-  actionRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: spacing.lg,
   },
   roundBtn: {
     width: 42, height: 42, borderRadius: 21,
@@ -450,6 +545,22 @@ const styles = StyleSheet.create({
   },
   name: { ...type.h1, color: palette.text },
   studentId: { ...type.caption, color: palette.textMuted, marginTop: 2 },
+  // Floating variant — pinned to the bottom-right of the pink header band.
+  statusPillFloating: {
+    position: 'absolute',
+    right: spacing.xl,
+    // top = (StatusBar height + topBar inner height + band height) - pill height/2
+    // approx: matches the `headerBand.top` + `headerBand.height` minus a bit
+    top: (StatusBar.currentHeight || 24) + 60 + 180 - 28,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 6,
+    borderRadius: radius.pill,
+    zIndex: 3,
+    ...shadows.card,
+  },
   statusPill: {
     flexDirection: 'row',
     alignItems: 'center',

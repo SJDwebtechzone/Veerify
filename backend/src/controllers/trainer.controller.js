@@ -2,6 +2,10 @@ const bcrypt = require('bcrypt');
 const pool = require('../config/db');
 const { ensureCapacity, limitResponse } = require('../utils/planLimits');
 const { sendTrainerCredentialsEmail } = require('../utils/mailer');
+const {
+  validateEmailFormat, validatePhoneFormat,
+  ensureEmailUnique, ensurePhoneUnique,
+} = require('../utils/contactValidation');
 
 // Helper: get admin's institution_id
 const getAdminInstitutionId = async (userId) => {
@@ -29,9 +33,26 @@ exports.createTrainer = async (req, res) => {
     } = req.body;
     const adminId = req.user.id;
 
-    if (!name || !email || !password) {
-      return res.status(400).json({ message: 'Name, email, and password are required' });
+    if (!name || !password) {
+      return res.status(400).json({ message: 'Name and password are required' });
     }
+
+    // ── Email + phone validation (format + uniqueness) ────────────────
+    const eFmt = validateEmailFormat(email, { required: true });
+    if (!eFmt.ok) return res.status(eFmt.status).json(eFmt.body);
+    const pFmt = validatePhoneFormat(phone, { required: false });
+    if (!pFmt.ok) return res.status(pFmt.status).json(pFmt.body);
+
+    const emailUnique = await ensureEmailUnique(eFmt.value);
+    if (!emailUnique.ok) return res.status(emailUnique.status).json(emailUnique.body);
+    if (pFmt.value) {
+      const phoneUnique = await ensurePhoneUnique(pFmt.value);
+      if (!phoneUnique.ok) return res.status(phoneUnique.status).json(phoneUnique.body);
+    }
+
+    // Use the cleaned/normalised values everywhere below.
+    const cleanEmail = eFmt.value;
+    const cleanPhone = pFmt.value;
 
     const institutionId = await getAdminInstitutionId(adminId);
     if (!institutionId) {
@@ -46,12 +67,6 @@ exports.createTrainer = async (req, res) => {
       return res.status(402).json(limitResponse('trainers', overLimit));
     }
 
-    // Check email uniqueness
-    const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
-    if (existing.rows.length > 0) {
-      return res.status(409).json({ message: 'Email already registered' });
-    }
-
     // Use a transaction so both INSERTs succeed or both fail
     await client.query('BEGIN');
 
@@ -62,7 +77,7 @@ exports.createTrainer = async (req, res) => {
       `INSERT INTO users (name, email, phone, password, role, institution_id)
        VALUES ($1, $2, $3, $4, 'trainer', $5)
        RETURNING id, name, email, phone, role`,
-      [name, email, phone, hashedPassword, institutionId]
+      [name, cleanEmail, cleanPhone, hashedPassword, institutionId]
     );
     const user = userResult.rows[0];
 
@@ -362,6 +377,20 @@ exports.updateTrainer = async (req, res) => {
     }
     if (check.rows[0].institution_id !== adminInstitutionId) {
       return res.status(403).json({ message: 'You can only update trainers in your own institution' });
+    }
+
+    // ── Phone validation on edit ──────────────────────────────────────
+    // The trainer's own row is excluded so they can keep their existing
+    // phone. Empty/undefined phone passes (no change to the row below).
+    if (phone !== undefined && phone !== null && String(phone).trim() !== '') {
+      const pFmt = validatePhoneFormat(phone, { required: false });
+      if (!pFmt.ok) return res.status(pFmt.status).json(pFmt.body);
+      if (pFmt.value) {
+        const pUnique = await ensurePhoneUnique(pFmt.value, {
+          excludeUserId: check.rows[0].user_id,
+        });
+        if (!pUnique.ok) return res.status(pUnique.status).json(pUnique.body);
+      }
     }
 
     await client.query('BEGIN');

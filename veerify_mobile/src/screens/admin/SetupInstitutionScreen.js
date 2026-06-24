@@ -27,7 +27,7 @@ import {
   BackHandler, PermissionsAndroid,
 } from 'react-native';
 import {
-  ArrowLeft, ChevronRight, ChevronLeft, Check, Camera, FileText, Plus, Trash2,
+  ArrowLeft, ChevronRight, ChevronLeft, ChevronDown, Check, Camera, FileText, Plus, Trash2,
   Building2, MapPin, ShieldCheck, BarChart3, UserSquare, Calendar, X, Clock,
 } from 'lucide-react-native';
 import { launchImageLibrary, launchCamera, } from 'react-native-image-picker';
@@ -111,9 +111,20 @@ const BOARDS = [
 // on the Accreditation step.
 const AFFILIATION_OPTIONS = ['State', 'National'];
 
-const MEDIUMS = [
-  'English', 'Tamil', 'Hindi', 'Telugu', 'Kannada', 'Malayalam',
-  'Marathi', 'Bengali', 'Gujarati', 'Punjabi',
+// Only Tamil and English are offered as taught-in languages on registration.
+// Add more here if other regions come online.
+const MEDIUMS = ['English', 'Tamil'];
+
+// Per-day operating-hours layout. Order drives the render order of the
+// seven slot cards on Step 4.
+const DAYS_OF_WEEK = [
+  { key: 'monday',    label: 'Monday' },
+  { key: 'tuesday',   label: 'Tuesday' },
+  { key: 'wednesday', label: 'Wednesday' },
+  { key: 'thursday',  label: 'Thursday' },
+  { key: 'friday',    label: 'Friday' },
+  { key: 'saturday',  label: 'Saturday' },
+  { key: 'sunday',    label: 'Sunday' },
 ];
 
 // (Legacy preset list. Replaced by per-day time-slot editor in StepOperations.)
@@ -150,6 +161,7 @@ const BORDER = '#E5E7EB';
 // admin's Branches screen.
 const blankBranch = () => ({
   name: '', address: '', city: '', pincode: '',
+  email: '', contact_number: '',
   latitude: null, longitude: null,
 });
 
@@ -283,6 +295,30 @@ export default function SetupInstitutionScreen({ navigation }) {
               ? inst.medium_of_instruction : [],
             operating_hours_weekday: safeWeekday,
             operating_hours_weekend: safeWeekend,
+            // Hydrate per-day map. Prefer the server's own per-day map
+            // when it sends one (forward path); otherwise seed every
+            // weekday with the legacy weekday slots and Sat/Sun with the
+            // legacy weekend slots so existing rows keep their data.
+            operating_hours_by_day:
+              (inst.operating_hours_by_day && typeof inst.operating_hours_by_day === 'object')
+                ? {
+                    monday:    inst.operating_hours_by_day.monday    || safeWeekday,
+                    tuesday:   inst.operating_hours_by_day.tuesday   || safeWeekday,
+                    wednesday: inst.operating_hours_by_day.wednesday || safeWeekday,
+                    thursday:  inst.operating_hours_by_day.thursday  || safeWeekday,
+                    friday:    inst.operating_hours_by_day.friday    || safeWeekday,
+                    saturday:  inst.operating_hours_by_day.saturday  || safeWeekend,
+                    sunday:    inst.operating_hours_by_day.sunday    || safeWeekend,
+                  }
+                : {
+                    monday:    safeWeekday.length ? safeWeekday : [{ start: '', end: '' }],
+                    tuesday:   safeWeekday.length ? safeWeekday : [{ start: '', end: '' }],
+                    wednesday: safeWeekday.length ? safeWeekday : [{ start: '', end: '' }],
+                    thursday:  safeWeekday.length ? safeWeekday : [{ start: '', end: '' }],
+                    friday:    safeWeekday.length ? safeWeekday : [{ start: '', end: '' }],
+                    saturday:  safeWeekend.length ? safeWeekend : [{ start: '', end: '' }],
+                    sunday:    safeWeekend.length ? safeWeekend : [{ start: '', end: '' }],
+                  },
             // Master / Point of contact
             master_name: inst.master_name || '',
             master_role: inst.master_role || '',
@@ -310,10 +346,21 @@ export default function SetupInstitutionScreen({ navigation }) {
           is_unlimited: isUnlimited,
         });
 
+        // Branch ceiling — single-branch plans (max_branches = 1) should
+        // disable "Add branch" with an upgrade prompt. Treat missing /
+        // zero / >= threshold as unlimited so flaky data doesn't block.
+        const maxBranchesRaw = Number(plan.max_branches);
+        const maxBranches = !Number.isFinite(maxBranchesRaw) || maxBranchesRaw <= 0
+          ? 0
+          : maxBranchesRaw;
+        const branchesUnlimited = maxBranches === 0 || maxBranches >= UNLIMITED_THRESHOLD;
+
         setPlanInfo({
           name: plan.name || 'Selected plan',
           max_students: isUnlimited ? 0 : maxStudents,
           is_unlimited: isUnlimited,
+          max_branches: branchesUnlimited ? 0 : maxBranches,
+          branches_unlimited: branchesUnlimited,
         });
       } catch (err) {
         // Silent — Operations step works with no plan info (no ceiling).
@@ -392,10 +439,21 @@ export default function SetupInstitutionScreen({ navigation }) {
     total_student_capacity: '',
     current_enrollment: '',
     medium_of_instruction: [],
-    // Operating hours are now split into two day-groups (Mon–Fri and
-    // Sat–Sun). Each group is an array of `{ start, end }` slots in
-    // 24-hour "HH:MM" form. Admins can add multiple slots per group
-    // (e.g. a morning batch and an evening batch).
+    // Operating hours are per-day. Each day owns its own slot list of
+    // `{ start, end }` in 24-hour "HH:MM" form so the academy can run
+    // a different schedule on, say, Tuesday vs Wednesday. We still
+    // populate the legacy weekday / weekend arrays on submit (union of
+    // Mon-Fri and Sat-Sun respectively) so older API consumers keep
+    // working without a migration.
+    operating_hours_by_day: {
+      monday:    [{ start: '', end: '' }],
+      tuesday:   [{ start: '', end: '' }],
+      wednesday: [{ start: '', end: '' }],
+      thursday:  [{ start: '', end: '' }],
+      friday:    [{ start: '', end: '' }],
+      saturday:  [{ start: '', end: '' }],
+      sunday:    [{ start: '', end: '' }],
+    },
     operating_hours_weekday: [{ start: '', end: '' }],
     operating_hours_weekend: [{ start: '', end: '' }],
 
@@ -572,7 +630,35 @@ export default function SetupInstitutionScreen({ navigation }) {
   };
 
   // ── Branch repeater ──────────────────────────────────────────────────
-  const addBranch = () => set('branches', [...form.branches, blankBranch()]);
+  // Single-branch plans (max_branches = 1) treat the head-office address
+  // captured on Step 2 as the only branch; tapping "Add branch" pops an
+  // upgrade prompt instead of letting a second card appear.
+  const addBranch = () => {
+    const cap = planInfo?.max_branches;
+    const unlimited = planInfo?.branches_unlimited;
+    if (!unlimited && Number.isFinite(cap) && cap >= 1) {
+      // Wizard treats branches[] as ADDITIONAL beyond the head office, so
+      // the cap-1 extras are allowed. If cap is 1 → no extras at all.
+      const allowedExtras = Math.max(0, cap - 1);
+      if (form.branches.length >= allowedExtras) {
+        confirm({
+          title: 'Upgrade your plan',
+          message:
+            cap === 1
+              ? `Your current plan (${planInfo?.name || 'Selected plan'}) supports only 1 branch — the head office you've already entered above. To add more branches, upgrade to a multi-branch plan.`
+              : `Your current plan allows up to ${cap} branches. You've already added the maximum. Upgrade your plan to add more.`,
+          variant: 'warning',
+          confirmText: 'Upgrade plan',
+          cancelText: 'Maybe later',
+          onConfirm: () => {
+            try { navigation.navigate('PlanSelection'); } catch (_) {}
+          },
+        });
+        return;
+      }
+    }
+    set('branches', [...form.branches, blankBranch()]);
+  };
   const updateBranch = (idx, patch) => {
     const next = [...form.branches];
     next[idx] = { ...next[idx], ...patch };
@@ -734,22 +820,19 @@ export default function SetupInstitutionScreen({ navigation }) {
   const goBack = () => {
     if (stepIdx === 0) {
       // First step — leaving here exits the entire registration flow, so
-      // confirm before discarding whatever they've typed so far.
-      Alert.alert(
-        isEditMode ? 'Discard changes?' : 'Leave registration?',
-        isEditMode
-          ? 'Any edits you\'ve made will be lost. Your previously-submitted details stay on file until super-admin approval.'
-          : 'You\'re still on the first step. If you go back now, any details you\'ve entered will be discarded and you\'ll return to the plan selection screen.',
-        [
-          { text: 'Stay here', style: 'cancel' },
-          {
-            text: isEditMode ? 'Discard' : 'Leave',
-            style: 'destructive',
-            onPress: leaveSetup,
-          },
-        ],
-        { cancelable: true },
-      );
+      // confirm before discarding whatever they've typed so far. Branded
+      // ConfirmDialog instead of the native Alert.alert so it matches the
+      // rest of the app.
+      confirm({
+        title: isEditMode ? 'Discard changes?' : 'Leave registration?',
+        message: isEditMode
+          ? "Any edits you've made will be lost. Your previously-submitted details stay on file until super-admin approval."
+          : "You're still on the first step. If you go back now, any details you've entered will be discarded and you'll return to the plan selection screen.",
+        variant: 'destructive',
+        confirmText: isEditMode ? 'Discard' : 'Leave',
+        cancelText: 'Stay here',
+        onConfirm: leaveSetup,
+      });
     } else {
       setStepIdx(stepIdx - 1);
     }
@@ -835,19 +918,44 @@ export default function SetupInstitutionScreen({ navigation }) {
               ? Number(form.total_student_capacity)
               : null),
         medium_of_instruction: form.medium_of_instruction,
-        // Send only fully-filled slots so the backend doesn't get
-        // half-typed entries. We pass both the structured arrays AND a
-        // human-readable summary string for back-compat with anything
-        // that still reads the legacy `operating_hours` field.
-        operating_hours_weekday: form.operating_hours_weekday.filter(
-          (s) => s.start && s.end,
+        // Per-day operating hours — primary source of truth. Each day's
+        // slot list is filtered down to fully-filled entries so the
+        // backend doesn't get half-typed start/end pairs.
+        operating_hours_by_day: Object.fromEntries(
+          DAYS_OF_WEEK.map((d) => [
+            d.key,
+            (form.operating_hours_by_day?.[d.key] || []).filter(
+              (s) => s.start && s.end,
+            ),
+          ]),
         ),
-        operating_hours_weekend: form.operating_hours_weekend.filter(
-          (s) => s.start && s.end,
-        ),
+        // Legacy weekday/weekend arrays — derived from the per-day map
+        // so older API consumers (admin web, super-admin pages) keep
+        // working without a backend migration. Mon–Fri union → weekday;
+        // Sat+Sun union → weekend, in each case deduped by start+end.
+        operating_hours_weekday: dedupeSlots([
+          ...(form.operating_hours_by_day?.monday    || []),
+          ...(form.operating_hours_by_day?.tuesday   || []),
+          ...(form.operating_hours_by_day?.wednesday || []),
+          ...(form.operating_hours_by_day?.thursday  || []),
+          ...(form.operating_hours_by_day?.friday    || []),
+        ].filter((s) => s.start && s.end)),
+        operating_hours_weekend: dedupeSlots([
+          ...(form.operating_hours_by_day?.saturday || []),
+          ...(form.operating_hours_by_day?.sunday   || []),
+        ].filter((s) => s.start && s.end)),
         operating_hours: formatOperatingHoursSummary(
-          form.operating_hours_weekday,
-          form.operating_hours_weekend,
+          [
+            ...(form.operating_hours_by_day?.monday    || []),
+            ...(form.operating_hours_by_day?.tuesday   || []),
+            ...(form.operating_hours_by_day?.wednesday || []),
+            ...(form.operating_hours_by_day?.thursday  || []),
+            ...(form.operating_hours_by_day?.friday    || []),
+          ],
+          [
+            ...(form.operating_hours_by_day?.saturday || []),
+            ...(form.operating_hours_by_day?.sunday   || []),
+          ],
         ) || null,
 
         // master
@@ -960,6 +1068,7 @@ export default function SetupInstitutionScreen({ navigation }) {
             addBranch={addBranch}
             updateBranch={updateBranch}
             removeBranch={removeBranch}
+            planInfo={planInfo}
           />
         )}
         {stepIdx === 2 && (
@@ -1133,7 +1242,7 @@ function StepCore({ form, set, pickLogo, uploading }) {
 }
 
 // ─── Step 2: Contact & Location ─────────────────────────────────────────
-function StepContact({ form, set, addBranch, updateBranch, removeBranch }) {
+function StepContact({ form, set, addBranch, updateBranch, removeBranch, planInfo }) {
   return (
     <>
       <SectionIntro
@@ -1260,9 +1369,35 @@ function StepContact({ form, set, addBranch, updateBranch, removeBranch }) {
                   maxLength={6}
                 />
               </View>
+              <View style={[styles.row, { marginTop: 6 }]}>
+                <TextInput
+                  style={[styles.input, styles.inputCompact, { flex: 1, marginRight: 6 }]}
+                  placeholder="Branch email"
+                  placeholderTextColor={TEXT_LIGHT}
+                  value={b.email}
+                  onChangeText={(v) => updateBranch(i, { email: v })}
+                  keyboardType="email-address"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+                <TextInput
+                  style={[styles.input, styles.inputCompact, { flex: 1, marginLeft: 6 }]}
+                  placeholder="Contact number"
+                  placeholderTextColor={TEXT_LIGHT}
+                  value={b.contact_number}
+                  onChangeText={(v) => updateBranch(i, { contact_number: v.replace(/[^0-9+]/g, '') })}
+                  keyboardType="phone-pad"
+                  maxLength={15}
+                />
+              </View>
             </View>
           ))
         )}
+        {planInfo && !planInfo.branches_unlimited && planInfo.max_branches === 1 ? (
+          <Text style={styles.singleBranchHint}>
+            Your {planInfo.name} plan supports only 1 branch. Upgrade to add more locations.
+          </Text>
+        ) : null}
         <TouchableOpacity style={styles.addBranchBtn} onPress={addBranch} activeOpacity={0.85}>
           <Plus size={14} color={BRAND} strokeWidth={2.6} />
           <Text style={styles.addBranchText}>Add branch</Text>
@@ -1491,42 +1626,31 @@ function StepOperations({ form, set, planInfo }) {
         </Field>
       </View>
 
-      <Field label="Medium of Instruction" hint="Pick all that apply.">
-        <View style={styles.chipRow}>
-          {MEDIUMS.map((m) => {
-            const on = form.medium_of_instruction.includes(m);
-            return (
-              <TouchableOpacity
-                key={m}
-                style={[styles.chip, on && styles.chipOn]}
-                onPress={() => toggleMedium(m)}
-                activeOpacity={0.85}
-              >
-                {on && <Check size={12} color="#fff" strokeWidth={2.6} style={{ marginRight: 4 }} />}
-                <Text style={[styles.chipText, on && styles.chipTextOn]}>{m}</Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
+      <Field label="Medium of Instruction" hint="Pick the language(s) you teach in.">
+        <MediumDropdown
+          options={MEDIUMS}
+          values={form.medium_of_instruction}
+          onToggle={toggleMedium}
+        />
       </Field>
 
       <Field
         label="Operating Hours"
-        hint="Add the time windows when classes run. Weekdays and weekends are kept separate. Tap Add slot to add more time windows (e.g. a morning and an evening batch)."
+        hint="Tap a day to set its time windows. Use Add slot inside a day for multiple windows (e.g. morning + evening batch). Leave a day collapsed/empty if you're closed that day."
       >
-        <DaySlotsBlock
-          title="Monday – Friday"
-          subtitle="Weekday hours"
-          slots={form.operating_hours_weekday}
-          onChange={(next) => set('operating_hours_weekday', next)}
-        />
-        <View style={{ height: 12 }} />
-        <DaySlotsBlock
-          title="Saturday – Sunday"
-          subtitle="Weekend hours"
-          slots={form.operating_hours_weekend}
-          onChange={(next) => set('operating_hours_weekend', next)}
-        />
+        {DAYS_OF_WEEK.map((d) => (
+          <DayAccordion
+            key={d.key}
+            label={d.label}
+            slots={form.operating_hours_by_day?.[d.key] || [{ start: '', end: '' }]}
+            onChange={(next) =>
+              set('operating_hours_by_day', {
+                ...(form.operating_hours_by_day || {}),
+                [d.key]: next,
+              })
+            }
+          />
+        ))}
       </Field>
     </>
   );
@@ -1551,12 +1675,14 @@ function StepMaster({ form, set }) {
         />
       </Field>
 
-      <PillSelect
-        label="Master Role"
-        options={MASTER_ROLES}
-        value={form.master_role}
-        onChange={(v) => set('master_role', v)}
-      />
+      <Field label="Master Role" hint="Pick the title that fits, or choose Other to type a custom one.">
+        <SimpleDropdown
+          value={form.master_role}
+          onChange={(v) => set('master_role', v)}
+          options={MASTER_ROLES}
+          placeholder="Select role…"
+        />
+      </Field>
       {form.master_role === 'Other' && (
         <Field label="Custom Role">
           <TextInput
@@ -1681,48 +1807,226 @@ function InstitutionTypeSelect({ value, onChange, options }) {
 // toggles whether it's in `values`. Selected chips are solid red; the
 // rest are soft outlined. Below the grid is a short "Other" text input
 // for any skill not on the list.
+// In-place expanding multi-select. Matches the dropdown pattern used on
+// the EnrollmentForm (Blood Group / Belt Category). Closed: a trigger row
+// shows the picked skills (or placeholder) with a chevron. Open: panel
+// expands inline with one tappable row per option + a Check tick for the
+// selected ones. Tapping a row toggles it; the trigger summary updates
+// live and the panel stays open so they can pick several at once.
 function SkillsMultiSelect({ values, onToggle, options, other, onOtherChange }) {
+  const [open, setOpen] = React.useState(false);
+  const selected = Array.isArray(values) ? values : [];
+  const summary = selected.length === 0
+    ? 'Select disciplines…'
+    : selected.length <= 2
+      ? selected.join(', ')
+      : `${selected.slice(0, 2).join(', ')} +${selected.length - 2} more`;
+
   return (
     <View>
-      <View style={styles.chipRow}>
-        {options.map((opt) => {
-          const on = values.includes(opt);
-          return (
-            <TouchableOpacity
-              key={opt}
-              onPress={() => onToggle(opt)}
-              activeOpacity={0.85}
-              style={[styles.skillChip, on && styles.skillChipOn]}
-            >
-              {on ? (
-                <Check
-                  size={12}
-                  color="#fff"
-                  strokeWidth={3}
-                  style={{ marginRight: 4 }}
-                />
-              ) : null}
-              <Text
-                style={[styles.skillChipText, on && styles.skillChipTextOn]}
+      <TouchableOpacity
+        style={[styles.skillsTrigger, open && styles.skillsTriggerOpen]}
+        onPress={() => setOpen((o) => !o)}
+        activeOpacity={0.85}
+      >
+        <Text
+          style={[
+            styles.skillsTriggerText,
+            selected.length === 0 && styles.skillsTriggerPlaceholder,
+          ]}
+          numberOfLines={1}
+        >
+          {summary}
+        </Text>
+        <ChevronDown
+          size={16}
+          color={TEXT_MUTED}
+          strokeWidth={2.2}
+          style={{ transform: [{ rotate: open ? '180deg' : '0deg' }] }}
+        />
+      </TouchableOpacity>
+
+      {open ? (
+        <View style={styles.skillsPanel}>
+          {options.map((opt) => {
+            const on = selected.includes(opt);
+            return (
+              <TouchableOpacity
+                key={opt}
+                style={[styles.skillsItem, on && styles.skillsItemActive]}
+                onPress={() => {
+                  onToggle(opt);
+                  setOpen(false);
+                }}
+                activeOpacity={0.7}
               >
-                {opt}
-              </Text>
-            </TouchableOpacity>
-          );
-        })}
-      </View>
+                <Text
+                  style={[
+                    styles.skillsItemText,
+                    on && styles.skillsItemTextActive,
+                  ]}
+                >
+                  {opt}
+                </Text>
+                {on ? <Check size={14} color={BRAND} strokeWidth={2.8} /> : null}
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      ) : null}
 
       <View style={{ marginTop: 12 }}>
-        <Text style={styles.skillsOtherLabel}>Other (optional)</Text>
+        <Text
+          style={[
+            styles.skillsOtherLabel,
+            selected.length > 0 && styles.skillsOtherLabelDisabled,
+          ]}
+        >
+          Other (optional)
+          {selected.length > 0 ? '  •  disabled while skills are selected' : ''}
+        </Text>
         <TextInput
-          style={styles.input}
-          placeholder="e.g. Wing Chun, Capoeira…"
+          style={[styles.input, selected.length > 0 && styles.inputDisabled]}
+          placeholder={
+            selected.length > 0
+              ? 'Clear selected skills to use this field'
+              : 'e.g. Wing Chun, Capoeira…'
+          }
           placeholderTextColor={TEXT_LIGHT}
           value={other}
           onChangeText={onOtherChange}
           maxLength={60}
+          editable={selected.length === 0}
         />
       </View>
+    </View>
+  );
+}
+
+// ─── MediumDropdown: in-place expanding multi-select for Medium of Instruction ──
+//
+// Same dropdown shape as SkillsMultiSelect but reused for the language(s)
+// the academy teaches in. Closed: trigger row shows the summary; open:
+// inline panel lists every language with a Check tick on the picked ones.
+// Stays open while toggling so the owner can quickly pick more than one.
+function MediumDropdown({ options, values, onToggle }) {
+  const [open, setOpen] = React.useState(false);
+  const selected = Array.isArray(values) ? values : [];
+  const summary = selected.length === 0
+    ? 'Select language(s)…'
+    : selected.join(', ');
+
+  return (
+    <View>
+      <TouchableOpacity
+        style={[styles.skillsTrigger, open && styles.skillsTriggerOpen]}
+        onPress={() => setOpen((o) => !o)}
+        activeOpacity={0.85}
+      >
+        <Text
+          style={[
+            styles.skillsTriggerText,
+            selected.length === 0 && styles.skillsTriggerPlaceholder,
+          ]}
+          numberOfLines={1}
+        >
+          {summary}
+        </Text>
+        <ChevronDown
+          size={16}
+          color={TEXT_MUTED}
+          strokeWidth={2.2}
+          style={{ transform: [{ rotate: open ? '180deg' : '0deg' }] }}
+        />
+      </TouchableOpacity>
+
+      {open ? (
+        <View style={styles.skillsPanel}>
+          {options.map((opt) => {
+            const on = selected.includes(opt);
+            return (
+              <TouchableOpacity
+                key={opt}
+                style={[styles.skillsItem, on && styles.skillsItemActive]}
+                onPress={() => onToggle(opt)}
+                activeOpacity={0.7}
+              >
+                <Text
+                  style={[
+                    styles.skillsItemText,
+                    on && styles.skillsItemTextActive,
+                  ]}
+                >
+                  {opt}
+                </Text>
+                {on ? <Check size={14} color={BRAND} strokeWidth={2.8} /> : null}
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+// ─── DayAccordion: collapsible per-day operating-hours card ────────────
+//
+// Closed: just a tap target with the day name, slot count, and chevron.
+// Open: the underlying DaySlotsBlock so the admin can pick / add / remove
+// time windows. Each day has its own collapsed state — they tap the days
+// they actually run classes on.
+function DayAccordion({ label, slots, onChange }) {
+  // Auto-open if the day already has at least one filled slot, so editing
+  // an existing institution shows existing data without an extra tap.
+  const hasFilled = (slots || []).some((s) => s.start && s.end);
+  const [open, setOpen] = React.useState(hasFilled);
+
+  // Count fully-filled slots (a half-typed row doesn't count toward the
+  // summary because it won't persist on save).
+  const filledCount = (slots || []).filter((s) => s.start && s.end).length;
+  const summary = filledCount === 0
+    ? 'Closed'
+    : filledCount === 1
+      ? `${formatTime12(slots[0].start)} – ${formatTime12(slots[0].end)}`
+      : `${filledCount} time windows`;
+
+  return (
+    <View style={styles.dayAccordion}>
+      <TouchableOpacity
+        style={[styles.dayAccordionHeader, open && styles.dayAccordionHeaderOpen]}
+        onPress={() => setOpen((o) => !o)}
+        activeOpacity={0.85}
+      >
+        <View style={{ flex: 1 }}>
+          <Text style={styles.dayAccordionLabel}>{label}</Text>
+          <Text
+            style={[
+              styles.dayAccordionSummary,
+              filledCount === 0 && styles.dayAccordionSummaryClosed,
+            ]}
+            numberOfLines={1}
+          >
+            {summary}
+          </Text>
+        </View>
+        <ChevronDown
+          size={16}
+          color={TEXT_MUTED}
+          strokeWidth={2.4}
+          style={{ transform: [{ rotate: open ? '180deg' : '0deg' }] }}
+        />
+      </TouchableOpacity>
+
+      {open ? (
+        <View style={styles.dayAccordionBody}>
+          <DaySlotsBlock
+            title={label}
+            subtitle="Class hours"
+            slots={slots}
+            onChange={onChange}
+          />
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -2427,6 +2731,22 @@ function DaySlotsBlock({ title, subtitle, slots, onChange }) {
   );
 }
 
+// Collapse a list of `{ start, end }` slots into a unique set by
+// "HH:MM-HH:MM" key. Used when deriving the legacy weekday/weekend
+// arrays from the per-day map so a slot the academy runs every weekday
+// only appears once on the legacy array.
+function dedupeSlots(slots) {
+  const seen = new Set();
+  const out = [];
+  for (const s of (slots || [])) {
+    const k = `${s.start}-${s.end}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push({ start: s.start, end: s.end });
+  }
+  return out;
+}
+
 // Build a one-liner from the two slot arrays for back-compat with the
 // legacy `operating_hours` text column. Example:
 //   "Mon–Fri 09:00 AM – 12:00 PM, 05:00 PM – 09:00 PM · Sat–Sun 10:00 AM – 06:00 PM"
@@ -2653,6 +2973,65 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
     letterSpacing: 0.6,
     marginBottom: 6,
+  },
+  skillsOtherLabelDisabled: {
+    color: TEXT_LIGHT,
+  },
+
+  // ── Skills dropdown (in-place expanding multi-select) ────────────────
+  skillsTrigger: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: SURFACE,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    borderWidth: 1,
+    borderColor: BORDER,
+  },
+  skillsTriggerOpen: {
+    borderColor: BRAND,
+  },
+  skillsTriggerText: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '700',
+    color: TEXT,
+    marginRight: 8,
+  },
+  skillsTriggerPlaceholder: {
+    color: TEXT_LIGHT,
+    fontWeight: '500',
+  },
+  skillsPanel: {
+    marginTop: 6,
+    backgroundColor: SURFACE,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: BORDER,
+    overflow: 'hidden',
+  },
+  skillsItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F3F5',
+  },
+  skillsItemActive: {
+    backgroundColor: BRAND_SOFT,
+  },
+  skillsItemText: {
+    fontSize: 14,
+    color: TEXT,
+    fontWeight: '600',
+  },
+  skillsItemTextActive: {
+    color: BRAND,
+    fontWeight: '800',
   },
 
   // ── Date picker (trigger + inline calendar) ─────────────────────────
@@ -2915,6 +3294,16 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   addBranchText: { color: BRAND, fontWeight: '800', fontSize: 13 },
+  singleBranchHint: {
+    fontSize: 11.5,
+    fontWeight: '600',
+    color: TEXT_MUTED,
+    marginTop: 8,
+    marginBottom: 2,
+    textAlign: 'center',
+    paddingHorizontal: 8,
+    lineHeight: 16,
+  },
 
   // ── Day-slots editor (Mon–Fri / Sat–Sun blocks) ────────────────────
   daySlotsCard: {
@@ -2930,6 +3319,46 @@ const styles = StyleSheet.create({
     gap: 8,
     marginBottom: 8,
   },
+  // ── Per-day collapsible accordion ───────────────────────────────────
+  dayAccordion: {
+    backgroundColor: SURFACE,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: BORDER,
+    marginTop: 8,
+    overflow: 'hidden',
+  },
+  dayAccordionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  dayAccordionHeaderOpen: {
+    borderBottomWidth: 1,
+    borderBottomColor: BORDER,
+  },
+  dayAccordionLabel: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: TEXT,
+  },
+  dayAccordionSummary: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: BRAND,
+    marginTop: 2,
+  },
+  dayAccordionSummaryClosed: {
+    color: TEXT_LIGHT,
+    fontWeight: '600',
+  },
+  dayAccordionBody: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: BG,
+  },
+
   daySlotsHeaderIcon: {
     width: 24,
     height: 24,
@@ -2995,9 +3424,6 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: BRAND,
   },
-
-  // Compact tap target for one TimeField (start / end). Same visual
-  // weight as the input style, but row-aligned with the clock icon.
   timeTrigger: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -3016,17 +3442,10 @@ const styles = StyleSheet.create({
     color: TEXT,
     fontWeight: '700',
   },
-
-  // Greyed-out variant of `input` used when the field is intentionally
-  // disabled (e.g. Total Capacity on an Unlimited plan).
   inputDisabled: {
     backgroundColor: BG,
     color: TEXT_LIGHT,
   },
-
-  // ── Plan ceiling badge above the Operations capacity row ───────────
-  // Finite plans → solid red soft pill ("Up to 30 students").
-  // Unlimited plans → green pill ("Unlimited students").
   planBadge: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -3057,10 +3476,6 @@ const styles = StyleSheet.create({
     color: TEXT,
     textAlign: 'right',
   },
-
-  // ── Operations step explainer card ─────────────────────────────────
-  // Soft-red info box that defines "Total Student Capacity" vs.
-  // "Current Enrollment" so admins fill the right number into each.
   opsNoteCard: {
     flexDirection: 'row',
     gap: 10,
@@ -3099,121 +3514,9 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: BRAND,
   },
-
-  // Asterisk footnote line under the certificate upload, calling out the
-  // PDF-only + max-size rule.
-  fileRuleNote: {
-    marginTop: 6,
-    fontSize: 11,
-    color: BRAND,
-    fontWeight: '700',
-    letterSpacing: 0.2,
-  },
-
-  // ── Head-office Location capture ────────────────────────────────────
-  locCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    backgroundColor: '#ECFDF5',
-    borderWidth: 1,
-    borderColor: '#10B981',
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    marginBottom: 10,
-  },
-  locIconWrap: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  locTitle: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: '#065F46',
-  },
-  locDetail: {
-    fontSize: 11,
-    color: '#047857',
-    fontWeight: '600',
-    marginTop: 1,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  locClearBtn: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#fff',
-  },
-  locBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    backgroundColor: BRAND,
-    borderRadius: 12,
-    paddingVertical: 12,
-  },
-  locBtnText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '800',
-  },
-
-  // ── Auto-counted "No. of Branches" card (display-only) ───────────────
-  branchCountCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: BRAND_SOFT,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: BRAND,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    gap: 12,
-  },
-  branchCountIconWrap: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: SURFACE,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  branchCountValue: {
-    fontSize: 22,
-    fontWeight: '800',
-    color: BRAND,
-    lineHeight: 26,
-  },
-  branchCountCaption: {
-    fontSize: 11,
-    color: TEXT_MUTED,
-    fontWeight: '600',
-    marginTop: 1,
-  },
-
-  // Review box (step 5 footer)
-  reviewBox: {
-    backgroundColor: BRAND_SOFT,
-    borderRadius: 12,
-    padding: 14,
-    marginTop: 8,
-  },
-  reviewTitle: { fontSize: 14, fontWeight: '800', color: '#991B1B' },
-  reviewBody: { fontSize: 12, color: '#7F1D1D', marginTop: 4, lineHeight: 17 },
-
-  // Footer / button bar
   footer: {
-    flexDirection: 'row',
-    gap: 10,
-    paddingHorizontal: 16, paddingVertical: 12, paddingBottom: 22,
+    flexDirection: 'row', gap: 12,
+    paddingHorizontal: 20, paddingTop: 12, paddingBottom: 14,
     backgroundColor: SURFACE,
     borderTopWidth: 1, borderTopColor: BORDER,
   },
@@ -3227,3 +3530,4 @@ const styles = StyleSheet.create({
   btnPrimary: { backgroundColor: BRAND, flex: 1.6 },
   btnPrimaryText: { fontSize: 14, fontWeight: '800', color: '#fff' },
 });
+

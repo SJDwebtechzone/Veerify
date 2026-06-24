@@ -46,6 +46,10 @@ interface Branch {
   address?: string;
   city?: string;
   pincode?: string;
+  // Captured on the mobile setup wizard's branches step. Optional so old
+  // institutions that pre-date the email/phone fields still render.
+  email?: string;
+  contact_number?: string;
 }
 
 interface Institution {
@@ -539,6 +543,26 @@ export function InstitutionDetail() {
                         <p className="text-xs text-gray-500 mt-1">
                           {[b.city, b.pincode].filter(Boolean).join(' · ')}
                         </p>
+                      ) : null}
+                      {(b.email || b.contact_number) ? (
+                        <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 pt-2 border-t border-gray-100">
+                          {b.email ? (
+                            <a
+                              href={`mailto:${b.email}`}
+                              className="text-xs text-blue-600 hover:underline inline-flex items-center gap-1"
+                            >
+                              ✉ {b.email}
+                            </a>
+                          ) : null}
+                          {b.contact_number ? (
+                            <a
+                              href={`tel:${b.contact_number}`}
+                              className="text-xs text-gray-700 hover:underline inline-flex items-center gap-1"
+                            >
+                              ☎ {b.contact_number}
+                            </a>
+                          ) : null}
+                        </div>
                       ) : null}
                     </div>
                   ))}

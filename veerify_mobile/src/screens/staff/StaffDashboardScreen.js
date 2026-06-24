@@ -68,17 +68,22 @@ export default function StaffDashboardScreen({ navigation }) {
   // pretty name in the header. Falls back to `user` from AuthContext when
   // the fetch hasn't returned yet so the header never flashes empty.
   const [me, setMe] = useState(null);
+  // Upcoming institution events — published by the academy admin via
+  // /institutions/me/events, fanned out to every linked trainer here.
+  const [events, setEvents] = useState([]);
 
   const load = useCallback(async () => {
     try {
-      const [batchRes, leaveRes, meRes] = await Promise.all([
+      const [batchRes, leaveRes, meRes, eventsRes] = await Promise.all([
         apiClient.get('/batches/trainer/my').catch(() => ({ data: { batches: [] } })),
         apiClient.get('/trainer-leave-requests/my').catch(() => ({ data: { leave_requests: [] } })),
         apiClient.get('/trainers/me').catch(() => ({ data: { trainer: null } })),
+        apiClient.get('/institutions/me/events').catch(() => ({ data: { events: [] } })),
       ]);
       setBatches(batchRes.data?.batches || []);
       setMyLeaves(leaveRes.data?.leave_requests || []);
       setMe(meRes.data?.trainer || meRes.data || null);
+      setEvents(eventsRes.data?.events || []);
     } catch (err) {
       console.log('[StaffDashboard] load error:', err?.message);
     } finally {
@@ -316,7 +321,74 @@ export default function StaffDashboardScreen({ navigation }) {
           ))}
         </View>
       )}
+
+      {/* ───── Upcoming events ─────
+          Published by the academy admin via /institutions/me/events.
+          Includes globally-curated events too (super-admin rows where
+          institution_id IS NULL). */}
+      {events.length > 0 ? (
+        <>
+          <SectionHeader title="Upcoming Events" />
+          <View style={{ paddingHorizontal: 16, marginBottom: 24 }}>
+            {events.slice(0, 5).map((ev) => (
+              <EventRow
+                key={ev.id}
+                event={ev}
+                onPress={() => navigation.navigate('EventDetail', { event: ev })}
+              />
+            ))}
+          </View>
+        </>
+      ) : null}
     </ScrollView>
+  );
+}
+
+// Tiny event card used in the trainer dashboard. Renders the date as a
+// red-tinted block on the left + title/subtitle/location to the right.
+// Tap to open the shared EventDetail screen.
+function EventRow({ event, onPress }) {
+  const d = event.event_date ? new Date(event.event_date) : null;
+  const day = d ? String(d.getDate()).padStart(2, '0') : '--';
+  const mon = d ? d.toLocaleString('en-US', { month: 'short' }).toUpperCase() : '---';
+  return (
+    <TouchableOpacity
+      onPress={onPress}
+      activeOpacity={0.85}
+      style={{
+        flexDirection: 'row', alignItems: 'center', gap: 12,
+        padding: 12, marginBottom: 8,
+        backgroundColor: '#FFFFFF',
+        borderRadius: 12,
+        borderWidth: 1, borderColor: '#E5E7EB',
+      }}
+    >
+      <View
+        style={{
+          width: 48, height: 56, borderRadius: 10,
+          backgroundColor: '#FFE4E6',
+          alignItems: 'center', justifyContent: 'center',
+        }}
+      >
+        <Text style={{ fontSize: 16, fontWeight: '900', color: '#E63946' }}>{day}</Text>
+        <Text style={{ fontSize: 9, fontWeight: '800', color: '#E63946', letterSpacing: 0.5 }}>{mon}</Text>
+      </View>
+      <View style={{ flex: 1 }}>
+        <Text style={{ fontSize: 14, fontWeight: '800', color: '#111827' }} numberOfLines={1}>
+          {event.title}
+        </Text>
+        {event.subtitle ? (
+          <Text style={{ fontSize: 12, color: '#6B7280', marginTop: 2, fontWeight: '600' }} numberOfLines={1}>
+            {event.subtitle}
+          </Text>
+        ) : null}
+        {event.location ? (
+          <Text style={{ fontSize: 11, color: '#9CA3AF', marginTop: 2 }} numberOfLines={1}>
+            📍 {event.location}
+          </Text>
+        ) : null}
+      </View>
+    </TouchableOpacity>
   );
 }
 
@@ -569,10 +641,7 @@ const styles = StyleSheet.create({
     backgroundColor: palette.surface,
     borderRadius: radius.lg,
     padding: spacing.xl,
-    alignItems: 'center',
-    gap: 6,
-    ...shadows.card,
+    alignItems: 'center', justifyContent: 'center',
+    minHeight: 120,
   },
-  emptyTitle: { ...type.bodyBold, color: palette.text, marginTop: 4 },
-  emptySub: { ...type.caption, color: palette.textMuted, textAlign: 'center' },
 });

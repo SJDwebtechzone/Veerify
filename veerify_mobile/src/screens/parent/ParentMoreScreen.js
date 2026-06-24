@@ -28,6 +28,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { useChild } from '../../context/ChildContext';
 import { palette, spacing, radius, shadows, type } from '../../theme';
+import { confirm } from '../../components/ConfirmDialog';
 
 const BELTS = [
   { key: 'white',  label: 'White',  bg: '#FFFFFF', fg: '#111827', border: '#E5E7EB' },
@@ -45,14 +46,14 @@ export default function ParentMoreScreen({ navigation }) {
   const { activeChild, list } = useChild();
 
   const handleSignOut = () => {
-    Alert.alert(
-      'Sign out',
-      'You will need to sign in again to view your child\'s details.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Sign out', style: 'destructive', onPress: () => logout?.() },
-      ],
-    );
+    confirm({
+      title: 'Sign out?',
+      message: 'You will need to sign in again to view your child\'s details.',
+      variant: 'destructive',
+      confirmText: 'Sign out',
+      cancelText: 'Cancel',
+      onConfirm: () => logout?.(),
+    });
   };
 
   const childId = activeChild?.child_id ?? null;

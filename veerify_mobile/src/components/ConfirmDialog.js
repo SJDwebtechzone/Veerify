@@ -131,9 +131,29 @@ export default function ConfirmDialog({
             { transform: [{ scale }] },
           ]}
         >
-          {/* Accent icon at the top */}
-          <View style={[styles.iconWrap, { backgroundColor: theme.accentSoft }]}>
-            <Icon size={26} color={theme.accent} strokeWidth={2.2} />
+          {/* Accent stripe at the top of the card — picks up the theme
+              color so the dialog feels intentional, not stock. */}
+          <View style={[styles.accentStripe, { backgroundColor: theme.accent }]} />
+
+          {/* Icon with concentric glow rings — the soft outer rings give
+              the icon depth so it reads as a polished focal point rather
+              than a flat coloured circle. */}
+          <View style={styles.iconStage}>
+            <View
+              style={[
+                styles.iconHaloOuter,
+                { backgroundColor: theme.accentSoft, opacity: 0.55 },
+              ]}
+            />
+            <View
+              style={[
+                styles.iconHaloInner,
+                { backgroundColor: theme.accentSoft },
+              ]}
+            />
+            <View style={[styles.iconWrap, { backgroundColor: theme.accent }]}>
+              <Icon size={30} color="#FFFFFF" strokeWidth={2.4} />
+            </View>
           </View>
 
           {/* Close (×) — gives the user a third way out besides Cancel/backdrop. */}
@@ -144,7 +164,7 @@ export default function ConfirmDialog({
               hitSlop={6}
               activeOpacity={0.7}
             >
-              <X size={16} color="#94A3B8" strokeWidth={2.4} />
+              <X size={16} color="#64748B" strokeWidth={2.4} />
             </TouchableOpacity>
           ) : null}
 
@@ -167,10 +187,13 @@ export default function ConfirmDialog({
               style={[
                 styles.btn,
                 styles.btnPrimary,
-                { backgroundColor: theme.confirmBg },
+                {
+                  backgroundColor: theme.confirmBg,
+                  shadowColor: theme.confirmBg,
+                },
               ]}
               onPress={onConfirm}
-              activeOpacity={0.85}
+              activeOpacity={0.88}
             >
               <Text style={[styles.btnPrimaryText, { color: theme.confirmText }]}>
                 {confirmText}
@@ -246,7 +269,9 @@ export function ConfirmDialogHost() {
 const styles = StyleSheet.create({
   backdrop: {
     flex: 1,
-    backgroundColor: 'rgba(15, 23, 42, 0.55)',
+    // Slightly deeper backdrop for premium focus — lifts the white card
+    // off the page and centres the user's attention on the decision.
+    backgroundColor: 'rgba(8, 15, 30, 0.62)',
     alignItems: 'center',
     justifyContent: 'center',
     padding: 24,
@@ -255,55 +280,85 @@ const styles = StyleSheet.create({
     width: '100%',
     maxWidth: 360,
     backgroundColor: '#FFFFFF',
-    borderRadius: 18,
-    paddingTop: 28,
-    paddingBottom: 20,
+    borderRadius: 22,
+    paddingTop: 34,
+    paddingBottom: 22,
     paddingHorizontal: 24,
     alignItems: 'center',
+    overflow: 'hidden',
     ...Platform.select({
       ios: {
         shadowColor: '#0F172A',
-        shadowOpacity: 0.18,
-        shadowRadius: 24,
-        shadowOffset: { width: 0, height: 14 },
+        shadowOpacity: 0.22,
+        shadowRadius: 28,
+        shadowOffset: { width: 0, height: 18 },
       },
-      android: { elevation: 8 },
+      android: { elevation: 14 },
     }),
   },
-  iconWrap: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
+
+  // Thin coloured accent stripe at the very top of the card.
+  accentStripe: {
+    position: 'absolute',
+    top: 0, left: 0, right: 0,
+    height: 4,
+  },
+
+  // Icon stage with concentric soft rings for depth.
+  iconStage: {
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 14,
+    marginBottom: 18,
+    height: 80,
+    width: 80,
   },
+  iconHaloOuter: {
+    position: 'absolute',
+    width: 80, height: 80, borderRadius: 40,
+  },
+  iconHaloInner: {
+    position: 'absolute',
+    width: 64, height: 64, borderRadius: 32,
+  },
+  iconWrap: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
   closeBtn: {
     position: 'absolute',
-    top: 10,
-    right: 10,
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+    top: 12,
+    right: 12,
+    width: 30,
+    height: 30,
+    borderRadius: 15,
     backgroundColor: '#F1F5F9',
     alignItems: 'center',
     justifyContent: 'center',
+    zIndex: 2,
   },
+
   title: {
-    fontSize: 18,
+    fontSize: 20,
     fontWeight: '800',
     color: '#0F172A',
     textAlign: 'center',
-    marginBottom: 6,
+    marginBottom: 8,
+    letterSpacing: -0.2,
   },
   message: {
-    fontSize: 14,
+    fontSize: 14.5,
     fontWeight: '500',
     color: '#475569',
     textAlign: 'center',
-    lineHeight: 20,
-    marginBottom: 18,
+    lineHeight: 21,
+    marginBottom: 22,
+    paddingHorizontal: 4,
   },
+
   btnRow: {
     flexDirection: 'row',
     width: '100%',
@@ -311,29 +366,41 @@ const styles = StyleSheet.create({
   },
   btn: {
     flex: 1,
-    paddingVertical: 12,
-    borderRadius: 12,
+    paddingVertical: 14,
+    borderRadius: 13,
     alignItems: 'center',
     justifyContent: 'center',
   },
   btnGhost: {
     backgroundColor: '#F1F5F9',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
   },
   btnGhostText: {
     fontSize: 14,
     fontWeight: '700',
     color: '#475569',
+    letterSpacing: 0.1,
   },
   btnPrimary: {
     backgroundColor: '#E63946',
+    // Coloured glow under the primary button so the eye lands here first.
+    ...Platform.select({
+      ios: {
+        shadowOpacity: 0.32,
+        shadowRadius: 14,
+        shadowOffset: { width: 0, height: 8 },
+      },
+      android: { elevation: 6 },
+    }),
   },
   btnPrimaryText: {
-    fontSize: 14,
+    fontSize: 14.5,
     fontWeight: '800',
-    letterSpacing: 0.2,
+    letterSpacing: 0.3,
   },
   destructiveLink: {
-    marginTop: 12,
+    marginTop: 14,
     paddingVertical: 4,
   },
   destructiveLinkText: {

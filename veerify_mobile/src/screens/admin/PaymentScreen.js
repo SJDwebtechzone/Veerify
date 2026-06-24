@@ -6,6 +6,8 @@ import {
 import apiClient from '../../api/client';
 import { useAuth } from '../../context/AuthContext';
 import { colors } from '../../utils/styles';
+import { confirm } from '../../components/ConfirmDialog';
+import PaymentSuccessOverlay from '../../components/PaymentSuccessOverlay';
 
 // Payment for new academies happens via the link Razorpay-emails the owner
 // after the super-admin approves the academy. The mobile app does NOT initiate
@@ -27,6 +29,7 @@ export default function PaymentScreen({ navigation }) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [successOpen, setSuccessOpen] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -58,19 +61,27 @@ export default function PaymentScreen({ navigation }) {
     try {
       const status = await refreshOnboardingStatus();
       if (status === 'active') {
-        Alert.alert(
-          '🎉 Payment confirmed!',
-          'Your academy is now live. Welcome to Veerify!',
-          [{ text: 'Get Started', onPress: () => navigation.replace('AdminDashboard') }],
-        );
+        // Switch from the plain ConfirmDialog to the animated full-screen
+        // celebration overlay — confetti + spring check + slide-up button.
+        setSuccessOpen(true);
       } else {
-        Alert.alert(
-          'Still waiting',
-          "We haven't received confirmation yet. Razorpay can take up to a minute after you complete payment. Try again shortly, or check your email for the payment link.",
-        );
+        confirm({
+          title: 'Still waiting',
+          message:
+            "We haven't received confirmation yet. Razorpay can take up to a minute after you complete payment. Try again shortly, or check your email for the payment link.",
+          variant: 'warning',
+          hideCancel: true,
+          confirmText: 'OK',
+        });
       }
     } catch (err) {
-      Alert.alert('Error', err?.message || 'Could not refresh status');
+      confirm({
+        title: 'Could not refresh',
+        message: err?.message || 'Network error — please try again.',
+        variant: 'destructive',
+        hideCancel: true,
+        confirmText: 'OK',
+      });
     } finally {
       setChecking(false);
     }
@@ -83,14 +94,14 @@ export default function PaymentScreen({ navigation }) {
   };
 
   const handleSignOut = () => {
-    Alert.alert(
-      'Sign out?',
-      'You can come back and sign in any time once you complete payment.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Sign out', style: 'destructive', onPress: () => logout() },
-      ],
-    );
+    confirm({
+      title: 'Sign out?',
+      message: 'You can come back and sign in any time once you complete payment.',
+      variant: 'destructive',
+      confirmText: 'Sign out',
+      cancelText: 'Cancel',
+      onConfirm: () => logout(),
+    });
   };
 
   if (loading) {
@@ -104,6 +115,7 @@ export default function PaymentScreen({ navigation }) {
   const ownerEmail = institution?.owner_email || user?.email || 'your email';
 
   return (
+    <>
     <ScrollView
       style={styles.screen}
       contentContainerStyle={styles.content}
@@ -187,6 +199,16 @@ export default function PaymentScreen({ navigation }) {
 
       <View style={{ height: 40 }} />
     </ScrollView>
+
+    <PaymentSuccessOverlay
+      visible={successOpen}
+      institutionName={institution?.name}
+      onContinue={() => {
+        setSuccessOpen(false);
+        navigation.replace('AdminDashboard');
+      }}
+    />
+    </>
   );
 }
 
@@ -272,7 +294,6 @@ const styles = StyleSheet.create({
     fontSize: 12, color: colors.textLight, textAlign: 'center',
     marginBottom: 18,
   },
-
   signOutLink: {
     alignItems: 'center',
     paddingVertical: 12,

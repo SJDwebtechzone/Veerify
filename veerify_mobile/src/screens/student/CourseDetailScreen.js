@@ -34,6 +34,7 @@ import apiClient from '../../api/client';
 import { useAuth } from '../../context/AuthContext';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 import YouTubeThumbPlayer from '../../components/YouTubeThumbPlayer';
+import { confirm } from '../../components/ConfirmDialog';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const ASSET_HOST = (apiClient.defaults.baseURL || '').replace(/\/api\/?$/, '');
@@ -94,25 +95,25 @@ export default function CourseDetailScreen({ navigation, route }) {
 
   const triggerPaywall = (action) => {
     if (isGuest) {
-      Alert.alert(
-        'Login to Continue Learning',
-        `Sign in to ${action.toLowerCase()} and unlock your training.`,
-        [
-          { text: 'Not now', style: 'cancel' },
-          { text: 'Login', onPress: goToLogin },
-        ],
-      );
+      confirm({
+        title: 'Login to Continue Learning',
+        message: `Sign in to ${action.toLowerCase()} and unlock your training.`,
+        variant: 'destructive',
+        confirmText: 'Login',
+        cancelText: 'Not now',
+        onConfirm: goToLogin,
+      });
       return true;
     }
     if (!isPaid) {
-      Alert.alert(
-        'Subscribe to Unlock Premium Access',
-        `${action} requires an active subscription. Pick a plan from your Profile.`,
-        [
-          { text: 'Not now', style: 'cancel' },
-          { text: 'View Plans', onPress: () => navigation.navigate('Profile') },
-        ],
-      );
+      confirm({
+        title: 'Subscribe to Unlock Premium Access',
+        message: `${action} requires an active subscription. Pick a plan from your Profile.`,
+        variant: 'warning',
+        confirmText: 'View Plans',
+        cancelText: 'Not now',
+        onConfirm: () => navigation.navigate('Profile'),
+      });
       return true;
     }
     return false;
@@ -121,14 +122,14 @@ export default function CourseDetailScreen({ navigation, route }) {
   const handleEnroll = () => {
     // Guests must log in first — the enrollment form is per-user.
     if (isGuest) {
-      Alert.alert(
-        'Login to Continue Learning',
-        'Sign in to enroll in this program.',
-        [
-          { text: 'Not now', style: 'cancel' },
-          { text: 'Login', onPress: goToLogin },
-        ],
-      );
+      confirm({
+        title: 'Login to Continue Learning',
+        message: 'Sign in to enroll in this program.',
+        variant: 'destructive',
+        confirmText: 'Login',
+        cancelText: 'Not now',
+        onConfirm: goToLogin,
+      });
       return;
     }
 

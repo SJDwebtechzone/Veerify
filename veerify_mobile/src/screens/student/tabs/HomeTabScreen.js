@@ -111,10 +111,15 @@ export default function HomeTabScreen({ navigation }) {
       const [bannersRes, catsRes, evtRes, nearbyRes] = await Promise.all([
         apiClient.get('/cms/banners?active=true').catch(() => ({ data: { items: [] } })),
         apiClient.get('/cms/categories?active=true').catch(() => ({ data: { items: [] } })),
-        // Events: any institution id gives the same global rows back, but the
-        // route requires an id. Use 1 as a stub; once events are truly
-        // institution-scoped we'll switch back to selectedInstitution.id.
-        apiClient.get(`/institutions/${selectedInstitution?.id || 1}/events`).catch(() => ({ data: { events: [] } })),
+        // Events:
+        //   - Logged-in users hit /institutions/me/events which resolves the
+        //     institution from their JWT (covers students who never used the
+        //     academy picker — their user.institution_id is the source of truth).
+        //   - Guests fall back to the academy they picked, or stub id=1 for
+        //     globals-only when nothing is picked.
+        user
+          ? apiClient.get('/institutions/me/events').catch(() => ({ data: { events: [] } }))
+          : apiClient.get(`/institutions/${selectedInstitution?.id || 1}/events`).catch(() => ({ data: { events: [] } })),
         // Hybrid academies/nearby — accepts either GPS coords or a
         // pincode-derived origin from NearbyLocationPicker. When no
         // origin is set yet the backend falls back to a "newest first"

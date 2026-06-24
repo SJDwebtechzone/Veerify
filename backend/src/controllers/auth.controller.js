@@ -3,6 +3,11 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const pool = require('../config/db');
 const { sendPasswordResetEmail } = require('../utils/mailer');
+const {
+  validateEmailFormat, validatePhoneFormat,
+  ensureEmailUnique, ensurePhoneUnique,
+  normaliseEmail, normalisePhone,
+} = require('../utils/contactValidation');
 
 // How long a password-reset OTP stays valid.
 const RESET_OTP_TTL_MINUTES = 10;
@@ -15,8 +20,8 @@ exports.register = async (req, res) => {
     const { name, email, phone, password, role } = req.body;
 
     // Basic validation
-    if (!name || !email || !password || !role) {
-      return res.status(400).json({ message: 'Name, email, password, and role are required' });
+    if (!name || !password || !role) {
+      return res.status(400).json({ message: 'Name, password, and role are required' });
     }
 
     // Check if role is valid
@@ -25,10 +30,31 @@ exports.register = async (req, res) => {
       return res.status(400).json({ message: 'Invalid role. Must be admin, trainer, or student' });
     }
 
+    // ── Email + phone validation (format + uniqueness) ────────────────
+    // Phone is optional here (legacy: register form has it as optional)
+    // but if supplied it must be a real 10-digit Indian mobile.
+    const eFmt = validateEmailFormat(email, { required: true });
+    if (!eFmt.ok) return res.status(eFmt.status).json(eFmt.body);
+    const pFmt = validatePhoneFormat(phone, { required: false });
+    if (!pFmt.ok) return res.status(pFmt.status).json(pFmt.body);
+    // Phone uniqueness is enforced here; email uniqueness is handled
+    // by the existing "restore deleted" branch below, so we keep that
+    // logic intact and only block live duplicates on phone here.
+    if (pFmt.value) {
+      const phoneUnique = await ensurePhoneUnique(pFmt.value);
+      if (!phoneUnique.ok) {
+        return res.status(phoneUnique.status).json(phoneUnique.body);
+      }
+    }
+
+    // Normalised values used for the INSERT/UPDATE.
+    const cleanEmail = eFmt.value;
+    const cleanPhone = pFmt.value;
+
     // Check if email already exists
  const existing = await pool.query(
-  'SELECT * FROM users WHERE email = $1',
-  [email]
+  'SELECT * FROM users WHERE LOWER(email) = $1',
+  [cleanEmail]
 );
 
 if (existing.rows.length > 0) {
@@ -38,7 +64,9 @@ if (existing.rows.length > 0) {
   // Active account exists
   if (!existingUser.is_deleted) {
     return res.status(409).json({
-      message: 'Email already registered'
+      code:    'EMAIL_TAKEN',
+      field:   'email',
+      message: 'This email is already registered. Please sign in or use a different email.',
     });
   }
 
@@ -60,10 +88,10 @@ const restored = await pool.query(
 RETURNING id, name, email, phone, role, institution_id, created_at  `,
   [
     name,
-    phone,
+    cleanPhone,
     hashedPassword,
     role,
-    email
+    cleanEmail,
   ]
 );
 
@@ -90,10 +118,10 @@ RETURNING id, name, email, phone, role, institution_id, created_at  `,
 
     // Insert user
     const result = await pool.query(
-      `INSERT INTO users (name, email, phone, password, role) 
-       VALUES ($1, $2, $3, $4, $5) 
+      `INSERT INTO users (name, email, phone, password, role)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING id, name, email, phone, role, institution_id, created_at`,
-      [name, email, phone, hashedPassword, role]
+      [name, cleanEmail, cleanPhone, hashedPassword, role]
     );
 
    const user = result.rows[0];

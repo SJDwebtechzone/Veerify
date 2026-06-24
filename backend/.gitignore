@@ -1,2 +1,8 @@
 node_modules
 .env
+check-col.js
+inspect-branches.js
+inspect-jsonb-branches.js
+retry-branch-provision.js
+run-035.js
+send-branch-creds.js

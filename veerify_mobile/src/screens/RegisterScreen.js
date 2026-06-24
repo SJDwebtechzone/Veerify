@@ -1,10 +1,24 @@
 import React, { useState } from 'react';
-import { 
-  View, Text, TextInput, TouchableOpacity, StyleSheet, 
+import {
+  View, Text, TextInput, TouchableOpacity, StyleSheet,
   Alert, ActivityIndicator, ScrollView, KeyboardAvoidingView, Platform,
   Image, StatusBar
 } from 'react-native';
 import { useAuth } from '../context/AuthContext';
+import { confirm } from '../components/ConfirmDialog';
+
+// Small wrapper so every notice on this screen reuses the polished
+// ConfirmDialog (destructive variant = brand-red header) instead of
+// the bare native Alert. hideCancel collapses to a single OK button.
+const notice = (title, message) => {
+  confirm({
+    title,
+    message,
+    variant: 'destructive',
+    confirmText: 'OK',
+    hideCancel: true,
+  });
+};
 
 export default function RegisterScreen({ navigation }) {
   const [name, setName] = useState('');
@@ -18,11 +32,11 @@ export default function RegisterScreen({ navigation }) {
 
   const handleRegister = async () => {
     if (!name || !email || !password) {
-      Alert.alert('Missing fields', 'Name, email, and password are required');
+      notice('Missing fields', 'Name, email, and password are required.');
       return;
     }
     if (password.length < 6) {
-      Alert.alert('Weak password', 'Password must be at least 6 characters');
+      notice('Weak password', 'Password must be at least 6 characters.');
       return;
     }
 
@@ -31,18 +45,18 @@ export default function RegisterScreen({ navigation }) {
     setLoading(false);
 
     if (!result.success) {
-      Alert.alert('Registration failed', result.message);
+      notice('Registration failed', result.message);
     }
   };
 
   return (
-    <KeyboardAvoidingView 
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'} 
+    <KeyboardAvoidingView
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       style={styles.container}
     >
       <StatusBar barStyle="dark-content" backgroundColor="#fff" />
 
-      <ScrollView 
+      <ScrollView
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
@@ -118,60 +132,60 @@ export default function RegisterScreen({ navigation }) {
           <Text style={styles.label}>Full Name</Text>
           <View style={styles.inputWrapper}>
             <Text style={styles.inputIcon}>👤</Text>
-            <TextInput 
-              style={styles.input} 
-              value={name} 
-              onChangeText={setName} 
-              placeholder="Your name" 
-              placeholderTextColor="#888" 
+            <TextInput
+              style={styles.input}
+              value={name}
+              onChangeText={setName}
+              placeholder="Your name"
+              placeholderTextColor="#888"
             />
           </View>
 
           <Text style={styles.label}>Email</Text>
           <View style={styles.inputWrapper}>
             <Text style={styles.inputIcon}>✉️</Text>
-            <TextInput 
-              style={styles.input} 
-              value={email} 
-              onChangeText={setEmail} 
-              placeholder="you@example.com" 
-              placeholderTextColor="#888" 
-              keyboardType="email-address" 
-              autoCapitalize="none" 
+            <TextInput
+              style={styles.input}
+              value={email}
+              onChangeText={setEmail}
+              placeholder="you@example.com"
+              placeholderTextColor="#888"
+              keyboardType="email-address"
+              autoCapitalize="none"
             />
           </View>
 
           <Text style={styles.label}>Phone (optional)</Text>
           <View style={styles.inputWrapper}>
             <Text style={styles.inputIcon}>📱</Text>
-            <TextInput 
-              style={styles.input} 
-              value={phone} 
-              onChangeText={setPhone} 
-              placeholder="9876543210" 
-              placeholderTextColor="#888" 
-              keyboardType="phone-pad" 
+            <TextInput
+              style={styles.input}
+              value={phone}
+              onChangeText={setPhone}
+              placeholder="9876543210"
+              placeholderTextColor="#888"
+              keyboardType="phone-pad"
             />
           </View>
 
           <Text style={styles.label}>Password</Text>
           <View style={styles.inputWrapper}>
             <Text style={styles.inputIcon}>🔒</Text>
-            <TextInput 
-              style={styles.input} 
-              value={password} 
-              onChangeText={setPassword} 
-              placeholder="At least 6 characters" 
-              placeholderTextColor="#888" 
-              secureTextEntry={!showPassword} 
+            <TextInput
+              style={styles.input}
+              value={password}
+              onChangeText={setPassword}
+              placeholder="At least 6 characters"
+              placeholderTextColor="#888"
+              secureTextEntry={!showPassword}
             />
             <TouchableOpacity onPress={() => setShowPassword(!showPassword)}>
               <Text style={styles.eyeIcon}>{showPassword ? '🙈' : '👁️'}</Text>
             </TouchableOpacity>
           </View>
 
-          <TouchableOpacity 
-            style={[styles.button, loading && styles.buttonDisabled]} 
+          <TouchableOpacity
+            style={[styles.button, loading && styles.buttonDisabled]}
             onPress={handleRegister}
             disabled={loading}
             activeOpacity={0.85}
@@ -185,7 +199,7 @@ export default function RegisterScreen({ navigation }) {
             <Text style={styles.termsLink}>Privacy Policy</Text>
           </Text>
 
-          <TouchableOpacity 
+          <TouchableOpacity
             style={styles.loginLink}
             onPress={() => navigation.replace('Login')}
           >
@@ -200,8 +214,8 @@ export default function RegisterScreen({ navigation }) {
 }
 
 const styles = StyleSheet.create({
-  container: { 
-    flex: 1, 
+  container: {
+    flex: 1,
     backgroundColor: '#fff',
   },
   scrollContent: {
@@ -248,42 +262,42 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#1a1a2e',
   },
-  title: { 
-    fontSize: 26, 
-    fontWeight: '700', 
-    color: '#1a1a2e', 
+  title: {
+    fontSize: 26,
+    fontWeight: '700',
+    color: '#1a1a2e',
     marginBottom: 6,
   },
-  subtitle: { 
-    fontSize: 14, 
-    color: '#666', 
+  subtitle: {
+    fontSize: 14,
+    color: '#666',
     marginBottom: 24,
   },
-  form: { 
+  form: {
     gap: 4,
   },
-  label: { 
-    fontSize: 13, 
-    color: '#1a1a2e', 
-    fontWeight: '600', 
+  label: {
+    fontSize: 13,
+    color: '#1a1a2e',
+    fontWeight: '600',
     marginBottom: 6,
     marginTop: 12,
   },
-  roleSelector: { 
-    flexDirection: 'row', 
+  roleSelector: {
+    flexDirection: 'row',
     gap: 10,
     marginBottom: 4,
   },
-  roleButton: { 
-    flex: 1, 
-    padding: 14, 
-    borderRadius: 12, 
-    borderWidth: 1.5, 
-    borderColor: '#e0e0e8', 
+  roleButton: {
+    flex: 1,
+    padding: 14,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: '#e0e0e8',
     alignItems: 'center',
     backgroundColor: '#fff',
   },
-  roleButtonActive: { 
+  roleButtonActive: {
     backgroundColor: '#fff5f5',
     borderColor: '#e63946',
   },
@@ -291,12 +305,12 @@ const styles = StyleSheet.create({
     fontSize: 28,
     marginBottom: 6,
   },
-  roleText: { 
-    color: '#666', 
+  roleText: {
+    color: '#666',
     fontWeight: '600',
     fontSize: 13,
   },
-  roleTextActive: { 
+  roleTextActive: {
     color: '#e63946',
   },
   roleSubtext: {
@@ -320,7 +334,7 @@ const styles = StyleSheet.create({
     fontSize: 16,
     marginRight: 8,
   },
-  input: { 
+  input: {
     flex: 1,
     paddingVertical: 14,
     fontSize: 15,
@@ -330,19 +344,19 @@ const styles = StyleSheet.create({
     fontSize: 18,
     paddingLeft: 8,
   },
-  button: { 
-    backgroundColor: '#e63946', 
-    paddingVertical: 16, 
-    borderRadius: 12, 
-    alignItems: 'center', 
+  button: {
+    backgroundColor: '#e63946',
+    paddingVertical: 16,
+    borderRadius: 12,
+    alignItems: 'center',
     marginTop: 20,
   },
-  buttonDisabled: { 
+  buttonDisabled: {
     opacity: 0.6,
   },
-  buttonText: { 
-    color: '#fff', 
-    fontSize: 16, 
+  buttonText: {
+    color: '#fff',
+    fontSize: 16,
     fontWeight: '700',
   },
   termsText: {
@@ -356,7 +370,7 @@ const styles = StyleSheet.create({
     color: '#e63946',
     fontWeight: '500',
   },
-  loginLink: { 
+  loginLink: {
     alignItems: 'center',
     marginTop: 24,
     paddingVertical: 14,
@@ -364,12 +378,12 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#e0e0e8',
   },
-  loginText: { 
+  loginText: {
     color: '#666',
     fontSize: 14,
   },
-  loginBold: { 
-    color: '#e63946', 
+  loginBold: {
+    color: '#e63946',
     fontWeight: '600',
   },
 });

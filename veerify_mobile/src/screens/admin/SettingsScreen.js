@@ -50,11 +50,10 @@ export default function SettingsScreen() {
     if (!settings) return null;
     const amount = parseFloat(calcAmount) || 0;
     const commissionFee = Math.round((amount * settings.commission_percent) / 100);
-    const gatewayFee = Math.round((amount * GATEWAY_PERCENT) / 100);
-    const institutionBears = settings.gateway_bearer === 'Institution';
-    const totalDeduction = commissionFee + (institutionBears ? gatewayFee : 0);
-    const earnings = amount - totalDeduction;
-    return { amount, commissionFee, gatewayFee, institutionBears, totalDeduction, earnings };
+    // Gateway charges are absorbed by the platform — never shown to the
+    // institution so the breakdown matches what they see on the admin web.
+    const earnings = amount - commissionFee;
+    return { amount, commissionFee, earnings };
   }, [calcAmount, settings]);
 
   if (loading) {
@@ -94,14 +93,6 @@ export default function SettingsScreen() {
           <Text style={styles.fieldLabel}>Marketplace Commission</Text>
           <Text style={styles.fieldValue}>{settings.commission_percent}%</Text>
           <Text style={styles.fieldDescription}>Deducted from institution course sales.</Text>
-        </View>
-
-        <View style={styles.divider} />
-
-        <View style={styles.fieldRow}>
-          <Text style={styles.fieldLabel}>Gateway Charges Bearer</Text>
-          <Text style={styles.fieldValue}>{settings.gateway_bearer}</Text>
-          <Text style={styles.fieldDescription}>Who pays the payment gateway processing fees.</Text>
         </View>
 
         <View style={styles.divider} />
@@ -147,15 +138,9 @@ export default function SettingsScreen() {
           <Step num="1" text="Student purchases your course online." />
           <Step num="2" text="Payment goes to platform Razorpay account." />
           <Step num="3" text={`Marketplace commission (${settings.commission_percent}%) is deducted.`} />
-          {settings.gateway_bearer === 'Institution' && (
-            <Step num="4" text="Gateway processing fee (2%) is deducted." />
-          )}
+          <Step num="4" text="Remaining earnings are added to your academy wallet." />
           <Step
-            num={settings.gateway_bearer === 'Institution' ? '5' : '4'}
-            text="Remaining earnings are added to your academy wallet."
-          />
-          <Step
-            num={settings.gateway_bearer === 'Institution' ? '6' : '5'}
+            num="5"
             text={`Settlements occur ${settings.settlement_cycle.toLowerCase()} once wallet exceeds ₹${settings.min_payout}.`}
           />
         </View>
@@ -198,15 +183,6 @@ export default function SettingsScreen() {
               </Text>
               <Text style={[styles.breakdownValue, styles.deductionText]}>
                 -₹{calc.commissionFee.toLocaleString()}
-              </Text>
-            </View>
-
-            <View style={styles.breakdownRow}>
-              <Text style={[styles.breakdownLabel, styles.deductionText]}>
-                Gateway Charges ({GATEWAY_PERCENT}%)
-              </Text>
-              <Text style={[styles.breakdownValue, styles.deductionText]}>
-                {calc.institutionBears ? `-₹${calc.gatewayFee.toLocaleString()}` : '₹0 (Paid by Platform)'}
               </Text>
             </View>
 
@@ -432,3 +408,4 @@ const styles = StyleSheet.create({
     color: palette.green.vivid,
   },
 });
+

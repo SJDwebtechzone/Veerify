@@ -1,107 +1,218 @@
 // src/components/DateField.js
 //
-// Reusable inline calendar picker. Tapping the trigger row reveals a
-// Material-style month grid with arrow navigation, tappable month/year
-// headers to flip to month-grid / year-grid views, "Today" jump, and
-// X to clear. Value is an ISO YYYY-MM-DD string so it serialises
-// cleanly to a Postgres DATE column.
+// Wheel-style date picker with three independent columns — Day, Month,
+// Year — each scrollable + tappable. Pattern users already know from
+// iOS UIDatePicker and most Android wheel pickers, so no calendar
+// navigation is needed. Tapping the trigger opens a bottom sheet with
+// the three wheels stacked side by side and a "Done" CTA.
 //
-// Props:
-//   value         current ISO date string ('' = unset)
-//   onChange      (iso: string) => void  ('' when cleared)
-//   minYear       smallest selectable year (default 1900)
-//   maxYear       largest selectable year (default today + 10)
-//   placeholder   text shown when value is empty
-//   accent        hex string for the brand color, defaults to red
+// Props (backwards-compatible with the old inline calendar):
+//   value        ISO 'YYYY-MM-DD' (empty string = unset)
+//   onChange     (iso: string) => void  ('' when cleared)
+//   placeholder  text shown when value is empty
+//   accent       hex string for the brand color, defaults to red
+//   minYear      smallest selectable year (default today - 80)
+//   maxYear      largest selectable year (default today + 10)
+//   minDate      ignored — kept for backwards-compat with existing
+//                callers that pass `minDate={new Date()}`. The backend
+//                validates real cut-offs (event_date >= today, etc).
+//
+// Value semantics: same ISO date string the old DateField produced, so
+// callers can swap this in without touching their submit payload.
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  View, Text, TouchableOpacity, StyleSheet,
+  View, Text, TouchableOpacity, Modal, FlatList, StyleSheet,
 } from 'react-native';
-import {
-  Calendar, ChevronLeft, ChevronRight, X,
-} from 'lucide-react-native';
+import { Calendar, X, Check } from 'lucide-react-native';
 
 const MONTH_NAMES = [
-  'January','February','March','April','May','June',
-  'July','August','September','October','November','December',
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
 ];
-const DAY_HEADERS = ['S','M','T','W','T','F','S'];
+
+// Each wheel row is 44px tall, and we render 5 visible rows so the user
+// sees 2 items above + the centered selection + 2 below. The center band
+// lines up exactly with row index 2 (offset = ITEM_HEIGHT * 2).
+const ITEM_HEIGHT = 44;
+const VISIBLE_ITEMS = 5;
+const WHEEL_HEIGHT = ITEM_HEIGHT * VISIBLE_ITEMS;
 
 function pad2(n) { return String(n).padStart(2, '0'); }
 function isoFor(y, m, d) { return `${y}-${pad2(m + 1)}-${pad2(d)}`; }
 function parseIso(s) {
   if (!s) return null;
-  const [y, m, d] = s.split('-').map(Number);
+  const [y, m, d] = String(s).split('-').map(Number);
   if (!y || !m || !d) return null;
   return { y, m: m - 1, d };
 }
 function daysInMonth(y, m) { return new Date(y, m + 1, 0).getDate(); }
-function firstWeekday(y, m) { return new Date(y, m, 1).getDay(); }
+
+/* ──────────────────────────────────────────────────────────────────
+   <Wheel /> — one scrollable column. Snaps to nearest item on release
+   and tells the parent which index is centered.
+   ────────────────────────────────────────────────────────────── */
+function Wheel({ items, labelFor, selectedIndex, onChange }) {
+  const ref = useRef(null);
+
+  // Keep the wheel scrolled to whichever index the parent says is
+  // active. We use scrollToOffset because scrollToIndex can throw if
+  // the index lies inside the padding rows we add at the top/bottom.
+  useEffect(() => {
+    if (ref.current && selectedIndex >= 0) {
+      ref.current.scrollToOffset({
+        offset: selectedIndex * ITEM_HEIGHT,
+        animated: false,
+      });
+    }
+  }, [selectedIndex]);
+
+  const handleMomentumEnd = (e) => {
+    const y = e.nativeEvent.contentOffset.y;
+    const idx = Math.round(y / ITEM_HEIGHT);
+    const clamped = Math.max(0, Math.min(items.length - 1, idx));
+    if (clamped !== selectedIndex) onChange(clamped);
+  };
+
+  return (
+    <View style={{ flex: 1, height: WHEEL_HEIGHT }}>
+      <FlatList
+        ref={ref}
+        data={items}
+        keyExtractor={(_, i) => String(i)}
+        showsVerticalScrollIndicator={false}
+        snapToInterval={ITEM_HEIGHT}
+        decelerationRate="fast"
+        onMomentumScrollEnd={handleMomentumEnd}
+        getItemLayout={(_, i) => ({
+          length: ITEM_HEIGHT,
+          offset: i * ITEM_HEIGHT,
+          index: i,
+        })}
+        // Top + bottom padding so the FIRST and LAST items can reach
+        // the centered selection band. Without this you can't pick e.g.
+        // the year 1945 because it can't scroll into the centre row.
+        contentContainerStyle={{ paddingVertical: ITEM_HEIGHT * 2 }}
+        renderItem={({ item, index }) => {
+          const isActive = index === selectedIndex;
+          const distance = Math.abs(index - selectedIndex);
+          return (
+            <TouchableOpacity
+              style={styles.wheelItem}
+              activeOpacity={0.7}
+              onPress={() => {
+                if (ref.current) {
+                  ref.current.scrollToOffset({
+                    offset: index * ITEM_HEIGHT,
+                    animated: true,
+                  });
+                }
+                onChange(index);
+              }}
+            >
+              <Text
+                style={[
+                  styles.wheelText,
+                  isActive && styles.wheelTextActive,
+                  // Fade items further from the selection so the centre
+                  // line reads clearly even on a busy background.
+                  !isActive && distance === 1 && { opacity: 0.55 },
+                  !isActive && distance >= 2 && { opacity: 0.3 },
+                ]}
+              >
+                {labelFor ? labelFor(item) : String(item)}
+              </Text>
+            </TouchableOpacity>
+          );
+        }}
+      />
+    </View>
+  );
+}
 
 export default function DateField({
   value,
   onChange,
-  minYear,
-  maxYear,
   placeholder = 'Pick a date',
   accent = '#E63946',
+  minYear,
+  maxYear,
+  // minDate kept for prop compatibility but enforced server-side.
+  // eslint-disable-next-line no-unused-vars
+  minDate,
 }) {
   const today = new Date();
   const parsed = parseIso(value);
-  const [open, setOpen] = useState(false);
-  const [view, setView] = useState('day'); // 'day' | 'month' | 'year'
-  const [cursor, setCursor] = useState({
-    y: parsed?.y || today.getFullYear(),
-    m: parsed?.m ?? today.getMonth(),
-  });
-  const [yearAnchor, setYearAnchor] = useState(parsed?.y || today.getFullYear());
 
-  const yMin = minYear ?? 1900;
-  const yMax = maxYear ?? today.getFullYear() + 10;
+  const [open, setOpen] = useState(false);
+
+  // Working state inside the sheet. We only commit to the parent's
+  // `value` when the user taps Done — that way scrolling around
+  // without confirming doesn't accidentally clobber their stored value.
+  const [yIdx, setYIdx] = useState(0);
+  const [mIdx, setMIdx] = useState(0);
+  const [dIdx, setDIdx] = useState(0);
+
+  const yMin = minYear ?? (today.getFullYear() - 80);
+  const yMax = maxYear ?? (today.getFullYear() + 10);
+  const years = useMemo(
+    () => Array.from({ length: yMax - yMin + 1 }, (_, i) => yMin + i),
+    [yMin, yMax],
+  );
+
+  const selectedYear  = years[yIdx] ?? today.getFullYear();
+  const selectedMonth = mIdx;
+  const days = useMemo(() => {
+    const total = daysInMonth(selectedYear, selectedMonth);
+    return Array.from({ length: total }, (_, i) => i + 1);
+  }, [selectedYear, selectedMonth]);
+
+  // When month/year changes to a shorter month (e.g. Feb 29 → Feb), the
+  // selected day index may exceed the new day count. Clamp it down so
+  // we never show "31" while February is selected.
+  useEffect(() => {
+    if (dIdx >= days.length) setDIdx(days.length - 1);
+  }, [days.length, dIdx]);
+
+  const openPicker = () => {
+    const init = parsed || {
+      y: today.getFullYear(),
+      m: today.getMonth(),
+      d: today.getDate(),
+    };
+    const yi = years.indexOf(init.y);
+    setYIdx(yi >= 0 ? yi : years.indexOf(today.getFullYear()));
+    setMIdx(init.m);
+    setDIdx(init.d - 1);
+    setOpen(true);
+  };
+
+  const confirm = () => {
+    const iso = isoFor(years[yIdx], mIdx, days[dIdx]);
+    onChange(iso);
+    setOpen(false);
+  };
+
+  const clear = (e) => {
+    e?.stopPropagation?.();
+    onChange('');
+  };
 
   const display = parsed
     ? `${pad2(parsed.d)} ${MONTH_NAMES[parsed.m].slice(0, 3)} ${parsed.y}`
     : placeholder;
 
-  const grid = useMemo(() => {
-    const cells = [];
-    const offset = firstWeekday(cursor.y, cursor.m);
-    const total = daysInMonth(cursor.y, cursor.m);
-    for (let i = 0; i < offset; i += 1) cells.push(null);
-    for (let d = 1; d <= total; d += 1) cells.push(d);
-    while (cells.length % 7 !== 0) cells.push(null);
-    return cells;
-  }, [cursor]);
-
-  const stepMonth = (delta) => {
-    let y = cursor.y;
-    let m = cursor.m + delta;
-    if (m < 0) { m = 11; y -= 1; }
-    if (m > 11) { m = 0; y += 1; }
-    if (y < yMin) { y = yMin; m = 0; }
-    if (y > yMax) { y = yMax; m = 11; }
-    setCursor({ y, m });
-  };
-
-  const pickDay = (d) => {
-    if (!d) return;
-    onChange(isoFor(cursor.y, cursor.m, d));
-    setOpen(false);
-    setView('day');
-  };
-
-  const clear = () => {
-    onChange('');
-    setOpen(false);
-    setView('day');
-  };
+  // Live preview at the top of the sheet — updates as the user spins
+  // the wheels so they can see the date they're about to confirm.
+  const previewDay = days[dIdx] || 1;
+  const previewMonth = MONTH_NAMES[mIdx] || '';
+  const previewYear = years[yIdx] || today.getFullYear();
 
   return (
     <View>
       <TouchableOpacity
-        style={[styles.trigger, { borderColor: '#E5E7EB' }]}
-        onPress={() => setOpen((o) => !o)}
+        style={styles.trigger}
+        onPress={openPicker}
         activeOpacity={0.85}
       >
         <Calendar size={16} color={accent} strokeWidth={2.2} />
@@ -112,190 +223,97 @@ export default function DateField({
           <TouchableOpacity onPress={clear} style={styles.clearBtn} hitSlop={8}>
             <X size={14} color="#6B7280" strokeWidth={2.2} />
           </TouchableOpacity>
-        ) : (
-          <ChevronRight
-            size={16}
-            color="#9CA3AF"
-            strokeWidth={2}
-            style={{ transform: [{ rotate: open ? '90deg' : '0deg' }] }}
-          />
-        )}
+        ) : null}
       </TouchableOpacity>
 
-      {open ? (
-        <View style={styles.card}>
-          <View style={styles.header}>
-            <TouchableOpacity
-              onPress={() => view === 'day' ? stepMonth(-1) : setYearAnchor(yearAnchor - 12)}
-              style={styles.navBtn}
-              activeOpacity={0.7}
-            >
-              <ChevronLeft size={16} color="#111827" strokeWidth={2.4} />
-            </TouchableOpacity>
+      <Modal
+        visible={open}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setOpen(false)}
+        statusBarTranslucent
+      >
+        <View style={styles.backdrop}>
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => setOpen(false)}
+          />
 
-            <View style={{ flexDirection: 'row', gap: 6, flex: 1, justifyContent: 'center' }}>
+          <View style={styles.sheet}>
+            <View style={styles.sheetHandle} />
+
+            <Text style={styles.sheetTitle}>Select date</Text>
+            <Text style={styles.sheetPreview}>
+              {pad2(previewDay)} {previewMonth} {previewYear}
+            </Text>
+
+            {/* Wheel header — labels above each column */}
+            <View style={styles.wheelHeaderRow}>
+              <Text style={styles.wheelHeaderText}>Day</Text>
+              <Text style={styles.wheelHeaderText}>Month</Text>
+              <Text style={styles.wheelHeaderText}>Year</Text>
+            </View>
+
+            {/* Three wheels side-by-side with a centred highlight band */}
+            <View style={styles.wheelRow}>
+              <View
+                pointerEvents="none"
+                style={[
+                  styles.highlightBar,
+                  { backgroundColor: accent + '14', borderColor: accent },
+                ]}
+              />
+              <Wheel
+                items={days}
+                selectedIndex={dIdx}
+                onChange={setDIdx}
+                labelFor={(d) => pad2(d)}
+              />
+              <Wheel
+                items={Array.from({ length: 12 }, (_, i) => i)}
+                labelFor={(i) => MONTH_NAMES[i]}
+                selectedIndex={mIdx}
+                onChange={setMIdx}
+              />
+              <Wheel
+                items={years}
+                selectedIndex={yIdx}
+                onChange={setYIdx}
+              />
+            </View>
+
+            <View style={styles.sheetFooter}>
               <TouchableOpacity
-                style={styles.labelBtn}
-                onPress={() => setView(view === 'month' ? 'day' : 'month')}
-                activeOpacity={0.7}
+                style={styles.ghostBtn}
+                onPress={() => setOpen(false)}
+                activeOpacity={0.85}
               >
-                <Text style={styles.labelText}>
-                  {view === 'year'
-                    ? `${yearAnchor} – ${yearAnchor + 11}`
-                    : MONTH_NAMES[cursor.m]}
-                </Text>
+                <Text style={styles.ghostText}>Cancel</Text>
               </TouchableOpacity>
-              {view !== 'year' ? (
-                <TouchableOpacity
-                  style={styles.labelBtn}
-                  onPress={() => { setView('year'); setYearAnchor(cursor.y - 5); }}
-                  activeOpacity={0.7}
-                >
-                  <Text style={styles.labelText}>{cursor.y}</Text>
-                </TouchableOpacity>
-              ) : null}
+              <TouchableOpacity
+                style={[styles.primaryBtn, { backgroundColor: accent, shadowColor: accent }]}
+                onPress={confirm}
+                activeOpacity={0.88}
+              >
+                <Check size={16} color="#fff" strokeWidth={2.6} />
+                <Text style={styles.primaryText}>Done</Text>
+              </TouchableOpacity>
             </View>
-
-            <TouchableOpacity
-              onPress={() => view === 'day' ? stepMonth(+1) : setYearAnchor(yearAnchor + 12)}
-              style={styles.navBtn}
-              activeOpacity={0.7}
-            >
-              <ChevronRight size={16} color="#111827" strokeWidth={2.4} />
-            </TouchableOpacity>
-          </View>
-
-          {view === 'day' && (
-            <>
-              <View style={styles.dayHeaderRow}>
-                {DAY_HEADERS.map((d, i) => (
-                  <View key={i} style={styles.dayHeader}>
-                    <Text style={styles.dayHeaderText}>{d}</Text>
-                  </View>
-                ))}
-              </View>
-              <View style={styles.grid}>
-                {grid.map((d, i) => {
-                  const isSelected = parsed
-                    && parsed.y === cursor.y
-                    && parsed.m === cursor.m
-                    && parsed.d === d;
-                  const isToday = !isSelected
-                    && d
-                    && today.getFullYear() === cursor.y
-                    && today.getMonth() === cursor.m
-                    && today.getDate() === d;
-                  return (
-                    <TouchableOpacity
-                      key={i}
-                      style={styles.cell}
-                      disabled={!d}
-                      onPress={() => pickDay(d)}
-                      activeOpacity={0.7}
-                    >
-                      {d ? (
-                        <View style={[
-                          styles.cellInner,
-                          isSelected && { backgroundColor: accent },
-                          isToday && { borderWidth: 1.5, borderColor: accent },
-                        ]}>
-                          <Text style={[
-                            styles.cellText,
-                            isSelected && { color: '#fff', fontWeight: '800' },
-                            isToday && !isSelected && { color: accent, fontWeight: '800' },
-                          ]}>
-                            {d}
-                          </Text>
-                        </View>
-                      ) : null}
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-            </>
-          )}
-
-          {view === 'month' && (
-            <View style={styles.monthGrid}>
-              {MONTH_NAMES.map((name, i) => {
-                const isSel = parsed && parsed.y === cursor.y && parsed.m === i;
-                return (
-                  <TouchableOpacity
-                    key={name}
-                    style={[styles.monthCell, isSel && { backgroundColor: accent }]}
-                    onPress={() => { setCursor({ y: cursor.y, m: i }); setView('day'); }}
-                    activeOpacity={0.85}
-                  >
-                    <Text style={[
-                      styles.monthCellText,
-                      isSel && { color: '#fff', fontWeight: '800' },
-                    ]}>
-                      {name.slice(0, 3)}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-          )}
-
-          {view === 'year' && (
-            <View style={styles.monthGrid}>
-              {Array.from({ length: 12 }, (_, i) => yearAnchor + i).map((y) => {
-                const disabled = y < yMin || y > yMax;
-                const isSel = cursor.y === y;
-                return (
-                  <TouchableOpacity
-                    key={y}
-                    style={[
-                      styles.monthCell,
-                      isSel && { backgroundColor: accent },
-                      disabled && { opacity: 0.3 },
-                    ]}
-                    disabled={disabled}
-                    onPress={() => { setCursor({ y, m: cursor.m }); setView('month'); }}
-                    activeOpacity={0.85}
-                  >
-                    <Text style={[
-                      styles.monthCellText,
-                      isSel && { color: '#fff', fontWeight: '800' },
-                    ]}>
-                      {y}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-          )}
-
-          <View style={styles.footer}>
-            <TouchableOpacity
-              onPress={() => {
-                const t = new Date();
-                if (t.getFullYear() < yMin || t.getFullYear() > yMax) return;
-                setCursor({ y: t.getFullYear(), m: t.getMonth() });
-                setView('day');
-              }}
-              activeOpacity={0.7}
-            >
-              <Text style={[styles.footerText, { color: accent }]}>Today</Text>
-            </TouchableOpacity>
-            <View style={{ flex: 1 }} />
-            <TouchableOpacity onPress={() => setOpen(false)} activeOpacity={0.7}>
-              <Text style={[styles.footerText, { color: accent }]}>Close</Text>
-            </TouchableOpacity>
           </View>
         </View>
-      ) : null}
+      </Modal>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
+  // ── Trigger row (same look as before so existing forms don't shift) ──
   trigger: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
     backgroundColor: '#FFFFFF',
     borderRadius: 10,
-    borderWidth: 1,
+    borderWidth: 1, borderColor: '#E5E7EB',
     paddingHorizontal: 12, paddingVertical: 11,
   },
   triggerText: { flex: 1, fontSize: 14, color: '#111827', fontWeight: '600' },
@@ -304,52 +322,94 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
     backgroundColor: '#F4F4F8',
   },
-  card: {
-    marginTop: 8,
+
+  // ── Bottom sheet ────────────────────────────────────────────────
+  backdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(8, 15, 30, 0.55)',
+    justifyContent: 'flex-end',
+  },
+  sheet: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    borderWidth: 1, borderColor: '#E5E7EB',
-    padding: 10,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingTop: 8,
+    paddingHorizontal: 20,
+    paddingBottom: 28,
   },
-  header: { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
-  navBtn: {
-    width: 32, height: 32, borderRadius: 16,
-    backgroundColor: '#F4F4F8',
-    alignItems: 'center', justifyContent: 'center',
+  sheetHandle: {
+    alignSelf: 'center',
+    width: 44, height: 4, borderRadius: 2,
+    backgroundColor: '#E5E7EB',
+    marginBottom: 14,
   },
-  labelBtn: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8 },
-  labelText: { fontSize: 14, fontWeight: '800', color: '#111827' },
+  sheetTitle: {
+    fontSize: 16, fontWeight: '800', color: '#111827',
+    textAlign: 'center',
+  },
+  sheetPreview: {
+    fontSize: 18, fontWeight: '900', color: '#0F172A',
+    textAlign: 'center',
+    marginTop: 4, marginBottom: 12,
+    letterSpacing: 0.3,
+  },
 
-  dayHeaderRow: { flexDirection: 'row', marginBottom: 4 },
-  dayHeader: { flex: 1, alignItems: 'center', paddingVertical: 6 },
-  dayHeaderText: { fontSize: 10, color: '#9CA3AF', fontWeight: '700' },
+  // ── Wheels ──────────────────────────────────────────────────────
+  wheelHeaderRow: {
+    flexDirection: 'row',
+    paddingHorizontal: 8,
+    marginBottom: 4,
+  },
+  wheelHeaderText: {
+    flex: 1, textAlign: 'center',
+    fontSize: 10, fontWeight: '700',
+    color: '#9CA3AF', letterSpacing: 1,
+  },
+  wheelRow: {
+    flexDirection: 'row',
+    position: 'relative',
+    backgroundColor: '#F8FAFC',
+    borderRadius: 16,
+    overflow: 'hidden',
+    height: WHEEL_HEIGHT,
+  },
+  highlightBar: {
+    position: 'absolute',
+    left: 8, right: 8,
+    // Centre row sits at offset = ITEM_HEIGHT * 2 (two rows above the centre).
+    top: ITEM_HEIGHT * 2,
+    height: ITEM_HEIGHT,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    zIndex: 1,
+  },
+  wheelItem: {
+    height: ITEM_HEIGHT,
+    justifyContent: 'center', alignItems: 'center',
+  },
+  wheelText: {
+    fontSize: 15, color: '#111827', fontWeight: '500',
+  },
+  wheelTextActive: {
+    fontSize: 18, fontWeight: '800', color: '#0F172A',
+  },
 
-  grid: { flexDirection: 'row', flexWrap: 'wrap' },
-  cell: {
-    width: '14.2857%',
-    aspectRatio: 1,
+  // ── Footer ──────────────────────────────────────────────────────
+  sheetFooter: {
+    flexDirection: 'row', gap: 10, marginTop: 18,
+  },
+  ghostBtn: {
+    flex: 1, paddingVertical: 14, borderRadius: 12,
+    backgroundColor: '#F1F5F9',
     alignItems: 'center', justifyContent: 'center',
-    padding: 2,
+    borderWidth: 1, borderColor: '#E2E8F0',
   },
-  cellInner: {
-    width: '92%', aspectRatio: 1,
-    borderRadius: 999,
-    alignItems: 'center', justifyContent: 'center',
+  ghostText: { fontSize: 14, fontWeight: '700', color: '#475569' },
+  primaryBtn: {
+    flex: 1.6, paddingVertical: 14, borderRadius: 12,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    shadowOpacity: 0.3, shadowRadius: 12, shadowOffset: { width: 0, height: 6 },
+    elevation: 6,
   },
-  cellText: { fontSize: 13, color: '#111827', fontWeight: '600' },
-
-  monthGrid: { flexDirection: 'row', flexWrap: 'wrap' },
-  monthCell: {
-    width: '25%', paddingVertical: 14,
-    alignItems: 'center', justifyContent: 'center',
-    borderRadius: 8,
-  },
-  monthCellText: { fontSize: 13, color: '#111827', fontWeight: '700' },
-
-  footer: {
-    flexDirection: 'row', alignItems: 'center',
-    marginTop: 8, paddingTop: 8,
-    borderTopWidth: 1, borderTopColor: '#E5E7EB',
-  },
-  footerText: { fontSize: 12, fontWeight: '800', paddingVertical: 4, paddingHorizontal: 4 },
+  primaryText: { fontSize: 14, fontWeight: '800', color: '#fff', letterSpacing: 0.3 },
 });
