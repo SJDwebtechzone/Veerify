@@ -1,5 +1,6 @@
 import { ReactNode } from 'react';
-import { ArrowDownRight, ArrowUpRight, type LucideIcon } from 'lucide-react';
+import { ArrowDownRight, ArrowUpRight, ArrowRight, type LucideIcon } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { cn } from '../../lib/utils';
 
 type Accent = 'brand' | 'emerald' | 'amber' | 'rose' | 'sky';
@@ -11,6 +12,10 @@ interface StatsCardProps {
   deltaSuffix?: string;
   icon: LucideIcon;
   accent?: Accent;
+  // Optional. When set, the card renders as a Link to this route and
+  // shows a subtle "View" affordance + cursor-pointer hover. Lets the
+  // super-admin dashboard double as a launchpad.
+  to?: string;
 }
 
 const accentStyles: Record<Accent, string> = {
@@ -21,11 +26,11 @@ const accentStyles: Record<Accent, string> = {
   sky: 'from-sky-500/15 to-sky-500/5 text-sky-600 dark:text-sky-400',
 };
 
-export function StatsCard({ label, value, delta, deltaSuffix = 'vs last month', icon: Icon, accent = 'brand' }: StatsCardProps) {
+export function StatsCard({ label, value, delta, deltaSuffix = 'vs last month', icon: Icon, accent = 'brand', to }: StatsCardProps) {
   const positive = (delta ?? 0) >= 0;
 
-  return (
-    <div className="card card-hover p-5 relative overflow-hidden">
+  const body = (
+    <>
       <div
         className={cn(
           'absolute -top-12 -right-12 w-32 h-32 rounded-full bg-gradient-to-br opacity-60 blur-2xl',
@@ -44,7 +49,7 @@ export function StatsCard({ label, value, delta, deltaSuffix = 'vs last month', 
             <Icon className="w-5 h-5" strokeWidth={2.2} />
           </div>
 
-          {delta !== undefined && (
+          {delta !== undefined ? (
             <div
               className={cn(
                 'flex items-center gap-0.5 text-xs font-semibold px-2 py-0.5 rounded-md',
@@ -56,7 +61,12 @@ export function StatsCard({ label, value, delta, deltaSuffix = 'vs last month', 
               {positive ? <ArrowUpRight className="w-3 h-3" /> : <ArrowDownRight className="w-3 h-3" />}
               {Math.abs(delta)}%
             </div>
-          )}
+          ) : to ? (
+            // Subtle "View →" affordance so clickability is obvious.
+            <span className="inline-flex items-center gap-0.5 text-[11px] font-semibold text-slate-400 dark:text-slate-500 group-hover:text-brand-600 dark:group-hover:text-brand-400 transition-colors">
+              View <ArrowRight className="w-3 h-3" />
+            </span>
+          ) : null}
         </div>
 
         <div className="mt-4">
@@ -67,6 +77,18 @@ export function StatsCard({ label, value, delta, deltaSuffix = 'vs last month', 
           )}
         </div>
       </div>
-    </div>
+    </>
   );
+
+  if (to) {
+    return (
+      <Link
+        to={to}
+        className="card card-hover p-5 relative overflow-hidden group block cursor-pointer focus:outline-none focus:ring-2 focus:ring-brand-500/40 focus:ring-offset-2 rounded-2xl"
+      >
+        {body}
+      </Link>
+    );
+  }
+  return <div className="card card-hover p-5 relative overflow-hidden">{body}</div>;
 }

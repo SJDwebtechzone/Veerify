@@ -123,12 +123,15 @@ export function Dashboard() {
 
       {/* Stats grid */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-  <StatsCard label="Total Institutions"   value={formatNumber(counts.total)}            delta={0} icon={Building2}     accent="brand" />
-  <StatsCard label="Active Subscriptions" value={formatNumber(counts.active)}           delta={0} icon={CheckCircle2}  accent="emerald" />
-  <StatsCard label="Pending Approvals"    value={formatNumber(counts.pending_approval)} delta={0} icon={AlertTriangle} accent="amber" />
-  <StatsCard label="Total Students"       value={formatNumber(counts.total_students)} delta={0} icon={GraduationCap} accent="sky" />
-  <StatsCard label="Total Trainers"       value={formatNumber(counts.total_trainers)} delta={0} icon={UserCog}       accent="brand" />
-  <StatsCard label="Monthly Revenue"      value={formatCurrency(counts.monthly_revenue)} delta={0} icon={Wallet} accent="emerald" />
+  {/* Each stat card now navigates to the matching list page so the dashboard
+      doubles as a launchpad. `delta={0}` removed where we'd rather show the
+      "View →" affordance — keeping it would obscure the click target. */}
+  <StatsCard label="Total Institutions"   value={formatNumber(counts.total)}            icon={Building2}     accent="brand"   to="/institutions" />
+  <StatsCard label="Active Subscriptions" value={formatNumber(counts.active)}           icon={CheckCircle2}  accent="emerald" to="/institutions/active" />
+  <StatsCard label="Pending Approvals"    value={formatNumber(counts.pending_approval)} icon={AlertTriangle} accent="amber"   to="/institutions/pending" />
+  <StatsCard label="Total Students"       value={formatNumber(counts.total_students)}   icon={GraduationCap} accent="sky"     to="/students" />
+  <StatsCard label="Total Trainers"       value={formatNumber(counts.total_trainers)}   icon={UserCog}       accent="brand"   to="/trainers" />
+  <StatsCard label="Monthly Revenue"      value={formatCurrency(counts.monthly_revenue)} icon={Wallet}       accent="emerald" to="/payments" />
   <StatsCard label="Course Completion"    value="0%" delta={0} icon={TrendingUp}    accent="sky" />
 </div>
 

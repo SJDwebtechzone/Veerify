@@ -6,3 +6,7 @@ inspect-jsonb-branches.js
 retry-branch-provision.js
 run-035.js
 send-branch-creds.js
+check-institution-coords.js
+backfill-coords.js
+debug-nearby.js
+update-referral-settings.js

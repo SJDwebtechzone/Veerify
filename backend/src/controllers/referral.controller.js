@@ -25,9 +25,13 @@ const { insertNotification } = require('./notification.controller');
 async function getSettings(client = pool) {
   const r = await client.query(`SELECT * FROM referral_settings WHERE id = 1`);
   return r.rows[0] || {
-    points_per_referral: 500,
+    // 1 referral = 250 points + 250 rupees deduction. Since rupees_per_point
+    // is 1, the 250 points double as ₹250 worth of discount.
+    points_per_referral: 250,
     rupees_per_point: 1,
-    max_discount_pct: 50,
+    // 100% max discount lets the entire accumulated wallet apply to the
+    // next subscription. If product wants a cap, set this lower.
+    max_discount_pct: 100,
     points_expiry_days: 180,
     auto_approve: true,
   };

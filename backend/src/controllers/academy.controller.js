@@ -196,6 +196,58 @@ exports.getNearby = async (req, res) => {
       }
     }
 
+    // Pincode-text fallback. The spatial query filters out academies
+    // whose latitude/longitude are NULL (a lot of older rows have no
+    // coords). When the caller searched by pincode and we still found
+    // nothing, fall back to a text match on the institutions.pincode
+    // column — exact match first, then a 3-digit prefix so the same
+    // district returns something. Branches are excluded here since they
+    // already require coords by design.
+    if (r.rows.length === 0 && req.query.pincode) {
+      const pin = String(req.query.pincode).trim();
+      if (pin) {
+        const exact = await pool.query(
+          `SELECT i.id, i.name, i.logo_url, i.city, i.address,
+                  NULL::int AS institution_id, NULL::varchar AS institution_name,
+                  i.latitude, i.longitude, i.pincode,
+                  'institution' AS kind,
+                  NULL::float   AS distance_km
+             FROM institutions i
+            WHERE COALESCE(i.deleted_at::text, '') = ''
+              AND i.status = 'active'
+              AND i.pincode = $1
+            ORDER BY i.created_at DESC
+            LIMIT $2`,
+          [pin, limit],
+        );
+        if (exact.rows.length) {
+          r = exact;
+          widened_to = 'pincode-exact';
+        } else if (pin.length >= 3) {
+          // Same district by 3-digit prefix.
+          const prefix = pin.slice(0, 3) + '%';
+          const district = await pool.query(
+            `SELECT i.id, i.name, i.logo_url, i.city, i.address,
+                    NULL::int AS institution_id, NULL::varchar AS institution_name,
+                    i.latitude, i.longitude, i.pincode,
+                    'institution' AS kind,
+                    NULL::float   AS distance_km
+               FROM institutions i
+              WHERE COALESCE(i.deleted_at::text, '') = ''
+                AND i.status = 'active'
+                AND i.pincode LIKE $1
+              ORDER BY i.created_at DESC
+              LIMIT $2`,
+            [prefix, limit],
+          );
+          if (district.rows.length) {
+            r = district;
+            widened_to = 'pincode-prefix';
+          }
+        }
+      }
+    }
+
     // Decorate each row with `seats_available` so the mobile can flag
     // institutions whose subscription plan has hit its student cap.
     // For an institution row, the cap is its own; for a branch row, we
@@ -270,3 +322,4 @@ exports.lookupPincode = async (req, res) => {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
+

@@ -2208,7 +2208,21 @@ exports.createRenewalPaymentLink = async (req, res) => {
       ? Math.round(basePrice * (1 - discountPct / 100))
       : basePrice;
 
-    const linkResult = await createPaymentLink({ amountInRupees: effectivePrice, institution });
+    // ── Apply referral wallet discount to the next renewal ───────────
+    // consumeDiscount debits the institution's accumulated referral
+    // wallet (₹250 per referral that landed) and returns the rupee
+    // discount we should subtract from the renewal price. Capped by
+    // settings.max_discount_pct.
+    let referralDiscount = 0;
+    try {
+      const r = await consumeDiscount(institution.id, effectivePrice);
+      referralDiscount = Number(r?.discount) || 0;
+    } catch (err) {
+      console.warn('[renew] referral discount failed:', err?.message);
+    }
+    const finalPayable = Math.max(0, effectivePrice - referralDiscount);
+
+    const linkResult = await createPaymentLink({ amountInRupees: finalPayable, institution });
     if (!linkResult.ok) {
       return res.status(502).json({ message: `Could not create payment link: ${linkResult.error}` });
     }
@@ -2226,7 +2240,9 @@ exports.createRenewalPaymentLink = async (req, res) => {
     res.json({
       message: 'Renewal payment link created',
       payment_link_url: linkResult.link.short_url,
-      amount: effectivePrice,
+      amount: finalPayable,
+      base_price: effectivePrice,
+      referral_discount: referralDiscount,
       plan_name: institution.plan_name,
     });
   } catch (err) {

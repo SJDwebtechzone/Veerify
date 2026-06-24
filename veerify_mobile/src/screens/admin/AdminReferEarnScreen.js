@@ -226,48 +226,10 @@ export default function AdminReferEarnScreen({ navigation }) {
           </TouchableOpacity>
         </View>
 
-        {/* ── Apply someone else's code ──
-            Only shown until the institution makes its first paid
-            subscription. After that the backend rejects with a 409 and the
-            section disappears via the data.wallet.total_earned check too. */}
-        {!data?.paid ? (
-          <View style={styles.applyCard}>
-            <View style={styles.applyHeader}>
-              <Tag size={14} color={palette.green.vivid} strokeWidth={2.4} />
-              <Text style={styles.applyTitle}>Got a code from another institution?</Text>
-            </View>
-            <Text style={styles.applyHint}>
-              Apply it before your first subscription payment to give them credit.
-            </Text>
-            <View style={styles.applyRow}>
-              <TextInput
-                value={applyCode}
-                onChangeText={setApplyCode}
-                placeholder="VEER-XXXXXX"
-                placeholderTextColor={palette.textLight}
-                style={styles.applyInput}
-                autoCapitalize="characters"
-                autoCorrect={false}
-                maxLength={20}
-              />
-              <TouchableOpacity
-                onPress={onApply}
-                disabled={applying}
-                style={[styles.applyBtn, applying && { opacity: 0.5 }]}
-                activeOpacity={0.85}
-              >
-                {applying ? (
-                  <ActivityIndicator size="small" color="#fff" />
-                ) : (
-                  <>
-                    <Plus size={14} color="#fff" strokeWidth={2.4} />
-                    <Text style={styles.applyBtnText}>Apply</Text>
-                  </>
-                )}
-              </TouchableOpacity>
-            </View>
-          </View>
-        ) : null}
+        {/* Note: the "Got a code from another institution?" apply-code
+            card has been removed by product decision. Apply-code is now
+            only surfaced during the initial plan selection / signup
+            flow, not on the running dashboard. */}
 
         {/* ── Section 3: Summary ── */}
         <SectionTitle>Referral summary</SectionTitle>
