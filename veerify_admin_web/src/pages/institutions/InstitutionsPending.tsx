@@ -14,6 +14,8 @@ interface Institution {
   owner_email: string;
   plan_name: string;
   plan_price: string;
+  plan_trial_days?: number | null;
+  plan_grace_days?: number | null;
   master_name: string;
   registration_number: string;
   onboarding_status: string;
@@ -180,13 +182,24 @@ export function InstitutionsPending() {
                     <p className="text-sm text-gray-500">{inst.owner_email}</p>
                   </td>
                   <td className="px-6 py-4">
-                    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold ${
-                      inst.plan_name === 'Pro'
-                        ? 'bg-purple-100 text-purple-700'
-                        : 'bg-blue-100 text-blue-700'
-                    }`}>
-                      {inst.plan_name} — ₹{parseInt(inst.plan_price).toLocaleString()}
-                    </span>
+                    <div className="flex flex-col gap-1 items-start">
+                      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold ${
+                        inst.plan_name === 'Pro'
+                          ? 'bg-purple-100 text-purple-700'
+                          : 'bg-blue-100 text-blue-700'
+                      }`}>
+                        {inst.plan_name} — ₹{parseInt(inst.plan_price).toLocaleString()}
+                      </span>
+                      {/* Trial countdown — surfaces "approving will start an
+                          N-day trial window" so the super admin understands
+                          exactly what they're granting. Trial plan academies
+                          still must be approved here before getting access. */}
+                      {Number(inst.plan_trial_days) > 0 && (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide bg-amber-50 text-amber-700 border border-amber-200">
+                          Trial · {inst.plan_trial_days}d free on approval
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td className="px-6 py-4">
                     <p className="text-sm text-gray-600">{formatDate(inst.created_at)}</p>

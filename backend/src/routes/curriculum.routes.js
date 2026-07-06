@@ -17,4 +17,9 @@ router.get('/',    verifyToken, requireRole('trainer', 'admin', 'student', 'pare
 router.post('/',   verifyToken, requireRole('trainer', 'admin'), ctrl.markComplete);
 router.delete('/', verifyToken, requireRole('trainer', 'admin'), ctrl.unmarkComplete);
 
+// Student-side: rating + remarks. The controller enforces that only the
+// signed-in student (or their parent) can write feedback for themselves.
+router.post('/feedback', verifyToken, requireRole('student', 'parent'),
+            ctrl.submitStudentFeedback);
+
 module.exports = router;

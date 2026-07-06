@@ -56,6 +56,9 @@ exports.getNearby = async (req, res) => {
     }
 
     // No coords at all — return a generic newest-first list.
+    // Only main institutions here; without a distance to rank on, listing
+    // branches would just clutter the view. Users can drill into the
+    // main academy to see its branches.
     if (Number.isNaN(lat) || Number.isNaN(lng)) {
       const r = await pool.query(
         `SELECT i.id, i.name, i.logo_url, i.city, i.address,
@@ -64,7 +67,14 @@ exports.getNearby = async (req, res) => {
                 'institution' AS kind
            FROM institutions i
           WHERE COALESCE(i.deleted_at::text, '') = ''
-            AND i.status = 'active'
+            AND i.parent_institution_id IS NULL
+            -- Lifecycle column. The institutions.status column is set to
+            -- 'approved' (not 'active') by activateInstitution, so the
+            -- previous filter was excluding every live academy. We use
+            -- onboarding_status here, which actually reaches 'active'
+            -- once payment lands, and also include 'approved' so trial-
+            -- phase academies stay searchable.
+            AND i.onboarding_status IN ('approved', 'active')
           ORDER BY i.created_at DESC
           LIMIT $1`,
         [limit],
@@ -95,6 +105,9 @@ exports.getNearby = async (req, res) => {
 
     const sql = `
       WITH base AS (
+        -- 1) Main institutions — parent_institution_id IS NULL.
+        --    These are top-level academies whose own row carries the
+        --    physical location.
         SELECT
           i.id              AS id,
           i.name            AS name,
@@ -109,12 +122,45 @@ exports.getNearby = async (req, res) => {
           'institution'     AS kind
         FROM institutions i
         WHERE COALESCE(i.deleted_at::text, '') = ''
-          AND i.status = 'active'
+          AND i.parent_institution_id IS NULL
+          AND i.onboarding_status IN ('approved', 'active')
           AND i.latitude IS NOT NULL
           AND i.longitude IS NOT NULL
 
         UNION ALL
 
+        -- 2) Sub-branch institutions — parent_institution_id IS NOT NULL.
+        --    Wizard-created child academies. Each keeps its own location
+        --    (per the sub-branch inheritance rules in getInstitutionById)
+        --    but inherits status/logo from the parent. We surface the
+        --    parent's name so the student card can show "Parent · Branch".
+        SELECT
+          i.id                    AS id,
+          i.name                  AS name,
+          COALESCE(i.logo_url, p.logo_url) AS logo_url,
+          i.city                  AS city,
+          i.address               AS address,
+          i.parent_institution_id AS institution_id,
+          p.name                  AS institution_name,
+          i.latitude              AS latitude,
+          i.longitude             AS longitude,
+          i.pincode               AS pincode,
+          'sub_branch'            AS kind
+        FROM institutions i
+        JOIN institutions p ON p.id = i.parent_institution_id
+        WHERE COALESCE(i.deleted_at::text, '') = ''
+          AND COALESCE(p.deleted_at::text, '') = ''
+          -- Sub-branches piggyback on the PARENT'S subscription state,
+          -- so we check the parent's onboarding_status, not the child's.
+          AND p.onboarding_status IN ('approved', 'active')
+          AND i.latitude IS NOT NULL
+          AND i.longitude IS NOT NULL
+
+        UNION ALL
+
+        -- 3) Satellite locations from institution_branches — extra
+        --    addresses tied to an existing academy for the map pin,
+        --    not standalone academies.
         SELECT
           b.id              AS id,
           b.name            AS name,
@@ -133,7 +179,7 @@ exports.getNearby = async (req, res) => {
           AND b.latitude IS NOT NULL
           AND b.longitude IS NOT NULL
           AND COALESCE(i.deleted_at::text, '') = ''
-          AND i.status = 'active'
+          AND i.onboarding_status IN ('approved', 'active')
       )
       SELECT
         id, name, logo_url, city, address,
@@ -214,7 +260,8 @@ exports.getNearby = async (req, res) => {
                   NULL::float   AS distance_km
              FROM institutions i
             WHERE COALESCE(i.deleted_at::text, '') = ''
-              AND i.status = 'active'
+              AND i.parent_institution_id IS NULL
+              AND i.onboarding_status IN ('approved', 'active')
               AND i.pincode = $1
             ORDER BY i.created_at DESC
             LIMIT $2`,
@@ -234,7 +281,7 @@ exports.getNearby = async (req, res) => {
                     NULL::float   AS distance_km
                FROM institutions i
               WHERE COALESCE(i.deleted_at::text, '') = ''
-                AND i.status = 'active'
+                AND i.onboarding_status IN ('approved', 'active')
                 AND i.pincode LIKE $1
               ORDER BY i.created_at DESC
               LIMIT $2`,
@@ -250,11 +297,14 @@ exports.getNearby = async (req, res) => {
 
     // Decorate each row with `seats_available` so the mobile can flag
     // institutions whose subscription plan has hit its student cap.
-    // For an institution row, the cap is its own; for a branch row, we
-    // use the parent institution's cap (since branches share the plan).
-    const instIds = [...new Set(
-      r.rows.map((row) => row.kind === 'branch' ? row.institution_id : row.id).filter(Boolean),
-    )];
+    // For a main institution row, the cap is its own; for a satellite
+    // branch OR a sub-branch academy row, we use the parent's cap since
+    // both share the parent's subscription plan.
+    const parentIdOf = (row) =>
+      (row.kind === 'branch' || row.kind === 'sub_branch')
+        ? row.institution_id
+        : row.id;
+    const instIds = [...new Set(r.rows.map(parentIdOf).filter(Boolean))];
     if (instIds.length > 0) {
       const capRows = await pool.query(
         `SELECT i.id            AS institution_id,
@@ -281,8 +331,7 @@ exports.getNearby = async (req, res) => {
         };
       });
       r.rows.forEach((row) => {
-        const instId = row.kind === 'branch' ? row.institution_id : row.id;
-        const info = capByInst[instId];
+        const info = capByInst[parentIdOf(row)];
         if (info) Object.assign(row, info);
       });
     }
@@ -297,6 +346,150 @@ exports.getNearby = async (req, res) => {
     });
   } catch (err) {
     console.error('Academies nearby error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// GET /api/academies/by-category?name=Karate&lat=&lng=&limit=
+//
+// Public — powers the Categories tap-through on the mobile Home tab.
+// Returns only active + approved main-branch academies whose skills
+// array, institution_types array, or legacy institution_type contains
+// the given category name (case-insensitive).
+//
+// When lat/lng are provided the results are decorated with distance_km
+// and sorted nearest-first; otherwise they're sorted newest-first so
+// the freshest academies show up.
+exports.getByCategory = async (req, res) => {
+  try {
+    const rawName = String(req.query.name || '').trim();
+    if (!rawName) {
+      return res.status(400).json({ message: 'Category name is required.' });
+    }
+    const limit = Math.min(parseInt(req.query.limit || '50', 10), 200);
+
+    // Optional geo — same shape as the Nearby endpoint.
+    const lat = parseFloat(req.query.lat);
+    const lng = parseFloat(req.query.lng);
+    const hasGeo = !Number.isNaN(lat) && !Number.isNaN(lng);
+
+    // Case-insensitive match across three columns:
+    //   skills             text[]     (wizard-v2 disciplines)
+    //   institution_types  text[]     (multi-type classification)
+    //   institution_type   text       (legacy single type)
+    //
+    // Postgres text[] doesn't support ILIKE, so we lowercase both
+    // sides via a sub-select for each row. UNNEST + LOWER isolates
+    // the comparison to just this row so it stays index-friendly.
+    const matchClause = `
+      (
+        EXISTS (
+          SELECT 1 FROM UNNEST(COALESCE(i.skills, '{}'::text[])) AS s
+          WHERE LOWER(s) = LOWER($1)
+        )
+        OR EXISTS (
+          SELECT 1 FROM UNNEST(COALESCE(i.institution_types, '{}'::text[])) AS t
+          WHERE LOWER(t) = LOWER($1)
+        )
+        OR LOWER(COALESCE(i.institution_type, '')) = LOWER($1)
+      )
+    `;
+
+    // Distance clause — only run the haversine math when we have both
+    // caller coords AND academy coords. Otherwise report NULL distance.
+    const distanceExpr = hasGeo
+      ? `(
+          CASE
+            WHEN i.latitude IS NULL OR i.longitude IS NULL THEN NULL
+            ELSE 6371 * acos(
+              cos(radians($2)) * cos(radians(i.latitude))
+              * cos(radians(i.longitude) - radians($3))
+              + sin(radians($2)) * sin(radians(i.latitude))
+            )
+          END
+        )`
+      : `NULL::float`;
+
+    // Order: with geo → nearest first (NULLS LAST so coord-less rows
+    // don't sink to the bottom below a real hit); without → newest first.
+    const orderClause = hasGeo
+      ? `ORDER BY distance_km ASC NULLS LAST, i.created_at DESC`
+      : `ORDER BY i.created_at DESC`;
+
+    const params = hasGeo ? [rawName, lat, lng, limit] : [rawName, limit];
+    const limitIdx = params.length;
+
+    const sql = `
+      SELECT
+        i.id,
+        i.name,
+        i.logo_url,
+        i.city,
+        i.address,
+        i.pincode,
+        i.latitude,
+        i.longitude,
+        i.institution_type,
+        i.institution_types,
+        i.skills,
+        i.rating,
+        ${distanceExpr} AS distance_km
+      FROM institutions i
+      WHERE COALESCE(i.deleted_at::text, '') = ''
+        -- Public browse: main-branch academies only.
+        AND i.parent_institution_id IS NULL
+        -- Active + approved.
+        AND i.onboarding_status IN ('approved', 'active')
+        AND COALESCE(i.is_active, TRUE) = TRUE
+        AND ${matchClause}
+      ${orderClause}
+      LIMIT $${limitIdx}
+    `;
+
+    let result;
+    try {
+      result = await pool.query(sql, params);
+    } catch (err) {
+      // rating column may not exist on older DBs. Retry once without it.
+      if (String(err?.message || '').toLowerCase().includes('rating')) {
+        const sqlNoRating = sql.replace(/,\s*i\.rating,/, ',');
+        result = await pool.query(sqlNoRating, params);
+      } else {
+        throw err;
+      }
+    }
+
+    // Pick a display "primary" — first skill wins, falling back to the
+    // first institution_types entry, then the legacy single type field.
+    const rows = result.rows.map((r) => {
+      const primary =
+        (Array.isArray(r.skills) && r.skills[0]) ||
+        (Array.isArray(r.institution_types) && r.institution_types[0]) ||
+        r.institution_type ||
+        null;
+      return {
+        id:                r.id,
+        name:              r.name,
+        logo_url:          r.logo_url,
+        city:              r.city,
+        address:           r.address,
+        pincode:           r.pincode,
+        latitude:          r.latitude,
+        longitude:         r.longitude,
+        distance_km:       r.distance_km,
+        primary_category:  primary,
+        rating:            r.rating != null ? Number(r.rating) : null,
+      };
+    });
+
+    res.json({
+      category: rawName,
+      count:    rows.length,
+      origin:   hasGeo ? { latitude: lat, longitude: lng } : null,
+      results:  rows,
+    });
+  } catch (err) {
+    console.error('getByCategory error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };

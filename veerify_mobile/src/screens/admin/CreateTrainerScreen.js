@@ -11,7 +11,7 @@
 //   - Gender (chip select)
 //   - Date of Birth (calendar picker; derived Age is displayed)
 //   - Skill (specialization)  + Belt Level  + Experience years
-//   - Upload Certificate (PDF or image)
+//   - Upload Certificate (PDF only, max 1 MB — mandatory)
 //   - Academy Name (auto-populated from the admin's institution, read-only)
 //   - Govt Proof Type (chip select: Aadhaar / PAN / Driving License / Voter ID / Passport)
 //   - Govt Proof Number
@@ -20,7 +20,7 @@
 // New columns live on the `trainers` table (migration 016). Photo and
 // certificate uploads land on /api/uploads.
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView, Image,
   Alert, ActivityIndicator, StyleSheet, KeyboardAvoidingView, Platform,
@@ -28,7 +28,7 @@ import {
 import {
   ArrowLeft, Camera, FileText, Plus, X, User, Mail, Phone, Lock,
   IdCard, Building, Award, Calendar, Briefcase, ShieldCheck,
-  ExternalLink,
+  ExternalLink, ChevronDown, Check, Trash2,
 } from 'lucide-react-native';
 import { launchImageLibrary, launchCamera } from 'react-native-image-picker';
 // Lazy-require the document picker. Same try/catch pattern as the
@@ -43,7 +43,9 @@ try {
 import apiClient from '../../api/client';
 import DateField from '../../components/DateField';
 import PasswordInput from '../../components/PasswordInput';
+import { useAuth } from '../../context/AuthContext';
 import PlanLimitModal from '../../components/PlanLimitModal';
+import { confirm } from '../../components/ConfirmDialog';
 
 // ─── Theme tokens (kept local to avoid coupling to ../theme) ───────────
 const BRAND = '#E63946';
@@ -61,9 +63,12 @@ const GOVT_PROOF_TYPES = [
   'Aadhaar', 'PAN', 'Driving License', 'Voter ID', 'Passport',
 ];
 
+// Dropdown options for the Skill / Specialization field. Single-select —
+// the trainer picks one discipline. Yoga is included alongside the
+// existing combat disciplines so wellness-focused trainers can register.
 const SKILL_SUGGESTIONS = [
   'Karate', 'Silambam', 'Taekwondo', 'Boxing', 'Muay Thai',
-  'BJJ', 'Judo', 'Kung Fu', 'MMA', 'Self Defense',
+  'BJJ', 'Judo', 'Kung Fu', 'MMA', 'Self Defense', 'Yoga',
 ];
 
 // Compute the age (in years) from an ISO YYYY-MM-DD birthday.
@@ -86,8 +91,27 @@ export default function CreateTrainerScreen({ navigation, route }) {
   const editingTrainer = route?.params?.trainer || null;
   const isEditing = !!editingTrainer;
 
-  const [academyName, setAcademyName] = useState('');
-  const [academyLoading, setAcademyLoading] = useState(true);
+  // Academy name — three-source cascade so the field is populated the
+  // moment the screen mounts, never showing "Loading…" or the generic
+  // "Your academy" placeholder for a logged-in admin:
+  //   1. useAuth().institution.name — the freshly-cached institution row
+  //      from /onboarding/my-status (admins only, set on login/resume).
+  //   2. useAuth().user.institution_name — from the login response
+  //      (backend just started emitting it).
+  //   3. /institutions/me/details fetch — refreshes silently underneath
+  //      so a mid-session rename via Academy Profile still lands here.
+  const { user, institution } = useAuth();
+  const cachedAcademyName =
+    institution?.name ||
+    institution?.brand_name ||
+    user?.institution_name ||
+    '';
+
+  const [academyName, setAcademyName] = useState(cachedAcademyName);
+  // Show "Loading…" only when we have nothing to display. With a cached
+  // name we render instantly; the fetch below silently overwrites the
+  // state if a newer value comes back.
+  const [academyLoading, setAcademyLoading] = useState(!cachedAcademyName);
 
   const [form, setForm] = useState({
     // Account
@@ -100,17 +124,11 @@ export default function CreateTrainerScreen({ navigation, route }) {
     date_of_birth: editingTrainer?.date_of_birth
       ? String(editingTrainer.date_of_birth).slice(0, 10)
       : '',
-    // Profile
-    specialization:   editingTrainer?.specialization || '',
-    belt_level:       editingTrainer?.belt_level || '',
-    experience_years: editingTrainer?.experience_years != null
-      ? String(editingTrainer.experience_years) : '',
+    // Bio (freeform).
     bio:              editingTrainer?.bio || '',
-    // Documents - URL only (no local URI for previously-saved uploads)
+    // Photo — URL only (no local URI for previously-saved uploads).
     photo_url:        editingTrainer?.photo_url || '',
     photo_uri:        '',
-    certificate_url:  editingTrainer?.certificate_url || '',
-    certificate_name: editingTrainer?.certificate_url ? 'Certificate on file' : '',
     // Identity
     govt_proof_type:   editingTrainer?.govt_proof_type   || '',
     govt_proof_number: editingTrainer?.govt_proof_number || '',
@@ -120,25 +138,91 @@ export default function CreateTrainerScreen({ navigation, route }) {
   // response body so the modal can show the real plan name + counts.
   const [planLimit, setPlanLimit] = useState(null);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
-  const [uploadingCert, setUploadingCert] = useState(false);
+
+  // ── Skills (structured, multi-entry) ─────────────────────────────────
+  // Every skill carries its own name, belt level, years of experience,
+  // and PDF certificate. Prefill from editingTrainer.skills when the DB
+  // has it; otherwise synthesize a single row from the legacy singleton
+  // columns (specialization + belt_level + experience_years + certificate_url)
+  // so older trainers land on a clean, editable form.
+  const [skills, setSkills] = useState(() => {
+    const raw = editingTrainer?.skills;
+    if (Array.isArray(raw) && raw.length > 0) {
+      return raw.map((s) => ({
+        name:             s?.name || '',
+        belt_level:       s?.belt_level || '',
+        experience_years: s?.experience_years != null ? String(s.experience_years) : '',
+        certificate_url:  s?.certificate_url || '',
+        certificate_name: s?.certificate_url ? 'Certificate on file' : '',
+        uploading:        false,
+      }));
+    }
+    // Legacy fallback — one row per specialization entry, all sharing the
+    // single belt / experience / certificate the row historically had.
+    const legacySpec = typeof editingTrainer?.specialization === 'string'
+      ? editingTrainer.specialization.split(',').map((s) => s.trim()).filter(Boolean)
+      : (Array.isArray(editingTrainer?.specialization) ? editingTrainer.specialization : []);
+    if (legacySpec.length > 0) {
+      return legacySpec.map((name, i) => ({
+        name,
+        // Belt / experience / certificate only apply to the first row;
+        // the rest start blank so the admin can fill them in.
+        belt_level:       i === 0 ? (editingTrainer?.belt_level || '') : '',
+        experience_years: i === 0 && editingTrainer?.experience_years != null
+          ? String(editingTrainer.experience_years) : '',
+        certificate_url:  i === 0 ? (editingTrainer?.certificate_url || '') : '',
+        certificate_name: i === 0 && editingTrainer?.certificate_url ? 'Certificate on file' : '',
+        uploading:        false,
+      }));
+    }
+    // Fresh trainer → one empty row so the section isn't invisible.
+    return [{ name: '', belt_level: '', experience_years: '', certificate_url: '', certificate_name: '', uploading: false }];
+  });
+
+  const patchSkill = (idx, patch) =>
+    setSkills((prev) => prev.map((s, i) => (i === idx ? { ...s, ...patch } : s)));
+  const addSkill = () =>
+    setSkills((prev) => [...prev, {
+      name: '', belt_level: '', experience_years: '',
+      certificate_url: '', certificate_name: '', uploading: false,
+    }]);
+  const removeSkill = (idx) => {
+    if (skills.length <= 1) {
+      // Never leave the section empty — reset the last row instead.
+      setSkills([{ name: '', belt_level: '', experience_years: '', certificate_url: '', certificate_name: '', uploading: false }]);
+      return;
+    }
+    confirm({
+      title:       'Remove skill?',
+      message:     `Remove "${skills[idx]?.name || 'this skill'}" from the trainer?`,
+      variant:     'destructive',
+      confirmText: 'Remove',
+      cancelText:  'Cancel',
+      onConfirm:   () => setSkills((prev) => prev.filter((_, i) => i !== idx)),
+    });
+  };
 
   const set = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
 
-  // Fetch admin's institution name on mount so the Academy field can show
-  // it as a read-only chip.
+  // Refresh the admin's academy name from the server so a mid-session
+  // rename via Academy Profile lands here too. Runs alongside the
+  // cached value already showing, so the field never blanks out.
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       try {
         const res = await apiClient.get('/institutions/me/details');
         const inst = res.data?.institution || res.data;
-        setAcademyName(inst?.name || inst?.brand_name || '');
+        const nextName = inst?.name || inst?.brand_name || '';
+        if (!cancelled && nextName) setAcademyName(nextName);
       } catch (err) {
-        // Falls back to empty — the server already scopes the trainer to the
-        // admin's institution, so we don't strictly need this for submission.
+        // eslint-disable-next-line no-console
+        console.warn('[CreateTrainer] academy name refresh failed:', err?.message);
       } finally {
-        setAcademyLoading(false);
+        if (!cancelled) setAcademyLoading(false);
       }
     })();
+    return () => { cancelled = true; };
   }, []);
 
   const age = useMemo(() => ageFromDob(form.date_of_birth), [form.date_of_birth]);
@@ -157,17 +241,20 @@ export default function CreateTrainerScreen({ navigation, route }) {
   };
 
   const pickCertificate = () => {
-    // Build the action list dynamically: the PDF option only appears
-    // when the document picker native module is linked, otherwise the
-    // user just sees Gallery/Camera which already work.
-    const actions = [
-      { text: 'PDF document', onPress: () => fromDocument('cert') },
-      { text: 'Gallery',      onPress: () => fromGallery('cert') },
-      { text: 'Camera',       onPress: () => fromCamera('cert') },
-      { text: 'Cancel',       style: 'cancel' },
-    ];
-    if (!DocPicker) actions.shift(); // strip PDF option when unavailable
-    Alert.alert('Upload Certificate', 'Choose how to upload the certificate:', actions);
+    // Certificate uploads are PDF-only now (no Gallery / Camera fallback)
+    // so we can guarantee a clean document for verification. Hand straight
+    // off to the document picker.
+    if (!DocPicker) {
+      confirm({
+        title:       'PDF picker not available',
+        message:     'This build is missing the document picker module. Please update the app to upload a PDF certificate.',
+        variant:     'warning',
+        confirmText: 'OK',
+        hideCancel:  true,
+      });
+      return;
+    }
+    fromDocument('cert');
   };
 
   // PDF / document picker — used for certificate uploads. Handles the
@@ -176,17 +263,19 @@ export default function CreateTrainerScreen({ navigation, route }) {
   // both. Falls back to uploadAsset which already serialises PDFs.
   const fromDocument = async (kind) => {
     if (!DocPicker) {
-      Alert.alert(
-        'PDF not supported',
-        'Document picker module is missing from this build. Use Gallery or Camera to take a photo of the certificate.',
-      );
+      confirm({
+        title:       'PDF not supported',
+        message:     'Document picker module is missing from this build. Use Gallery or Camera to take a photo of the certificate.',
+        variant:     'warning',
+        confirmText: 'OK',
+        hideCancel:  true,
+      });
       return;
     }
     try {
-      // Type filter — v9 wants strings like 'application/pdf', v10 has
-      // a types helper. Both accept the raw MIME string, so we go with
-      // that for compatibility.
-      const opts = { type: ['application/pdf', 'image/*'] };
+      // PDF-only filter — image/* removed since the spec now requires a
+      // proper PDF certificate.
+      const opts = { type: ['application/pdf'] };
 
       let file = null;
       if (typeof DocPicker.pickSingle === 'function') {
@@ -197,14 +286,51 @@ export default function CreateTrainerScreen({ navigation, route }) {
         const res = await DocPicker.pick({ ...opts, allowMultiSelection: false });
         file = Array.isArray(res) ? res[0] : res;
       } else {
-        Alert.alert('PDF not supported', 'No compatible pick API found in the document picker module.');
+        confirm({
+          title:       'PDF not supported',
+          message:     'No compatible pick API found in the document picker module.',
+          variant:     'warning',
+          confirmText: 'OK',
+          hideCancel:  true,
+        });
         return;
       }
       if (!file) return;
 
+      // Defensive MIME / extension check — some pickers report the wrong
+      // type on Android, so we re-verify against the file extension too.
+      const mime = (file.type || '').toLowerCase();
+      const name = (file.name || '').toLowerCase();
+      const isPdf = mime === 'application/pdf' || name.endsWith('.pdf');
+      if (!isPdf) {
+        confirm({
+          title:       'PDF only',
+          message:     'Please pick a PDF file. Other formats are not accepted for the certificate.',
+          variant:     'warning',
+          confirmText: 'OK',
+          hideCancel:  true,
+        });
+        return;
+      }
+
+      // 1 MB size cap. The picker exposes the size in bytes via `file.size`
+      // on every version we support.
+      const MAX_BYTES = 1 * 1024 * 1024;
+      if (typeof file.size === 'number' && file.size > MAX_BYTES) {
+        const mb = (file.size / (1024 * 1024)).toFixed(2);
+        confirm({
+          title:       'File too large',
+          message:     `Certificate must be under 1 MB. Your file is ${mb} MB — please compress it and try again.`,
+          variant:     'warning',
+          confirmText: 'OK',
+          hideCancel:  true,
+        });
+        return;
+      }
+
       uploadAsset({
         uri:      file.fileCopyUri || file.uri,
-        type:     file.type || 'application/pdf',
+        type:     'application/pdf',
         fileName: file.name || 'certificate.pdf',
       }, kind);
     } catch (err) {
@@ -216,7 +342,13 @@ export default function CreateTrainerScreen({ navigation, route }) {
         err?.code === 'DOCUMENT_PICKER_CANCELED' ||
         err?.message?.toLowerCase().includes('cancel');
       if (!isCancel) {
-        Alert.alert('Picker error', err?.message || 'Could not pick the document.');
+        confirm({
+          title:       'Picker error',
+          message:     err?.message || 'Could not pick the document.',
+          variant:     'warning',
+          confirmText: 'OK',
+          hideCancel:  true,
+        });
       }
     }
   };
@@ -242,12 +374,24 @@ export default function CreateTrainerScreen({ navigation, route }) {
     );
   };
 
+  // uploadAsset — routes uploads to one of three destinations:
+  //   kind === 'photo'                → the trainer's profile photo
+  //   kind starts with 'skillCert:'   → a specific skill row's certificate
+  //                                     (kind carries the index, e.g. 'skillCert:2')
+  //   any other value                 → legacy top-level certificate slot
+  //                                     (kept for backward compatibility)
   const uploadAsset = async (asset, kind) => {
-    if (kind === 'photo') {
+    const isPhoto        = kind === 'photo';
+    const skillCertMatch = typeof kind === 'string' && kind.startsWith('skillCert:')
+      ? parseInt(kind.slice('skillCert:'.length), 10)
+      : NaN;
+    const isSkillCert    = Number.isFinite(skillCertMatch);
+
+    if (isPhoto) {
       set('photo_uri', asset.uri);
       setUploadingPhoto(true);
-    } else {
-      setUploadingCert(true);
+    } else if (isSkillCert) {
+      patchSkill(skillCertMatch, { uploading: true });
     }
 
     try {
@@ -255,113 +399,180 @@ export default function CreateTrainerScreen({ navigation, route }) {
       // Infer a sensible mime/name fallback per slot. Photos default
       // to JPEG; certificates default to PDF so a document picker that
       // somehow returns no type still serialises correctly.
-      const defaultType = kind === 'photo' ? 'image/jpeg' : 'application/pdf';
-      const defaultName = kind === 'photo' ? 'photo.jpg' : 'certificate.pdf';
+      const defaultType = isPhoto ? 'image/jpeg' : 'application/pdf';
+      const defaultName = isPhoto ? 'photo.jpg' : 'certificate.pdf';
       fd.append('file', {
         uri: asset.uri,
         type: asset.type || defaultType,
         name: asset.fileName || defaultName,
       });
-      // Pass the trainer's name as the upload hint so the file on disk
-      // is named "mohan-kumar-1738485293-xy12.jpg" instead of the random
-      // gallery temp name. Defaults to "trainer-photo" when the name
-      // field is blank.
       const hintName = (form.name || 'trainer').trim();
-      const hintKind = kind === 'photo' ? 'photo' : 'certificate';
+      const hintKind = isPhoto ? 'photo' : 'certificate';
       const hint = encodeURIComponent(`${hintName}-${hintKind}`);
       const resp = await apiClient.post(`/uploads?name_hint=${hint}`, fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
-      // Store the RELATIVE path returned by /api/uploads (e.g.
-      // "/uploads/xyz.jpg"), not the absolute `url`. The absolute one
-      // bakes in the emulator host (10.0.2.2:5000) and breaks every
-      // other client. resolveAssetUrl prepends the right base at
-      // render time. We keep `url` as a fallback for older builds.
-      if (kind === 'photo') {
-        set('photo_url', resp.data.path || resp.data.url);
-      } else {
-        set('certificate_url', resp.data.path || resp.data.url);
-        set('certificate_name', asset.fileName || 'Certificate');
+      const storedUrl = resp.data.path || resp.data.url;
+
+      if (isPhoto) {
+        set('photo_url', storedUrl);
+      } else if (isSkillCert) {
+        patchSkill(skillCertMatch, {
+          certificate_url:  storedUrl,
+          certificate_name: asset.fileName || 'Certificate',
+        });
       }
     } catch (err) {
-      Alert.alert('Upload failed', 'Please try again with a smaller file.');
-      if (kind === 'photo') set('photo_uri', '');
+      confirm({
+        title:       'Upload failed',
+        message:     'Please try again with a smaller file.',
+        variant:     'warning',
+        confirmText: 'OK',
+        hideCancel:  true,
+      });
+      if (isPhoto) set('photo_uri', '');
     } finally {
-      if (kind === 'photo') setUploadingPhoto(false);
-      else setUploadingCert(false);
+      if (isPhoto) setUploadingPhoto(false);
+      else if (isSkillCert) patchSkill(skillCertMatch, { uploading: false });
     }
   };
+
+  // Trigger a PDF picker for a specific skill row.
+  const pickCertForSkill = (idx) => {
+    if (!DocPicker) {
+      confirm({
+        title:       'PDF picker not available',
+        message:     'This build is missing the document picker module. Please update the app to upload a PDF certificate.',
+        variant:     'warning',
+        confirmText: 'OK', hideCancel: true,
+      });
+      return;
+    }
+    fromDocument(`skillCert:${idx}`);
+  };
+
+  // Close-handles for inline dropdowns. Each dropdown binds its close fn
+  // into one of these refs via useEffect; the ScrollView's onScroll fires
+  // them all so any open panel collapses the moment the trainer-admin
+  // starts scrolling toward the next field.
+  const skillCloseRef = useRef(null);
+  const proofCloseRef = useRef(null);
 
   // ── Validation ───────────────────────────────────────────────────────
   const validate = () => {
     if (!form.name?.trim()) return 'Trainer name is required';
+    // Email is now editable in BOTH modes. Always required + format-check.
+    if (!form.email?.trim()) return 'Email is required';
+    if (!/\S+@\S+\.\S+/.test(form.email)) return 'Please enter a valid email';
     if (!isEditing) {
-      // Email + password are only collected on creation. In edit mode the
-      // login id and password stay untouched.
-      if (!form.email?.trim()) return 'Email is required';
-      if (!/\S+@\S+\.\S+/.test(form.email)) return 'Please enter a valid email';
+      // Password is only collected on creation. In edit mode the
+      // password stays untouched (admin uses the "Change Password"
+      // flow separately if they need to rotate it).
       if (!form.password) return 'Temporary password is required';
       if (form.password.length < 6) return 'Password must be at least 6 characters';
     }
     if (form.phone && form.phone.length < 10) {
       return 'Please enter a valid phone number (or leave it blank)';
     }
-    if (form.experience_years && Number(form.experience_years) < 0) {
-      return 'Experience cannot be negative';
+    // Every skill row that has a name must also have belt / experience /
+    // certificate — otherwise it's incomplete.
+    const namedSkills = skills.filter((s) => s.name?.trim());
+    if (namedSkills.length === 0) {
+      return 'Please add at least one skill with a name.';
+    }
+    for (let i = 0; i < namedSkills.length; i++) {
+      const s = namedSkills[i];
+      if (s.experience_years && Number(s.experience_years) < 0) {
+        return `Skill #${i + 1} — experience cannot be negative.`;
+      }
+      // Certificate is mandatory in PRODUCTION builds only. Skip when
+      // __DEV__ so emulator smoke-tests aren't blocked by an empty
+      // Files app.
+      if (!__DEV__ && !s.certificate_url) {
+        return `Skill #${i + 1} (${s.name}) — please upload the certificate (PDF, under 1 MB).`;
+      }
     }
     return null;
   };
 
   const submit = async () => {
     const err = validate();
-    if (err) { Alert.alert('Required', err); return; }
+    if (err) {
+      // Styled card matches the rest of the app's validation dialogs
+      // (Setup wizard, Enrollment form, Payment screen).
+      confirm({
+        title:       'Check this detail',
+        message:     err,
+        variant:     'warning',
+        confirmText: 'Got it',
+        hideCancel:  true,
+      });
+      return;
+    }
 
     setSubmitting(true);
     try {
+      // Serialise the structured skills array. Backend re-derives the
+      // legacy singleton columns from this on the server side, so we
+      // don't need to send them anymore.
+      const skillsPayload = skills
+        .filter((s) => s.name?.trim())
+        .map((s) => ({
+          name:             s.name.trim(),
+          belt_level:       s.belt_level?.trim() || null,
+          experience_years: Number(s.experience_years) || 0,
+          certificate_url:  s.certificate_url || null,
+        }));
+
       if (isEditing) {
-        // PUT /trainers/:id - omits email + password (handled separately)
+        // PUT /trainers/:id — email is now included. Password is still
+        // handled separately (Change Password flow).
         await apiClient.put(`/trainers/${editingTrainer.id}`, {
           name: form.name.trim(),
+          email: form.email.trim(),
           phone: form.phone.trim() || null,
-          specialization: form.specialization.trim() || null,
-          belt_level: form.belt_level.trim() || null,
-          experience_years: Number(form.experience_years) || 0,
           bio: form.bio.trim() || null,
           gender: form.gender || null,
           date_of_birth: form.date_of_birth || null,
           govt_proof_type: form.govt_proof_type || null,
           govt_proof_number: form.govt_proof_number.trim() || null,
           photo_url: form.photo_url || null,
-          certificate_url: form.certificate_url || null,
+          skills: skillsPayload,
         });
-        Alert.alert(
-          'Changes saved',
-          `${form.name.trim()}'s profile has been updated.`,
-          [{ text: 'OK', onPress: () => navigation.goBack() }],
-        );
+        confirm({
+          title:       'Changes saved',
+          message:     `${form.name.trim()}'s profile has been updated.`,
+          variant:     'success',
+          confirmText: 'Done',
+          hideCancel:  true,
+          onConfirm:   () => navigation.goBack(),
+        });
       } else {
-        // POST /trainers - creates user + trainer in one transaction
+        // POST /trainers - creates user + trainer in one transaction.
+        // Structured skills replace the old singleton fields; backend
+        // derives specialization / belt_level / experience_years /
+        // certificate_url from the first entry for legacy consumers.
         await apiClient.post('/trainers', {
           name: form.name.trim(),
           email: form.email.trim(),
           phone: form.phone.trim() || null,
           password: form.password,
-          specialization: form.specialization.trim() || null,
-          belt_level: form.belt_level.trim() || null,
-          experience_years: Number(form.experience_years) || 0,
           bio: form.bio.trim() || null,
           gender: form.gender || null,
           date_of_birth: form.date_of_birth || null,
           govt_proof_type: form.govt_proof_type || null,
           govt_proof_number: form.govt_proof_number.trim() || null,
           photo_url: form.photo_url || null,
-          certificate_url: form.certificate_url || null,
+          skills: skillsPayload,
         });
-        Alert.alert(
-          'Trainer added',
-          `${form.name.trim()} has been enrolled. Share the email + temporary password so they can sign in.`,
-          [{ text: 'OK', onPress: () => navigation.goBack() }],
-        );
+        confirm({
+          title:       'Trainer added',
+          message:     `${form.name.trim()} has been enrolled. Share the email + temporary password so they can sign in.`,
+          variant:     'success',
+          confirmText: 'Done',
+          hideCancel:  true,
+          onConfirm:   () => navigation.goBack(),
+        });
       }
     } catch (e) {
       // Plan-limit reached? Show a richer prompt with a direct path to the
@@ -378,10 +589,13 @@ export default function CreateTrainerScreen({ navigation, route }) {
           planName: body.plan_name,
         });
       } else {
-        Alert.alert(
-          'Error',
-          body?.message || `Failed to ${isEditing ? 'save changes' : 'create trainer'}`,
-        );
+        confirm({
+          title:       isEditing ? 'Could not save changes' : 'Could not create trainer',
+          message:     body?.message || (isEditing ? 'Try again in a moment.' : 'Try again in a moment.'),
+          variant:     'warning',
+          confirmText: 'OK',
+          hideCancel:  true,
+        });
       }
     } finally {
       setSubmitting(false);
@@ -392,8 +606,6 @@ export default function CreateTrainerScreen({ navigation, route }) {
   const initials = (form.name || ' ')
     .split(' ').map((w) => w[0]).filter(Boolean).slice(0, 2).join('').toUpperCase()
     || '?';
-
-  const certIsPdf = form.certificate_name?.toLowerCase().endsWith('.pdf');
 
   return (
     <KeyboardAvoidingView
@@ -426,6 +638,14 @@ export default function CreateTrainerScreen({ navigation, route }) {
         contentContainerStyle={styles.body}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
+        // Close any open in-page dropdown the moment the user scrolls past
+        // it. Each inline dropdown registers its close handle in its own
+        // ref; we fire every registered handle on every scroll tick.
+        onScroll={() => {
+          skillCloseRef.current && skillCloseRef.current();
+          proofCloseRef.current && proofCloseRef.current();
+        }}
+        scrollEventThrottle={64}
       >
         {/* ── Photo + Identity header card ── */}
         <View style={styles.photoCard}>
@@ -506,147 +726,166 @@ export default function CreateTrainerScreen({ navigation, route }) {
           />
         </Field>
 
-        {isEditing ? (
-          // Show the email as a read-only label in edit mode so the admin can
-          // see (but not edit) the login id. The same applies to password -
-          // changing the login credentials post-creation is a separate flow.
-          <Field label="Email" hint="Login email cannot be changed here.">
-            <View style={[styles.input, { backgroundColor: BG }]}>
-              <Text style={{ fontSize: 14, color: TEXT_MUTED, fontWeight: '700' }} numberOfLines={1}>
-                {form.email || editingTrainer?.email || '—'}
-              </Text>
-            </View>
+        {/* Email — editable in both create AND edit modes. When editing, the
+            new address becomes the trainer's login id on their next sign-in
+            (existing JWTs stay valid until expiry). Backend re-checks
+            uniqueness against every other users row. */}
+        <Field
+          label="Email"
+          required
+          hint={isEditing
+            ? 'Trainer will sign in with this email from now on. Uniqueness is checked on save.'
+            : 'Trainer signs in with this email.'}
+        >
+          <TextInput
+            style={styles.input}
+            placeholder="trainer@example.com"
+            placeholderTextColor={TEXT_LIGHT}
+            value={form.email}
+            onChangeText={(v) => set('email', v)}
+            keyboardType="email-address"
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+        </Field>
+
+        {/* Password is only for creation. */}
+        {!isEditing ? (
+          <Field label="Temporary Password" required hint="At least 6 characters. Share securely with the trainer.">
+            <PasswordInput
+              inputStyle={styles.input}
+              placeholder="••••••"
+              placeholderTextColor={TEXT_LIGHT}
+              value={form.password}
+              onChangeText={(v) => set('password', v)}
+            />
           </Field>
-        ) : (
-          <>
-            <Field label="Email" required hint="Trainer signs in with this email.">
-              <TextInput
-                style={styles.input}
-                placeholder="trainer@example.com"
-                placeholderTextColor={TEXT_LIGHT}
-                value={form.email}
-                onChangeText={(v) => set('email', v)}
-                keyboardType="email-address"
-                autoCapitalize="none"
-                autoCorrect={false}
-              />
-            </Field>
+        ) : null}
 
-            <Field label="Temporary Password" required hint="At least 6 characters. Share securely with the trainer.">
-              <PasswordInput
-                inputStyle={styles.input}
-                placeholder="••••••"
-                placeholderTextColor={TEXT_LIGHT}
-                value={form.password}
-                onChangeText={(v) => set('password', v)}
-              />
-            </Field>
-          </>
-        )}
-
-        {/* ── Section 3: Academy + Skill ── */}
-        <SectionTitle icon={Award} title="Skill & Academy" />
+        {/* ── Section 3: Academy ── */}
+        <SectionTitle icon={Building} title="Academy" />
 
         <Field label="Academy Name" hint="Trainers are enrolled under your current academy.">
           <View style={[styles.input, styles.readonlyChip]}>
             <Building size={14} color={BRAND} strokeWidth={2.2} />
+            {/* Priority: real academy name → 'Loading…' only while we
+                genuinely have nothing → fallback text for admins whose
+                institution row somehow has no name set. */}
             <Text style={styles.readonlyChipText} numberOfLines={1}>
-              {academyLoading ? 'Loading…' : (academyName || 'Your academy')}
+              {academyName
+                ? academyName
+                : academyLoading
+                  ? 'Loading…'
+                  : 'Your academy'}
             </Text>
           </View>
         </Field>
 
-        <Field label="Skill / Specialization" hint="Type your own or tap a suggestion.">
-          <TextInput
-            style={styles.input}
-            placeholder="e.g. Karate"
-            placeholderTextColor={TEXT_LIGHT}
-            value={form.specialization}
-            onChangeText={(v) => set('specialization', v)}
-          />
-          <View style={[styles.chipRow, { marginTop: 8 }]}>
-            {SKILL_SUGGESTIONS.map((s) => {
-              const on = form.specialization?.toLowerCase() === s.toLowerCase();
-              return (
-                <TouchableOpacity
-                  key={s}
-                  style={[styles.suggestChip, on && styles.suggestChipOn]}
-                  onPress={() => set('specialization', s)}
-                  activeOpacity={0.85}
-                >
-                  <Plus
-                    size={11}
-                    color={on ? '#fff' : BRAND}
-                    strokeWidth={2.6}
-                    style={{ marginRight: 3 }}
-                  />
-                  <Text style={[styles.suggestChipText, on && styles.suggestChipTextOn]}>
-                    {s}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
+        {/* ── Section 4: Skills (repeatable) ─────────────────────────
+            Each row is a self-contained skill: name, belt level, years,
+            and a PDF certificate. Admin can Add / Remove rows freely;
+            the backend persists the full array as JSONB and derives the
+            legacy singleton columns from the first entry. */}
+        <SectionTitle icon={Award} title={`Skills (${skills.length})`} />
+
+        {skills.map((skill, idx) => (
+          <View key={`skill-${idx}`} style={styles.skillCard}>
+            <View style={styles.skillCardHead}>
+              <View style={styles.skillCardBadge}>
+                <Text style={styles.skillCardBadgeText}>#{idx + 1}</Text>
+              </View>
+              <Text style={styles.skillCardTitle} numberOfLines={1}>
+                {skill.name?.trim() || 'New skill'}
+              </Text>
+              <TouchableOpacity
+                onPress={() => removeSkill(idx)}
+                style={styles.skillCardRemove}
+                hitSlop={8}
+              >
+                <Trash2 size={14} color="#B91C1C" strokeWidth={2.4} />
+              </TouchableOpacity>
+            </View>
+
+            <Field label="Skill name" required>
+              <TextInput
+                style={styles.input}
+                placeholder="e.g. Karate"
+                placeholderTextColor={TEXT_LIGHT}
+                value={skill.name}
+                onChangeText={(v) => patchSkill(idx, { name: v })}
+                maxLength={80}
+              />
+            </Field>
+
+            <View style={styles.row}>
+              <Field label="Belt level" style={{ flex: 1, marginRight: 8 }}>
+                <TextInput
+                  style={styles.input}
+                  placeholder="e.g. Black Belt 3rd Dan"
+                  placeholderTextColor={TEXT_LIGHT}
+                  value={skill.belt_level}
+                  onChangeText={(v) => patchSkill(idx, { belt_level: v })}
+                />
+              </Field>
+              <Field label="Years" style={{ flex: 1, marginLeft: 8 }}>
+                <TextInput
+                  style={styles.input}
+                  placeholder="0"
+                  placeholderTextColor={TEXT_LIGHT}
+                  value={skill.experience_years}
+                  onChangeText={(v) => patchSkill(idx, { experience_years: v.replace(/[^0-9]/g, '') })}
+                  keyboardType="numeric"
+                  maxLength={2}
+                />
+              </Field>
+            </View>
+
+            <Field label="Certificate" hint="PDF only · Up to 1 MB.">
+              <TouchableOpacity
+                style={[styles.upload, skill.certificate_url && styles.uploadDone]}
+                onPress={() => pickCertForSkill(idx)}
+                disabled={skill.uploading}
+                activeOpacity={0.85}
+              >
+                {skill.uploading ? (
+                  <ActivityIndicator color={BRAND} />
+                ) : skill.certificate_url ? (
+                  <>
+                    <FileText size={26} color="#10B981" strokeWidth={2} />
+                    <Text style={styles.uploadDoneText}>
+                      {skill.certificate_name || 'Certificate'} uploaded
+                    </Text>
+                    <Text style={styles.uploadChangeText}>Tap to replace</Text>
+                  </>
+                ) : (
+                  <>
+                    <FileText size={26} color={BRAND} strokeWidth={2} />
+                    <Text style={styles.uploadText}>Upload Certificate</Text>
+                    <Text style={styles.uploadHint}>PDF only · Up to 1 MB</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            </Field>
           </View>
-        </Field>
+        ))}
 
-        <View style={styles.row}>
-          <Field label="Belt Level" style={{ flex: 1, marginRight: 8 }}>
-            <TextInput
-              style={styles.input}
-              placeholder="e.g. Black Belt 3rd Dan"
-              placeholderTextColor={TEXT_LIGHT}
-              value={form.belt_level}
-              onChangeText={(v) => set('belt_level', v)}
-            />
-          </Field>
-          <Field label="Experience (years)" style={{ flex: 1, marginLeft: 8 }}>
-            <TextInput
-              style={styles.input}
-              placeholder="0"
-              placeholderTextColor={TEXT_LIGHT}
-              value={form.experience_years}
-              onChangeText={(v) => set('experience_years', v.replace(/[^0-9]/g, ''))}
-              keyboardType="numeric"
-              maxLength={2}
-            />
-          </Field>
-        </View>
-
-        <Field label="Certificate" hint="Upload a PDF or image of an achievement / training certificate.">
-          <TouchableOpacity
-            style={[styles.upload, form.certificate_url && styles.uploadDone]}
-            onPress={pickCertificate}
-            disabled={uploadingCert}
-            activeOpacity={0.85}
-          >
-            {uploadingCert ? (
-              <ActivityIndicator color={BRAND} />
-            ) : form.certificate_url ? (
-              <>
-                <FileText size={26} color="#10B981" strokeWidth={2} />
-                <Text style={styles.uploadDoneText}>
-                  {form.certificate_name || 'Certificate'} uploaded
-                </Text>
-                <Text style={styles.uploadChangeText}>Tap to replace</Text>
-              </>
-            ) : (
-              <>
-                <FileText size={26} color={BRAND} strokeWidth={2} />
-                <Text style={styles.uploadText}>Upload Certificate</Text>
-                <Text style={styles.uploadHint}>PDF, JPG or PNG · Up to 10MB</Text>
-              </>
-            )}
-          </TouchableOpacity>
-        </Field>
+        <TouchableOpacity
+          style={styles.addSkillBtn}
+          onPress={addSkill}
+          activeOpacity={0.85}
+        >
+          <Text style={styles.addSkillBtnText}>+ Add another skill</Text>
+        </TouchableOpacity>
 
         {/* ── Section 4: Identity ── */}
         <SectionTitle icon={ShieldCheck} title="Identity Verification" />
 
-        <Field label="Govt Proof Type">
-          <ChipRow
+        <Field label="Govt Proof Type" hint="Pick the ID you'll verify with.">
+          <ProofTypeDropdown
             options={GOVT_PROOF_TYPES}
             value={form.govt_proof_type}
-            onChange={(v) => set('govt_proof_type', v)}
+            onPick={(v) => set('govt_proof_type', v)}
+            closeRef={proofCloseRef}
           />
         </Field>
 
@@ -745,6 +984,152 @@ function Field({ label, hint, required, children, style }) {
       </Text>
       {children}
       {hint ? <Text style={styles.hint}>{hint}</Text> : null}
+    </View>
+  );
+}
+
+// SkillDropdown — multi-select inline dropdown for Skill / Specialization.
+//
+// Closed: trigger row shows the picked values joined by " · " (or a
+//         placeholder if none picked) with a chevron.
+// Open:   inline panel lists every option. Each tap toggles that option
+//         on/off — the panel stays open so the trainer can pick several
+//         disciplines (e.g. Karate + Yoga) in one go.
+function SkillDropdown({ options, values, onToggle, closeRef }) {
+  const [open, setOpen] = React.useState(false);
+  const selected = Array.isArray(values) ? values : [];
+
+  // Bind an imperative close-handle into the parent's ref. The parent's
+  // ScrollView fires this on scroll so the panel collapses as soon as the
+  // trainer-admin moves on to the next field, exactly like the Medium of
+  // Instruction dropdown in the academy setup wizard.
+  React.useEffect(() => {
+    if (closeRef) closeRef.current = () => setOpen(false);
+    return () => { if (closeRef) closeRef.current = null; };
+  }, [closeRef]);
+  const summary = selected.length === 0
+    ? 'Select skill(s)…'
+    : selected.join(' · ');
+
+  return (
+    <View>
+      <TouchableOpacity
+        style={[styles.input, styles.dropdownTrigger, open && styles.dropdownTriggerOpen]}
+        onPress={() => setOpen((o) => !o)}
+        activeOpacity={0.85}
+      >
+        <Text
+          style={[
+            styles.dropdownTriggerText,
+            selected.length === 0 && styles.dropdownTriggerPlaceholder,
+          ]}
+          numberOfLines={1}
+        >
+          {summary}
+        </Text>
+        <ChevronDown
+          size={16}
+          color={TEXT_MUTED}
+          strokeWidth={2.2}
+          style={{ transform: [{ rotate: open ? '180deg' : '0deg' }] }}
+        />
+      </TouchableOpacity>
+
+      {open ? (
+        <View style={styles.dropdownPanel}>
+          {options.map((opt) => {
+            const on = selected.includes(opt);
+            return (
+              <TouchableOpacity
+                key={opt}
+                style={[styles.dropdownItem, on && styles.dropdownItemActive]}
+                onPress={() => onToggle(opt)}
+                activeOpacity={0.7}
+              >
+                <Text
+                  style={[
+                    styles.dropdownItemText,
+                    on && styles.dropdownItemTextActive,
+                  ]}
+                >
+                  {opt}
+                </Text>
+                {on ? <Check size={14} color={BRAND} strokeWidth={2.8} /> : null}
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+// ProofTypeDropdown — single-select inline dropdown for Govt Proof Type.
+//
+// Closed: trigger row shows the picked proof type (or a placeholder).
+// Open:   inline panel lists every option. Tapping one sets the value
+//         and immediately collapses the panel (single-select pattern).
+//
+// closeRef wires the same scroll-to-dismiss behaviour the SkillDropdown
+// uses — the parent ScrollView fires .current() on scroll.
+function ProofTypeDropdown({ options, value, onPick, closeRef }) {
+  const [open, setOpen] = React.useState(false);
+  const placeholder = 'Select proof type…';
+
+  React.useEffect(() => {
+    if (closeRef) closeRef.current = () => setOpen(false);
+    return () => { if (closeRef) closeRef.current = null; };
+  }, [closeRef]);
+
+  return (
+    <View>
+      <TouchableOpacity
+        style={[styles.input, styles.dropdownTrigger, open && styles.dropdownTriggerOpen]}
+        onPress={() => setOpen((o) => !o)}
+        activeOpacity={0.85}
+      >
+        <Text
+          style={[
+            styles.dropdownTriggerText,
+            !value && styles.dropdownTriggerPlaceholder,
+          ]}
+          numberOfLines={1}
+        >
+          {value || placeholder}
+        </Text>
+        <ChevronDown
+          size={16}
+          color={TEXT_MUTED}
+          strokeWidth={2.2}
+          style={{ transform: [{ rotate: open ? '180deg' : '0deg' }] }}
+        />
+      </TouchableOpacity>
+
+      {open ? (
+        <View style={styles.dropdownPanel}>
+          {options.map((opt) => {
+            const on = value === opt;
+            return (
+              <TouchableOpacity
+                key={opt}
+                style={[styles.dropdownItem, on && styles.dropdownItemActive]}
+                onPress={() => { onPick(opt); setOpen(false); }}
+                activeOpacity={0.7}
+              >
+                <Text
+                  style={[
+                    styles.dropdownItemText,
+                    on && styles.dropdownItemTextActive,
+                  ]}
+                >
+                  {opt}
+                </Text>
+                {on ? <Check size={14} color={BRAND} strokeWidth={2.8} /> : null}
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -858,6 +1243,37 @@ const styles = StyleSheet.create({
   chipText: { fontSize: 12, color: TEXT_MUTED, fontWeight: '600' },
   chipTextOn: { color: '#fff', fontWeight: '700' },
 
+  // SkillDropdown — single-select inline dropdown that replaced the old
+  // free-text input + chips for Skill / Specialization.
+  dropdownTrigger: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  dropdownTriggerOpen: { borderColor: BRAND },
+  dropdownTriggerText: { flex: 1, fontSize: 14, color: TEXT, fontWeight: '600' },
+  dropdownTriggerPlaceholder: { color: TEXT_LIGHT, fontWeight: '500' },
+  dropdownPanel: {
+    marginTop: 6,
+    borderWidth: 1,
+    borderColor: BORDER,
+    borderRadius: 12,
+    backgroundColor: '#fff',
+    overflow: 'hidden',
+  },
+  dropdownItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: BORDER,
+  },
+  dropdownItemActive: { backgroundColor: '#FFF1F2' },
+  dropdownItemText: { fontSize: 14, color: TEXT, fontWeight: '600' },
+  dropdownItemTextActive: { color: BRAND, fontWeight: '700' },
+
   // Suggestion pills
   suggestChip: {
     flexDirection: 'row', alignItems: 'center',
@@ -882,6 +1298,48 @@ const styles = StyleSheet.create({
   uploadHint: { fontSize: 11, color: TEXT_MUTED, marginTop: 2 },
   uploadDoneText: { fontSize: 13, fontWeight: '700', color: '#059669', marginTop: 6 },
   uploadChangeText: { fontSize: 11, color: TEXT_MUTED, marginTop: 2 },
+
+  // ── Skill card (repeatable row) ─────────────────────────────────
+  skillCard: {
+    backgroundColor: SURFACE,
+    borderRadius: 14,
+    borderWidth: 1, borderColor: BORDER,
+    padding: 14,
+    marginBottom: 12,
+  },
+  skillCardHead: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    paddingBottom: 10, marginBottom: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: BORDER,
+  },
+  skillCardBadge: {
+    paddingHorizontal: 8, paddingVertical: 3,
+    borderRadius: 999,
+    backgroundColor: BRAND_SOFT,
+  },
+  skillCardBadgeText: {
+    fontSize: 10, fontWeight: '900', color: BRAND, letterSpacing: 0.4,
+  },
+  skillCardTitle: {
+    flex: 1, fontSize: 14, fontWeight: '800', color: TEXT,
+  },
+  skillCardRemove: {
+    width: 28, height: 28, borderRadius: 14,
+    backgroundColor: '#FEE2E2',
+    alignItems: 'center', justifyContent: 'center',
+  },
+
+  addSkillBtn: {
+    marginTop: 4, marginBottom: 8,
+    paddingVertical: 12,
+    borderRadius: 12,
+    borderWidth: 1.5, borderStyle: 'dashed', borderColor: BRAND,
+    backgroundColor: BRAND_SOFT,
+    alignItems: 'center',
+  },
+  addSkillBtnText: {
+    fontSize: 13, fontWeight: '800', color: BRAND, letterSpacing: 0.3,
+  },
 
   // Footer
   footer: {

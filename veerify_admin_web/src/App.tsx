@@ -26,6 +26,8 @@ import { MarketplaceSettings } from './pages/settings/MarketplaceSettings';
 import { Plans } from './pages/settings/Plans';
 import { InstitutionPayouts } from './pages/payments/InstitutionPayouts';
 import { ReferralSettings } from './pages/settings/ReferralSettings';
+import { Profile } from './pages/Profile';
+import { Feedback } from './pages/feedback/Feedback';
 
 export default function App() {
   return (
@@ -84,11 +86,18 @@ export default function App() {
         <Route path="/ratings" element={<PlaceholderPage title="Reviews" icon={Star} />} />
         <Route path="/ratings/trainers" element={<PlaceholderPage title="Trainer Ratings" icon={Star} />} />
 
+        {/* Feedback — user feedback from every mobile role. */}
+        <Route path="/feedback" element={<Feedback />} />
+
         {/* Settings */}
         <Route path="/settings" element={<PlaceholderPage title="General Settings" icon={Settings} />} />
         <Route path="/settings/plans" element={<Plans />} />
         <Route path="/settings/marketplace" element={<MarketplaceSettings />} />
         <Route path="/settings/referral" element={<ReferralSettings />} />
+
+        {/* My Profile — super-admin's own card. Reachable from the navbar
+            avatar menu. Persists edits to /api/auth/me/profile. */}
+        <Route path="/profile" element={<Profile />} />
 
         {/* Fallback */}
         <Route path="*" element={<PlaceholderPage title="Page not found" description="The page you're looking for doesn't exist." />} />

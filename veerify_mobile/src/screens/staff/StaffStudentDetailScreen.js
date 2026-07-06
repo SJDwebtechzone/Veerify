@@ -9,7 +9,7 @@
 //   3. Recent attendance - mini bar chart of the last 14 sessions colored
 //      per status.
 //   4. Contact card - email, emergency contact icon (tap to call/email).
-//   5. Parent details card - parent name + relationship + contact.
+//   (Parent details card removed — managed via parent login flow.)
 //   6. Belt progression - horizontal timeline with current belt highlighted.
 //   7. Leave history - placeholder until /api/leave-requests lands.
 //   8. Notes - inline editable section (saved to local state for now).
@@ -22,12 +22,13 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, ActivityIndicator,
-  StyleSheet, Linking, TextInput,
+  StyleSheet, Linking, TextInput, Image, Alert,
 } from 'react-native';
+import resolveAssetUrl from '../../utils/assetUrl';
 import {
   ArrowLeft, Phone, Mail, Award, TrendingUp, TrendingDown, Minus,
   Calendar, Users, ClipboardList, FileText, Pencil,
-  Plane, Clock, X as XIcon, Check, BookOpen, CalendarDays,
+  Plane, Clock, X as XIcon, Check, BookOpen, CalendarDays, Star,
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
@@ -43,13 +44,30 @@ const BELTS = [
   { key: 'black',  label: 'Black',  bg: '#1F2937', fg: '#FFFFFF', border: '#0F172A' },
 ];
 
-// Stable belt index 0-6 derived from id - keeps the timeline consistent
-// across screens until real belt levels are stored.
-function beltIndexFor(id) {
-  return Math.abs(Number(id) || 0) % BELTS.length;
+// Belt index — first attempt to derive from a real belt name (once the
+// belt journey is wired up). Falls back to null (= no belt awarded yet)
+// rather than the old id-derived random pick so the header no longer
+// lies about a belt the student hasn't actually earned.
+function beltIndexFromName(name) {
+  if (!name) return null;
+  const key = String(name).toLowerCase();
+  const idx = BELTS.findIndex((b) => key.includes(b.key));
+  return idx >= 0 ? idx : null;
 }
-function genderFor(id) { return Math.abs(Number(id) || 0) % 2 === 0 ? 'Male' : 'Female'; }
-function ageFor(id)    { return 12 + (Math.abs(Number(id) || 0) % 24); }
+
+// Age from date_of_birth ("YYYY-MM-DD"). Falls back to null when the
+// student's DOB isn't on file — the hero then shows just the gender
+// without a fake "· 16 yrs" line.
+function ageFromDob(dob) {
+  if (!dob) return null;
+  const d = new Date(dob);
+  if (Number.isNaN(d.getTime())) return null;
+  const now = new Date();
+  let age = now.getFullYear() - d.getFullYear();
+  const m = now.getMonth() - d.getMonth();
+  if (m < 0 || (m === 0 && now.getDate() < d.getDate())) age--;
+  return age >= 0 && age < 150 ? age : null;
+}
 
 const STATUS_META = {
   present: { color: palette.green.vivid,  bg: palette.green.soft,  label: 'Present', icon: Check  },
@@ -177,24 +195,52 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
 
   const recentSessions = records.slice(0, 14).reverse(); // for left-to-right chart
 
-  const beltIdx = beltIndexFor(studentId);
-  const currentBelt = BELTS[beltIdx];
-  const nextBelt = BELTS[Math.min(beltIdx + 1, BELTS.length - 1)];
+  // Belt — for now the belt journey isn't wired here yet, so if we don't
+  // know the student's real belt we hide the "current belt" header pill
+  // entirely (previously we invented a belt from the id and it was
+  // misleading — the student appeared to have a Yellow Belt they hadn't
+  // actually earned).
+  const beltName = passedStudent?.current_belt_name || null;
+  const beltIdx = beltIndexFromName(beltName);
+  const currentBelt = beltIdx !== null ? BELTS[beltIdx] : null;
 
   const name = passedStudent?.student_name || passedStudent?.name || 'Student';
   const email = passedStudent?.student_email || passedStudent?.email || null;
-  const gender = genderFor(studentId);
-  const age = ageFor(studentId);
-  const batchName = passedStudent?.batch_name || 'Batch';
+  const phone = passedStudent?.student_phone || passedStudent?.phone || null;
+  // Prefer real gender / DOB from the trainer roster endpoint; fall back
+  // to hiding those fields when the profile hasn't been captured yet.
+  const gender = passedStudent?.student_gender || null;
+  const age    = ageFromDob(passedStudent?.student_date_of_birth);
+  const batchName  = passedStudent?.batch_name || null;
+  // `courseName` is already declared at the top of the component (used by
+  // the curriculum-progress loader). Reuse it here — declaring it again
+  // shadows the earlier `const` and errors at parse time.
+  const branchName = passedStudent?.batch_branch_name || null;
+  const photoUrl = passedStudent?.student_photo_url
+    ? resolveAssetUrl(passedStudent.student_photo_url)
+    : null;
 
   const initials = name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase();
 
   // ── Actions ──
-  const callOrAlert = () => {
-    // Phone field will be added later. For now offer email if present.
+  // Dial the student's phone if we have one; fall back to their email.
+  // The old behavior was mailto-only which felt broken from a screen
+  // whose emergency-contact row shows a Phone icon.
+  const callStudent = () => {
+    if (phone) {
+      const cleaned = String(phone).replace(/[^0-9+]/g, '');
+      if (cleaned) {
+        Linking.openURL(`tel:${cleaned}`).catch(() =>
+          Alert.alert('Could not place call', 'Your device did not accept the dialer link.'),
+        );
+        return;
+      }
+    }
     if (email) {
       Linking.openURL(`mailto:${email}`).catch(() => {});
+      return;
     }
+    Alert.alert('No contact on file', 'No phone or email saved for this student yet.');
   };
 
   // ── Render ──
@@ -212,20 +258,58 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
 
         <View style={styles.heroBody}>
           <View style={styles.heroAvatar}>
-            <Text style={styles.heroAvatarText}>{initials}</Text>
+            {photoUrl ? (
+              <Image
+                source={{ uri: photoUrl }}
+                style={styles.heroAvatarImg}
+                resizeMode="cover"
+              />
+            ) : (
+              <Text style={styles.heroAvatarText}>{initials}</Text>
+            )}
           </View>
           <Text style={styles.heroName} numberOfLines={1}>{name}</Text>
-          <View style={styles.heroMetaRow}>
-            <Users size={12} color="rgba(255,255,255,0.85)" strokeWidth={2.4} />
-            <Text style={styles.heroMetaText}>{gender} · {age} yrs</Text>
-            <View style={styles.heroDot} />
-            <Calendar size={12} color="rgba(255,255,255,0.85)" strokeWidth={2.4} />
-            <Text style={styles.heroMetaText} numberOfLines={1}>{batchName}</Text>
-          </View>
-          <View style={[styles.heroBelt, { backgroundColor: currentBelt.bg, borderColor: currentBelt.border }]}>
-            <Award size={11} color={currentBelt.fg} strokeWidth={2.4} />
-            <Text style={[styles.heroBeltText, { color: currentBelt.fg }]}>{currentBelt.label} Belt</Text>
-          </View>
+
+          {/* Meta row — only render each chunk when we actually have the
+              data. This replaces the old "Male · 28 yrs · Batch 1" line
+              that was mostly derived from the student's id. */}
+          {(gender || age !== null || batchName) ? (
+            <View style={styles.heroMetaRow}>
+              {(gender || age !== null) ? (
+                <>
+                  <Users size={12} color="rgba(255,255,255,0.85)" strokeWidth={2.4} />
+                  <Text style={styles.heroMetaText}>
+                    {[gender, age !== null ? `${age} yrs` : null].filter(Boolean).join(' · ')}
+                  </Text>
+                </>
+              ) : null}
+              {(gender || age !== null) && batchName ? <View style={styles.heroDot} /> : null}
+              {batchName ? (
+                <>
+                  <Calendar size={12} color="rgba(255,255,255,0.85)" strokeWidth={2.4} />
+                  <Text style={styles.heroMetaText} numberOfLines={1}>{batchName}</Text>
+                </>
+              ) : null}
+            </View>
+          ) : null}
+
+          {/* Course + branch chip line — shows what the student is
+              studying and where. Only renders when we actually know. */}
+          {(courseName || branchName) ? (
+            <Text style={styles.heroSubline} numberOfLines={1}>
+              {[courseName, branchName].filter(Boolean).join(' · ')}
+            </Text>
+          ) : null}
+
+          {/* Belt pill — only when we know the real current belt. We
+              used to invent one from the id, which lied about what the
+              student had actually been promoted to. */}
+          {currentBelt ? (
+            <View style={[styles.heroBelt, { backgroundColor: currentBelt.bg, borderColor: currentBelt.border }]}>
+              <Award size={11} color={currentBelt.fg} strokeWidth={2.4} />
+              <Text style={[styles.heroBeltText, { color: currentBelt.fg }]}>{currentBelt.label} Belt</Text>
+            </View>
+          ) : null}
         </View>
       </View>
 
@@ -261,7 +345,15 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
           {loading ? (
             <ActivityIndicator color={palette.purple.vivid} />
           ) : recentSessions.length === 0 ? (
-            <Text style={styles.placeholderText}>No attendance recorded yet.</Text>
+            <View style={styles.emptyInline}>
+              <View style={styles.emptyInlineIcon}>
+                <ClipboardList size={16} color={palette.textLight} strokeWidth={2.2} />
+              </View>
+              <Text style={styles.emptyInlineTitle}>No attendance yet</Text>
+              <Text style={styles.emptyInlineSub}>
+                Once you mark this batch, the last 14 sessions show up here.
+              </Text>
+            </View>
           ) : (
             <>
               <View style={styles.chartRow}>
@@ -288,32 +380,37 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
 
         {/* Contact card */}
         <Card title="Contact" icon={Phone}>
+          {/* Phone — shown first because it's the trainer's fastest
+              way to actually reach the student. Falls back to an
+              unobtrusive "Not provided" when the profile is empty. */}
+          <ContactRow
+            icon={Phone}
+            label="Phone"
+            value={phone || 'Not provided'}
+            muted={!phone}
+            onPress={phone ? callStudent : null}
+            ctaLabel={phone ? 'Call' : null}
+          />
+          <View style={styles.divider} />
           <ContactRow
             icon={Mail}
             label="Email"
             value={email || 'Not provided'}
+            muted={!email}
             onPress={email ? () => Linking.openURL(`mailto:${email}`).catch(() => {}) : null}
-          />
-          <View style={styles.divider} />
-          <ContactRow
-            icon={Phone}
-            label="Emergency contact"
-            value="Add a phone number to enable calling"
-            muted
-            onPress={callOrAlert}
-            ctaLabel="Email"
+            ctaLabel={email ? 'Email' : null}
           />
         </Card>
 
-        {/* Parent details (placeholder) */}
-        <Card title="Parent details" icon={Users}>
-          <ContactRow icon={Users} label="Guardian" value="Not linked yet" muted />
-          <Text style={styles.placeholderText}>
-            Parent details appear once the student links a parent account.
-          </Text>
-        </Card>
+        {/* Parent details card intentionally removed for the trainer
+            view — the placeholder added noise without giving the trainer
+            anything actionable. Parent linkage is managed via the parent
+            login flow, not from here. */}
 
-        {/* Belt progression timeline */}
+        {/* Belt progression timeline. When we haven't recorded the
+            student's current belt yet, we mark them at "White" (the
+            starting belt) so the timeline still communicates the path
+            ahead without pretending they've already been promoted. */}
         <Card title="Belt progression" icon={Award}>
           <ScrollView
             horizontal
@@ -321,32 +418,34 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
             contentContainerStyle={{ gap: spacing.md, paddingRight: spacing.md }}
           >
             {BELTS.map((b, i) => {
-              const reached = i <= beltIdx;
-              const current = i === beltIdx;
-              const next = i === beltIdx + 1;
+              const anchor  = beltIdx !== null ? beltIdx : 0;
+              const reached = i <= anchor;
+              const current = i === anchor;
+              const next    = i === anchor + 1;
               return (
                 <View key={b.key} style={styles.beltStep}>
                   <View
                     style={[
                       styles.beltCircle,
                       {
-                        backgroundColor: reached ? b.bg : palette.bg,
+                        backgroundColor: reached ? b.bg : palette.borderSoft + '55',
                         borderColor: reached ? b.border : palette.borderSoft,
                       },
-                      current && { transform: [{ scale: 1.1 }] },
+                      current && { transform: [{ scale: 1.12 }] },
                     ]}
                   >
                     {reached ? (
                       <Award size={14} color={b.fg} strokeWidth={2.4} />
                     ) : (
-                      <Text style={styles.beltStepNum}>{i + 1}</Text>
+                      <View style={styles.beltStepDot} />
                     )}
                   </View>
                   <Text
                     style={[
                       styles.beltStepLabel,
-                      current && { color: palette.text, fontWeight: '800' },
-                      next    && { color: palette.purple.vivid, fontWeight: '700' },
+                      !reached && { color: palette.textLight },
+                      current  && { color: palette.text, fontWeight: '800' },
+                      next     && { color: palette.purple.vivid, fontWeight: '700' },
                     ]}
                   >
                     {b.label}
@@ -362,9 +461,15 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
         {/* Leave history (placeholder) */}
         <Card title="Leave history" icon={Plane}>
           {counts.leave === 0 ? (
-            <Text style={styles.placeholderText}>
-              No sanctioned leave on record.
-            </Text>
+            <View style={styles.emptyInline}>
+              <View style={styles.emptyInlineIcon}>
+                <Plane size={16} color={palette.textLight} strokeWidth={2.2} />
+              </View>
+              <Text style={styles.emptyInlineTitle}>No sanctioned leave</Text>
+              <Text style={styles.emptyInlineSub}>
+                Approved leave from the Leave Requests screen will land here.
+              </Text>
+            </View>
           ) : (
             <View style={{ gap: spacing.sm }}>
               {records.filter((r) => r.status === 'leave').slice(0, 5).map((r, i) => (
@@ -379,9 +484,6 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
               ) : null}
             </View>
           )}
-          <Text style={[styles.placeholderText, { marginTop: spacing.sm }]}>
-            Formal leave requests appear here once approved in the Leave Requests screen.
-          </Text>
         </Card>
 
         {/* Curriculum progress — checklist of every lesson on the
@@ -423,6 +525,13 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
                 const saving  = savingIdx === idx;
                 const pickOpen = pickerForIdx === idx;
                 const dateStr = progressByIdx[idx]?.completed_at?.slice?.(0, 10) || null;
+                // Student-side feedback (rating + remarks + when they
+                // last updated). Shown below the lesson meta row when
+                // the student has submitted any feedback.
+                const sRating  = Number(progressByIdx[idx]?.student_rating)  || 0;
+                const sRemarks = (progressByIdx[idx]?.student_remarks || '').toString().trim();
+                const sUpdated = progressByIdx[idx]?.student_remarked_at || null;
+                const hasFeedback = sRating > 0 || sRemarks.length > 0;
                 return (
                   <View key={idx} style={styles.lessonRow}>
                     <TouchableOpacity
@@ -461,6 +570,40 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
                           </View>
                         ) : null}
                       </View>
+
+                      {/* Student-submitted feedback (rating + remarks + the
+                          timestamp of their last update). Read-only on the
+                          trainer side — the trainer can't edit it, only
+                          see what the student wrote. */}
+                      {hasFeedback ? (
+                        <View style={styles.feedbackStrip}>
+                          {sRating > 0 ? (
+                            <View style={styles.feedbackStarsRow}>
+                              {[1, 2, 3, 4, 5].map((n) => (
+                                <Star
+                                  key={n}
+                                  size={12}
+                                  color={n <= sRating ? '#F59E0B' : '#E5E7EB'}
+                                  fill={n <= sRating ? '#F59E0B' : 'transparent'}
+                                  strokeWidth={2.2}
+                                />
+                              ))}
+                              {sUpdated ? (
+                                <Text style={styles.feedbackUpdatedText}>
+                                  · Updated {new Date(sUpdated).toLocaleDateString(undefined, {
+                                    day: 'numeric', month: 'short', year: 'numeric',
+                                  })}
+                                </Text>
+                              ) : null}
+                            </View>
+                          ) : null}
+                          {sRemarks ? (
+                            <Text style={styles.feedbackRemarkText} numberOfLines={3}>
+                              “{sRemarks}”
+                            </Text>
+                          ) : null}
+                        </View>
+                      ) : null}
                     </View>
                     <TouchableOpacity
                       style={styles.lessonDateBtn}
@@ -553,12 +696,22 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
 // ─── Sub-components ─────────────────────────────────────────────────────
 
 function StatPill({ icon: Icon, label, value, accent }) {
+  // Centered layout — top icon in a soft-brand circle, then a bigger
+  // bolder value line, then the label. This replaces the earlier
+  // left-aligned block where a "-" or "0" looked lost.
   return (
     <View style={styles.statPill}>
       <View style={[styles.statPillIcon, { backgroundColor: accent.soft }]}>
-        <Icon size={14} color={accent.vivid} strokeWidth={2.4} />
+        <Icon size={15} color={accent.vivid} strokeWidth={2.4} />
       </View>
-      <Text style={styles.statPillValue} numberOfLines={1}>{value}</Text>
+      <Text
+        style={[styles.statPillValue, { color: accent.vivid }]}
+        numberOfLines={1}
+        adjustsFontSizeToFit
+        minimumFontScale={0.7}
+      >
+        {value}
+      </Text>
       <Text style={styles.statPillLabel}>{label}</Text>
     </View>
   );
@@ -652,6 +805,20 @@ const styles = StyleSheet.create({
     marginBottom: spacing.md,
   },
   heroAvatarText: { color: palette.purple.vivid, fontSize: 28, fontWeight: '800' },
+  // Photo variant of the avatar — same round crop as the initials slot,
+  // uses object-cover so square photos land nicely.
+  heroAvatarImg: {
+    width: '100%', height: '100%', borderRadius: 999,
+  },
+  // Small course/branch line under the meta row.
+  heroSubline: {
+    ...type.caption,
+    color: 'rgba(255,255,255,0.85)',
+    fontWeight: '600',
+    marginTop: 4,
+    textAlign: 'center',
+    paddingHorizontal: 20,
+  },
   heroName: { color: '#fff', fontSize: 22, fontWeight: '800', textAlign: 'center' },
   heroMetaRow: {
     flexDirection: 'row', alignItems: 'center', gap: 4,
@@ -678,23 +845,40 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: spacing.sm,
     paddingHorizontal: spacing.xl,
-    marginTop: -spacing.md,
+    marginTop: -spacing.lg,
   },
   statPill: {
     flex: 1,
     backgroundColor: palette.surface,
     borderRadius: radius.lg,
-    padding: spacing.md,
-    alignItems: 'flex-start',
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 96,
     ...shadows.card,
   },
   statPillIcon: {
-    width: 28, height: 28, borderRadius: 14,
+    width: 30, height: 30, borderRadius: 15,
     alignItems: 'center', justifyContent: 'center',
-    marginBottom: spacing.xs,
+    marginBottom: 8,
   },
-  statPillValue: { ...type.h1, color: palette.text, fontSize: 18 },
-  statPillLabel: { ...type.micro, color: palette.textMuted, fontWeight: '700' },
+  statPillValue: {
+    ...type.bodyBold,
+    color: palette.text,
+    fontSize: 18,
+    fontWeight: '800',
+    textAlign: 'center',
+    letterSpacing: -0.2,
+  },
+  statPillLabel: {
+    ...type.micro,
+    color: palette.textMuted,
+    fontWeight: '700',
+    marginTop: 2,
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+  },
 
   // Card
   card: {
@@ -730,6 +914,33 @@ const styles = StyleSheet.create({
   cardActionText: { ...type.micro, color: palette.purple.on, fontWeight: '800' },
 
   placeholderText: { ...type.caption, color: palette.textMuted, fontStyle: 'italic' },
+  // Inline empty state — used inside cards ("Recent attendance", "Leave
+  // history") when there's nothing to render. Small round icon + short
+  // title + subtitle so the card doesn't just say "italics text".
+  emptyInline: {
+    alignItems: 'center',
+    paddingVertical: spacing.md,
+    gap: 6,
+  },
+  emptyInlineIcon: {
+    width: 34, height: 34, borderRadius: 17,
+    backgroundColor: palette.borderSoft + '99',
+    alignItems: 'center', justifyContent: 'center',
+    marginBottom: 4,
+  },
+  emptyInlineTitle: {
+    ...type.bodyBold,
+    color: palette.text,
+    fontSize: 13,
+  },
+  emptyInlineSub: {
+    ...type.micro,
+    color: palette.textMuted,
+    textAlign: 'center',
+    fontWeight: '600',
+    lineHeight: 14,
+    paddingHorizontal: spacing.md,
+  },
 
   // Curriculum checklist
   lessonRow: {
@@ -807,6 +1018,34 @@ const styles = StyleSheet.create({
   lessonDateChipDay: { ...type.micro, color: palette.textMuted, fontWeight: '700' },
   lessonDateChipDate: { fontSize: 12, fontWeight: '800', color: palette.text, marginTop: 2 },
 
+  // Student feedback (rating + remarks) strip — read-only on the
+  // trainer's lesson row. Sits under the lesson meta row.
+  feedbackStrip: {
+    marginTop: 6,
+    backgroundColor: '#FFFBF0',
+    borderRadius: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    gap: 3,
+  },
+  feedbackStarsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+  },
+  feedbackUpdatedText: {
+    marginLeft: 6,
+    fontSize: 10,
+    color: palette.textMuted,
+    fontWeight: '600',
+  },
+  feedbackRemarkText: {
+    fontSize: 11,
+    color: '#92400E',
+    fontStyle: 'italic',
+    lineHeight: 15,
+  },
+
   // Chart
   chartRow: {
     flexDirection: 'row',
@@ -862,6 +1101,12 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   beltStepNum: { ...type.bodyBold, color: palette.textMuted, fontSize: 13 },
+  // Small dim dot for un-earned belts — replaces the previous "3, 4"
+  // numbering which read like a placeholder rather than a timeline.
+  beltStepDot: {
+    width: 8, height: 8, borderRadius: 4,
+    backgroundColor: palette.borderSoft,
+  },
   beltStepLabel: {
     ...type.caption, color: palette.textMuted, marginTop: 6,
     fontWeight: '700', textAlign: 'center',

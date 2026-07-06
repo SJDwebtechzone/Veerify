@@ -7,6 +7,9 @@ interface AdminUser {
   name: string;
   role: 'super_admin';
   avatar?: string;
+  // Path (relative or absolute) of the logo uploaded via My Profile.
+  // Rendered as the navbar avatar; falls back to initials when null.
+  org_logo_url?: string | null;
 }
 
 interface AuthContextValue {
@@ -15,6 +18,10 @@ interface AuthContextValue {
   isLoading: boolean;
   login: (email: string, password: string) => Promise<{ ok: true } | { ok: false; error: string }>;
   logout: () => void;
+  // Re-fetch /auth/me and update the cached user. Called by the My Profile
+  // editor after a successful save so the Dashboard greeting + navbar
+  // avatar pick up the new owner name without requiring a re-login.
+  refresh: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -42,10 +49,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           const userData = res.data.user || res.data;
           if (userData.role === 'super_admin') {
             setUser({
-              id: userData.id,
-              email: userData.email,
-              name: userData.name,
-              role: 'super_admin',
+              id:           userData.id,
+              email:        userData.email,
+              name:         userData.name,
+              role:         'super_admin',
+              org_logo_url: userData.org_logo_url || null,
             });
           } else {
             setUser(null);
@@ -91,10 +99,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       localStorage.setItem(TOKEN_KEY, token);
 
       const adminUser: AdminUser = {
-        id: userData.id,
-        email: userData.email,
-        name: userData.name,
-        role: 'super_admin',
+        id:           userData.id,
+        email:        userData.email,
+        name:         userData.name,
+        role:         'super_admin',
+        org_logo_url: userData.org_logo_url || null,
       };
 
       setUser(adminUser);
@@ -112,8 +121,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     localStorage.removeItem(USER_KEY);
   };
 
+  // Pull the latest user row from /auth/me and merge into our context
+  // state. Used by My Profile after a successful save.
+  const refresh = async () => {
+    try {
+      const res = await api.get('/auth/me');
+      const u = res.data?.user || res.data;
+      if (u && u.role === 'super_admin') {
+        setUser({
+          id:           u.id,
+          email:        u.email,
+          name:         u.name,
+          role:         'super_admin',
+          org_logo_url: u.org_logo_url || null,
+        });
+      }
+    } catch (err) {
+      console.warn('[auth] refresh failed', err);
+    }
+  };
+
   return (
-    <AuthContext.Provider value={{ user,  isLoading,isAuthenticated: !!user, login, logout }}>
+    <AuthContext.Provider value={{ user, isLoading, isAuthenticated: !!user, login, logout, refresh }}>
       {children}
     </AuthContext.Provider>
   );

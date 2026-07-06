@@ -27,6 +27,7 @@ import { launchImageLibrary, launchCamera } from 'react-native-image-picker';
 
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
+import { confirm } from '../../components/ConfirmDialog';
 
 // Resolve a stored /uploads/<file> path to an absolute URL that works on the
 // Android emulator (which can't reach localhost — it maps to 10.0.2.2).
@@ -332,16 +333,25 @@ export default function CreateCourseScreen({ navigation, route }) {
       } else {
         await apiClient.post('/courses', payload);
       }
-      Alert.alert(
-        isEdit ? 'Course updated' : 'Course created',
-        `${form.name} is now ${form.status === 'active' ? 'live' : 'saved as draft'}.`,
-        [{ text: 'OK', onPress: () => navigation.goBack() }],
-      );
+      // Styled success dialog — green check with one-tap Done that bounces
+      // back to the courses list. Replaces the stock OS Alert.
+      const live = form.status === 'active';
+      confirm({
+        title:       isEdit ? 'Course updated' : 'Course created',
+        message:     `${form.name} is now ${live ? 'live' : 'saved as draft'}.`,
+        variant:     'success',
+        confirmText: 'Done',
+        hideCancel:  true,
+        onConfirm:   () => navigation.goBack(),
+      });
     } catch (err) {
-      Alert.alert(
-        isEdit ? 'Could not update course' : 'Could not create course',
-        err.response?.data?.message || err.message || 'Try again',
-      );
+      confirm({
+        title:       isEdit ? 'Could not update course' : 'Could not create course',
+        message:     err.response?.data?.message || err.message || 'Something went wrong. Please try again.',
+        variant:     'warning',
+        confirmText: 'OK',
+        hideCancel:  true,
+      });
     } finally {
       setLoading(false);
     }

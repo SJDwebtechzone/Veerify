@@ -28,9 +28,27 @@ router.get('/me/events',           verifyToken, institutionController.getMyEvent
 router.get('/me/events/all',       verifyToken, requireRole('admin'), institutionController.listMyInstitutionEvents);
 // /me/events (POST): admin creates an event for their own institution.
 router.post('/me/events',          verifyToken, requireRole('admin'), institutionController.createInstitutionEvent);
+// /events/:eventId/pay — student / trainer taps Pay Now; server mints a
+// Razorpay Payment Link and returns short_url for the app to open. Sits
+// as a literal /events/... path so it doesn't collide with /:id/events.
+router.post('/events/:eventId/pay', verifyToken, institutionController.payForInstitutionEvent);
+
+// Branch → Parent event approval flow.
+//   GET  /me/events/pending — parent admin lists pending branch events.
+//   PATCH /events/:eventId/approve — parent admin approves a branch event.
+//   PATCH /events/:eventId/reject  — parent admin rejects, optional reason.
+router.get('/me/events/pending',       verifyToken, requireRole('admin'), institutionController.listPendingBranchEvents);
+router.patch('/events/:eventId/approve', verifyToken, requireRole('admin'), institutionController.approveBranchEvent);
+router.patch('/events/:eventId/reject',  verifyToken, requireRole('admin'), institutionController.rejectBranchEvent);
 // /me/details + /me/update — admin's own institution.
 router.get('/me/details',          verifyToken, requireRole('admin'), institutionController.getMyInstitution);
 router.put('/me/update',           verifyToken, requireRole('admin'), institutionController.updateInstitution);
+// /me/location — sub-branch admins (and main-branch admins) update just
+// the location fields on their own institution row.
+router.patch('/me/location',       verifyToken, requireRole('admin'), institutionController.updateMyLocation);
+// /sub-branches/:id — main-branch admin edits a sub-branch's location
+// + contact fields from their Branches list on the mobile app.
+router.patch('/sub-branches/:id',  verifyToken, requireRole('admin'), institutionController.updateSubBranch);
 
 // ── Student-facing institution-scoped browse endpoints (public — guests
 //    can browse without an account). These come AFTER the /me/... routes

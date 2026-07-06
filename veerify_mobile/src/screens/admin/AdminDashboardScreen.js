@@ -379,14 +379,20 @@ export default function AdminDashboardScreen({ navigation }) {
                 // at the top when no batch_id was passed in.
                 onPress: () => navigation.navigate('EnrollmentForm', { adminMode: true }),
               },
-              { icon: BookOpen,     label: 'Add Course',     accent: palette.teal,   onPress: () => navigation.navigate('CreateCourse') },
-              { icon: CalendarPlus, label: 'Create Batch',   accent: palette.blue,   onPress: () => navigation.navigate('CreateBatch') },
-              { icon: BellPlus,     label: 'Add Event',      accent: palette.green,  onPress: () => navigation.navigate('CreateEvent') },
-              { icon: Megaphone,    label: 'Send Notice',    accent: palette.orange, onPress: () => navigation.navigate('SendAnnouncement') },
-              { icon: CalendarOff,  label: 'Trainer Leaves', accent: palette.rose,   onPress: () => navigation.navigate('AdminTrainerLeaves') },
-              { icon: Megaphone,    label: 'Trainer Approvals', accent: palette.purple, onPress: () => navigation.navigate('PendingAnnouncements') },
-              { icon: Gift,         label: 'Refer & Earn',   accent: palette.green,  onPress: () => navigation.navigate('AdminReferEarn') },
-            ].reduce((rows, qa, idx) => {
+              // Add Course / Create Batch / Trainer Approvals / Refer & Earn
+              // are main-institution operations. Sub-branch admins only
+              // manage their own branch's day-to-day, so we hide them
+              // when the caller is a sub-branch admin (see the
+              // `mainOnly` flag — filtered out below).
+              { icon: BookOpen,     label: 'Add Course',       accent: palette.teal,   mainOnly: true, onPress: () => navigation.navigate('CreateCourse') },
+              { icon: CalendarPlus, label: 'Create Batch',     accent: palette.blue,   mainOnly: true, onPress: () => navigation.navigate('CreateBatch') },
+              { icon: BellPlus,     label: 'Add Event',        accent: palette.green,  onPress: () => navigation.navigate('CreateEvent') },
+              { icon: Megaphone,    label: 'Send Notice',      accent: palette.orange, onPress: () => navigation.navigate('SendAnnouncement') },
+              { icon: CalendarOff,  label: 'Trainer Leaves',   accent: palette.rose,   onPress: () => navigation.navigate('AdminTrainerLeaves') },
+              { icon: Megaphone,    label: 'Trainer Approvals', accent: palette.purple, mainOnly: true, onPress: () => navigation.navigate('PendingAnnouncements') },
+              { icon: Gift,         label: 'Refer & Earn',     accent: palette.green,  mainOnly: true, onPress: () => navigation.navigate('AdminReferEarn') },
+            ].filter((qa) => !(qa.mainOnly && data.is_sub_branch))
+             .reduce((rows, qa, idx) => {
               if (idx % 3 === 0) rows.push([qa]);
               else rows[rows.length - 1].push(qa);
               return rows;

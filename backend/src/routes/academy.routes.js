@@ -10,5 +10,8 @@ const ctrl    = require('../controllers/academy.controller');
 
 router.get('/nearby',         ctrl.getNearby);
 router.get('/pincode-lookup', ctrl.lookupPincode);
+// Category → academies: powers the Categories tap-through on the mobile
+// Home tab. Guests can browse without auth.
+router.get('/by-category',    ctrl.getByCategory);
 
 module.exports = router;

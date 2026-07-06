@@ -9,17 +9,19 @@
 import React, { useCallback, useMemo, useState } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity, Image,
-  StyleSheet, ActivityIndicator, RefreshControl,
+  StyleSheet, ActivityIndicator, RefreshControl, Alert,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import {
   ArrowLeft, Calendar, MapPin, CalendarPlus, CheckCircle2, Clock,
+  Check, X, AlertCircle,
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
 import FAB from '../../components/FAB';
 import resolveAssetUrl from '../../utils/assetUrl';
 import { palette, spacing, radius, type } from '../../theme';
+import { confirm } from '../../components/ConfirmDialog';
 
 const BRAND       = '#E63946';
 const BRAND_SOFT  = '#FFE4E6';
@@ -41,20 +43,97 @@ function formatDate(iso) {
 
 export default function EventsListScreen({ navigation }) {
   const [events, setEvents]       = useState([]);
+  const [pendingBranchEvents, setPendingBranchEvents] = useState([]);
   const [loading, setLoading]     = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [deciding, setDeciding] = useState({}); // { [eventId]: 'approving' | 'rejecting' }
 
   const load = useCallback(async () => {
     try {
-      const r = await apiClient.get('/institutions/me/events/all');
-      setEvents(r.data?.events || []);
-    } catch (err) {
-      console.log('[EventsList] load error:', err?.message);
+      // Own events + pending branch approvals in parallel. The pending
+      // endpoint 403s for sub-branch admins (only main-branch admins
+      // moderate) — we catch that quietly so the screen stays clean for
+      // both flavors of admin.
+      const [own, pending] = await Promise.all([
+        apiClient.get('/institutions/me/events/all')
+          .catch((err) => {
+            console.log('[EventsList] own load error:', err?.message);
+            return { data: { events: [] } };
+          }),
+        apiClient.get('/institutions/me/events/pending')
+          .catch(() => ({ data: { events: [] } })),
+      ]);
+      setEvents(own.data?.events || []);
+      setPendingBranchEvents(pending.data?.events || []);
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
   }, []);
+
+  // Parent-admin approve / reject actions on the "Pending from branches"
+  // header section. Both fire PATCHes and then re-run load() so the row
+  // moves out of pending into whatever status the branch's EventsList
+  // will show it as (upcoming / scheduled).
+  // Approve / Reject use the shared ConfirmDialog so the sheet lines up
+  // visually with every other action across the app instead of the OS
+  // native gray box. On confirm we PATCH the row and reload; on any
+  // error we surface the message in a follow-up ConfirmDialog.
+  const approveBranchEvent = (event) => {
+    confirm({
+      title:       'Approve event?',
+      message:     `Approve "${event.title}" from ${event.branch_name || 'the branch'}? Students and trainers will see it immediately.`,
+      variant:     'success',
+      confirmText: 'Approve',
+      cancelText:  'Cancel',
+      onConfirm: async () => {
+        setDeciding((p) => ({ ...p, [event.id]: 'approving' }));
+        try {
+          await apiClient.patch(`/institutions/events/${event.id}/approve`);
+          await load();
+        } catch (err) {
+          confirm({
+            title:       'Approve failed',
+            message:     err?.response?.data?.message || err.message || 'Try again in a moment.',
+            variant:     'destructive',
+            confirmText: 'OK',
+            hideCancel:  true,
+          });
+        } finally {
+          setDeciding((p) => { const c = { ...p }; delete c[event.id]; return c; });
+        }
+      },
+    });
+  };
+
+  const rejectBranchEvent = (event) => {
+    confirm({
+      title:       'Reject event?',
+      message:     `Reject "${event.title}"? The branch admin will be notified.`,
+      variant:     'destructive',
+      confirmText: 'Reject',
+      cancelText:  'Cancel',
+      onConfirm: async () => {
+        setDeciding((p) => ({ ...p, [event.id]: 'rejecting' }));
+        try {
+          await apiClient.patch(`/institutions/events/${event.id}/reject`, {
+            reason: 'Not approved by the main institution.',
+          });
+          await load();
+        } catch (err) {
+          confirm({
+            title:       'Reject failed',
+            message:     err?.response?.data?.message || err.message || 'Try again in a moment.',
+            variant:     'destructive',
+            confirmText: 'OK',
+            hideCancel:  true,
+          });
+        } finally {
+          setDeciding((p) => { const c = { ...p }; delete c[event.id]; return c; });
+        }
+      },
+    });
+  };
 
   // Refetch every time the screen is focused — covers the "admin just
   // published a new event, comes back to this screen" path.
@@ -76,6 +155,14 @@ export default function EventsListScreen({ navigation }) {
   // smooth FlatList instead of two stacked ScrollViews.
   const data = useMemo(() => {
     const rows = [];
+    // Pending branch approvals sit above everything else — that's what
+    // demands the main admin's attention.
+    if (pendingBranchEvents.length) {
+      rows.push({ type: 'header', label: `Pending Approvals · ${pendingBranchEvents.length}` });
+      pendingBranchEvents.forEach((e) =>
+        rows.push({ type: 'pending', event: e })
+      );
+    }
     if (upcoming.length) {
       rows.push({ type: 'header', label: `Upcoming · ${upcoming.length}` });
       upcoming.forEach((e) => rows.push({ type: 'event', event: e }));
@@ -85,11 +172,22 @@ export default function EventsListScreen({ navigation }) {
       past.forEach((e) => rows.push({ type: 'event', event: e }));
     }
     return rows;
-  }, [upcoming, past]);
+  }, [upcoming, past, pendingBranchEvents]);
 
   const renderItem = ({ item }) => {
     if (item.type === 'header') {
       return <Text style={styles.sectionTitle}>{item.label}</Text>;
+    }
+    if (item.type === 'pending') {
+      return (
+        <PendingApprovalCard
+          event={item.event}
+          busy={deciding[item.event.id]}
+          onApprove={() => approveBranchEvent(item.event)}
+          onReject={() => rejectBranchEvent(item.event)}
+          onPress={() => navigation.navigate('EventDetail', { event: item.event })}
+        />
+      );
     }
     return (
       <EventCard
@@ -165,7 +263,10 @@ function EventCard({ event, onPress }) {
   const d = event.event_date ? new Date(event.event_date) : null;
   const day = d ? String(d.getDate()).padStart(2, '0') : '--';
   const mon = d ? d.toLocaleString('en-US', { month: 'short' }).toUpperCase() : '---';
-  const isPast = event.status === 'past';
+  const isPast      = event.status === 'past';
+  const isScheduled = event.status === 'scheduled';
+  const isPending   = event.status === 'pending';
+  const isRejected  = event.status === 'rejected';
 
   return (
     <TouchableOpacity
@@ -214,27 +315,51 @@ function EventCard({ event, onPress }) {
           </View>
         </View>
 
-        {/* Status pill */}
+        {/* Status pill — Pending / Rejected / Past / Scheduled / Live.
+            Approval outcomes take priority over date state (a rejected
+            event is rejected regardless of when it was scheduled). */}
         <View
           style={[
             styles.statusPill,
-            isPast
-              ? { backgroundColor: '#F1F5F9' }
-              : { backgroundColor: GREEN + '22' },
+            isPending
+              ? { backgroundColor: '#FEF3C7' }
+              : isRejected
+                ? { backgroundColor: '#FEE2E2' }
+                : isPast
+                  ? { backgroundColor: '#F1F5F9' }
+                  : isScheduled
+                    ? { backgroundColor: '#FEF3C7' }
+                    : { backgroundColor: GREEN + '22' },
           ]}
         >
-          {isPast ? (
+          {isPending ? (
+            <AlertCircle size={10} color="#B45309" strokeWidth={2.4} />
+          ) : isRejected ? (
+            <X size={10} color="#B91C1C" strokeWidth={2.4} />
+          ) : isPast ? (
             <Clock size={10} color={TEXT_MUTED} strokeWidth={2.4} />
+          ) : isScheduled ? (
+            <Clock size={10} color="#B45309" strokeWidth={2.4} />
           ) : (
             <CheckCircle2 size={10} color={GREEN} strokeWidth={2.4} />
           )}
           <Text
             style={[
               styles.statusText,
-              { color: isPast ? TEXT_MUTED : GREEN },
+              {
+                color: isPending  ? '#B45309'
+                     : isRejected ? '#B91C1C'
+                     : isPast     ? TEXT_MUTED
+                     : isScheduled ? '#B45309'
+                     : GREEN,
+              },
             ]}
           >
-            {isPast ? 'Past' : 'Live'}
+            {isPending  ? 'Pending'
+             : isRejected ? 'Rejected'
+             : isPast    ? 'Past'
+             : isScheduled ? 'Scheduled'
+             : 'Live'}
           </Text>
         </View>
       </View>
@@ -254,6 +379,98 @@ function EventCard({ event, onPress }) {
           {event.description}
         </Text>
       ) : null}
+    </TouchableOpacity>
+  );
+}
+
+// ─── Pending Approval card ──────────────────────────────────────────────
+// Rendered only in the parent admin's EventsList, at the top under a
+// "Pending Approvals" section header. Each card shows the branch name
+// so the parent knows which sub-branch submitted the event, plus
+// Approve / Reject action buttons.
+function PendingApprovalCard({ event, busy, onApprove, onReject, onPress }) {
+  const d = event.event_date ? new Date(event.event_date) : null;
+  const day = d ? String(d.getDate()).padStart(2, '0') : '--';
+  const mon = d ? d.toLocaleString('en-US', { month: 'short' }).toUpperCase() : '---';
+  const approving = busy === 'approving';
+  const rejecting = busy === 'rejecting';
+  return (
+    <TouchableOpacity
+      onPress={onPress}
+      activeOpacity={0.9}
+      style={[styles.card, styles.pendingCard]}
+    >
+      <View style={styles.cardTop}>
+        <View style={[styles.dateBlock, { backgroundColor: '#FEF3C7' }]}>
+          <Text style={[styles.dateDay, { color: '#B45309' }]}>{day}</Text>
+          <Text style={[styles.dateMonth, { color: '#B45309' }]}>{mon}</Text>
+        </View>
+
+        <View style={{ flex: 1 }}>
+          <Text style={styles.title} numberOfLines={2}>{event.title}</Text>
+          {event.branch_name ? (
+            <Text style={styles.branchLine} numberOfLines={1}>
+              From: {event.branch_name}
+            </Text>
+          ) : null}
+          <View style={styles.metaRow}>
+            <View style={styles.metaPiece}>
+              <Calendar size={11} color={TEXT_MUTED} strokeWidth={2.2} />
+              <Text style={styles.metaText}>{formatDate(event.event_date)}</Text>
+            </View>
+            {event.location ? (
+              <View style={styles.metaPiece}>
+                <MapPin size={11} color={TEXT_MUTED} strokeWidth={2.2} />
+                <Text style={styles.metaText} numberOfLines={1}>{event.location}</Text>
+              </View>
+            ) : null}
+          </View>
+        </View>
+
+        <View style={[styles.statusPill, { backgroundColor: '#FEF3C7' }]}>
+          <AlertCircle size={10} color="#B45309" strokeWidth={2.4} />
+          <Text style={[styles.statusText, { color: '#B45309' }]}>Pending</Text>
+        </View>
+      </View>
+
+      {event.payment_required ? (
+        <Text style={styles.feeHint}>
+          Paid event · ₹{Number(event.payment_amount || 0).toLocaleString('en-IN')}
+        </Text>
+      ) : null}
+
+      <View style={styles.decideRow}>
+        <TouchableOpacity
+          onPress={onReject}
+          disabled={approving || rejecting}
+          activeOpacity={0.85}
+          style={[styles.rejectBtn, (approving || rejecting) && { opacity: 0.6 }]}
+        >
+          {rejecting ? (
+            <ActivityIndicator color="#B91C1C" />
+          ) : (
+            <>
+              <X size={12} color="#B91C1C" strokeWidth={2.6} />
+              <Text style={styles.rejectBtnText}>Reject</Text>
+            </>
+          )}
+        </TouchableOpacity>
+        <TouchableOpacity
+          onPress={onApprove}
+          disabled={approving || rejecting}
+          activeOpacity={0.85}
+          style={[styles.approveBtn, (approving || rejecting) && { opacity: 0.6 }]}
+        >
+          {approving ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <>
+              <Check size={12} color="#fff" strokeWidth={2.6} />
+              <Text style={styles.approveBtnText}>Approve</Text>
+            </>
+          )}
+        </TouchableOpacity>
+      </View>
     </TouchableOpacity>
   );
 }
@@ -339,4 +556,36 @@ const styles = StyleSheet.create({
     fontSize: 12, color: TEXT_MUTED,
     lineHeight: 17, marginTop: 10,
   },
+
+  // ── Pending-approval card ────────────────────────────────────────
+  pendingCard: {
+    borderColor: '#FCD34D',
+    borderLeftWidth: 4,
+    borderLeftColor: '#F59E0B',
+  },
+  branchLine: {
+    fontSize: 11, color: '#B45309', fontWeight: '800',
+    marginTop: 2,
+    letterSpacing: 0.2,
+  },
+  feeHint: {
+    marginTop: 8, fontSize: 11, color: '#059669', fontWeight: '700',
+  },
+  decideRow: {
+    flexDirection: 'row', gap: 8, marginTop: 12,
+  },
+  rejectBtn: {
+    flex: 1,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 5, paddingVertical: 10, borderRadius: 10,
+    backgroundColor: '#FEE2E2', borderWidth: 1, borderColor: '#FCA5A5',
+  },
+  rejectBtnText: { fontSize: 12, fontWeight: '800', color: '#B91C1C' },
+  approveBtn: {
+    flex: 1.4,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 5, paddingVertical: 10, borderRadius: 10,
+    backgroundColor: GREEN,
+  },
+  approveBtnText: { fontSize: 12, fontWeight: '800', color: '#fff' },
 });

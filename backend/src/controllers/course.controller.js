@@ -128,20 +128,54 @@ exports.createCourse = async (req, res) => {
 // GET my institution's courses (admin only)
 exports.getMyCourses = async (req, res) => {
   try {
-    const institutionId = await getAdminInstitutionId(req.user.id);
-
-    if (!institutionId) {
+    // Resolve the caller's academy group so we can:
+    //   • MAIN admin  → every course under root (they own the catalog)
+    //   • BRANCH admin → only the courses their branch actually handles
+    //                    (has at least one batch scoped to their branch)
+    // and surface `is_sub_branch` so the mobile can hide Edit/Delete/FAB.
+    const scopeRes = await pool.query(
+      `SELECT u.institution_id, i.parent_institution_id
+         FROM users u
+         LEFT JOIN institutions i ON i.id = u.institution_id
+        WHERE u.id = $1`,
+      [req.user.id],
+    );
+    const scope = scopeRes.rows[0];
+    if (!scope?.institution_id) {
       return res.status(400).json({ message: 'No institution found for this admin' });
     }
+    const rootId       = scope.parent_institution_id || scope.institution_id;
+    const isSubBranch  = !!scope.parent_institution_id;
+    const callerInstId = scope.institution_id;
 
-    const result = await pool.query(
-      'SELECT * FROM courses WHERE institution_id = $1 ORDER BY created_at DESC',
-      [institutionId]
-    );
+    let result;
+    if (isSubBranch) {
+      // Branch admin — courses their branch handles = courses that have
+      // at least one batch whose branch_id matches their institution.
+      // Courses live at the root institution; batches carry branch_id.
+      result = await pool.query(
+        `SELECT DISTINCT c.*
+           FROM courses c
+           JOIN batches b ON b.course_id = c.id
+          WHERE c.institution_id = $1
+            AND b.branch_id      = $2
+          ORDER BY c.created_at DESC`,
+        [rootId, callerInstId],
+      );
+    } else {
+      // Main admin — full catalog (they own courses).
+      result = await pool.query(
+        `SELECT * FROM courses
+          WHERE institution_id = $1
+          ORDER BY created_at DESC`,
+        [rootId],
+      );
+    }
 
     res.json({
-      count: result.rows.length,
-      courses: result.rows
+      count:         result.rows.length,
+      is_sub_branch: isSubBranch,
+      courses:       result.rows,
     });
   } catch (err) {
     console.error('Get my courses error:', err);

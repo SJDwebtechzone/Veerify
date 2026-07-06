@@ -46,6 +46,7 @@ const app = express();
 const DEFAULT_ORIGINS = [
   'http://localhost:5173',
   'http://localhost:5174',
+  'http://localhost:5175',
   'http://localhost:3000',
   'http://localhost:4173',
 ];
@@ -109,11 +110,16 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/announcements', announcementRoutes);
 app.use('/api/curriculum-progress', curriculumRoutes);
 app.use('/api/branches', branchRoutes);
+// Per-institution promotional banners shown on student / trainer
+// dashboards. Admin CRUDs them under More → Branding → Banners.
+app.use('/api/institution-banners', require('./src/routes/institutionBanner.routes'));
 app.use('/api/academies', academyRoutes);
 app.use('/api/students', studentRoutes);
 app.use('/api/course-videos', courseVideoRoutes);
 app.use('/api/uploads', uploadRoutes);
 app.use('/api/marketplace-settings', marketplaceRoutes);
+// Feedback module — mobile submit + super-admin read.
+app.use('/api/feedback', require('./src/routes/feedback.routes'));
 
 app.use((req, res) => {
   res.status(404).json({ message: 'Route not found' });

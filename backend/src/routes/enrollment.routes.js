@@ -21,6 +21,15 @@ router.post('/:id/mock-pay', verifyToken, requireRole('student'), enrollmentCont
 
 // Admin/trainer route — enrollments for a single batch
 router.get('/batch/:id', verifyToken, requireRole('admin', 'trainer'), enrollmentController.getEnrollmentsByBatch);
+
+// Trainer-only — one-shot roster of every student across every batch the
+// trainer teaches. Powers "View Students" on the trainer login. Returns
+// full detail (name, phone, photo, course, batch, branch, payment) plus
+// a `has_batches` flag so the UI can show the right empty state.
+router.get('/trainer/my-students',
+  verifyToken,
+  requireRole('trainer'),
+  enrollmentController.getStudentsForMyTrainerBatches);
 // Admin-only — aggregated enrollments across every batch of a course
 router.get('/course/:id', verifyToken, requireRole('admin'), enrollmentController.getEnrollmentsByCourse);
 // Super admin — latest enrollments across all institutions (dashboard)
@@ -40,5 +49,15 @@ router.patch('/student/:userId',
   verifyToken,
   requireRole('admin'),
   enrollmentController.updateStudentByAdmin);
+
+// Admin-only — soft-delete a student (institution + branch login).
+// Used by the Students tab delete action. Mirrors the trainer-delete
+// pattern (marks users.is_deleted = TRUE, status = 'inactive') so
+// enrolments / attendance stay intact while the email/phone become
+// reusable via the partial-unique indexes from migration 050.
+router.delete('/student/:userId',
+  verifyToken,
+  requireRole('admin'),
+  enrollmentController.deleteStudentByAdmin);
 
 module.exports = router;

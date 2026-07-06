@@ -59,6 +59,9 @@ export default function StudentDetailScreen({ navigation, route }) {
   // so cash/online payments captured on the enrollment form actually
   // appear in the Recent Payments card and the Year-to-date summary.
   const [payments, setPayments] = useState([]);
+  // Distinct batches this student is enrolled in — powers the "Batches"
+  // quick-stat tile. Previously hard-coded to 2 for every student.
+  const [batchCount, setBatchCount] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -81,7 +84,18 @@ export default function StudentDetailScreen({ navigation, route }) {
               })
             : null,
         }));
-        if (!cancelled) setPayments(mapped);
+        // Count unique batches. Fall back to enrollment count when
+        // batch_id isn't present on the row (older records).
+        const batchIds = new Set(
+          mine
+            .map((e) => e.batch_id)
+            .filter((id) => id != null),
+        );
+        const uniqueBatches = batchIds.size > 0 ? batchIds.size : mine.length;
+        if (!cancelled) {
+          setPayments(mapped);
+          setBatchCount(uniqueBatches);
+        }
       } catch (err) {
         console.log('[StudentDetail] payments load error:', err?.message);
       }
@@ -188,8 +202,8 @@ export default function StudentDetailScreen({ navigation, route }) {
             icon={ClipboardCheck}
           />
           <QuickStat
-            value="2"
-            label="Batches"
+            value={String(batchCount)}
+            label={batchCount === 1 ? 'Batch' : 'Batches'}
             accent={palette.blue}
             icon={CalendarRange}
           />

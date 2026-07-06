@@ -2,9 +2,20 @@ import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Building2, Search, Eye, RefreshCw, AlertCircle, Trash2, AlertTriangle,
+  CheckCircle2, XCircle, X,
 } from 'lucide-react';
 import apiClient from '../../api/client';
 import { resolveImageUrl } from '../../lib/api';
+
+// Result item returned by the bulk-delete flow — one per selected row.
+// Displayed in the "some failed" summary panel so the admin knows
+// exactly which ones didn't go through and why.
+interface BulkDeleteResult {
+  id:    number;
+  name:  string;
+  ok:    boolean;
+  error?: string;
+}
 
 interface Institution {
   id: number;
@@ -61,6 +72,15 @@ export function InstitutionsList({
   const [pendingDelete, setPendingDelete] = useState<Institution | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [successMsg, setSuccessMsg] = useState('');
+
+  // ── Multi-select + bulk delete ─────────────────────────────────────
+  // `selected` = ids of every institution currently checked. `bulkConfirmOpen`
+  // shows the confirmation modal before firing the bulk DELETE loop. `bulkResults`
+  // holds the per-row outcome so we can render the "N deleted / M failed" panel.
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [bulkConfirmOpen, setBulkConfirmOpen] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [bulkResults, setBulkResults] = useState<BulkDeleteResult[] | null>(null);
 
   const load = async (statusFilter: StatusFilter) => {
     setLoading(true);
@@ -135,6 +155,84 @@ export function InstitutionsList({
     }
   };
 
+  // ── Selection helpers ─────────────────────────────────────────────
+  const toggleOne = (id: number) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const clearSelection = () => setSelected(new Set());
+
+  // Fire N deletes in parallel and record every outcome. The endpoint
+  // already cascades the institution's courses / batches / students /
+  // attendance server-side (see /onboarding/:id — same DELETE the
+  // single-delete flow uses), so no extra client work is needed to
+  // honour "related data is handled according to the application's
+  // deletion rules". We batch results so the admin sees which rows
+  // succeeded and which failed, without a mid-loop halt.
+  const runBulkDelete = async () => {
+    const ids = Array.from(selected);
+    if (ids.length === 0) return;
+
+    // Snapshot the row metadata before we start deleting, so the
+    // results panel can show the actual names even after the rows
+    // disappear from the local list.
+    const byId = new Map(institutions.map((i) => [i.id, i]));
+
+    setBulkDeleting(true);
+    setError('');
+    setSuccessMsg('');
+
+    const results: BulkDeleteResult[] = await Promise.all(
+      ids.map(async (id) => {
+        const inst = byId.get(id);
+        const name = inst?.name || `#${id}`;
+        try {
+          await apiClient.delete(`/onboarding/${id}`);
+          return { id, name, ok: true };
+        } catch (err: any) {
+          return {
+            id,
+            name,
+            ok: false,
+            error: err?.response?.data?.message || err?.message || 'Delete failed',
+          };
+        }
+      }),
+    );
+
+    // Drop every successfully deleted row locally so the list
+    // updates immediately.
+    const okIds = new Set(results.filter((r) => r.ok).map((r) => r.id));
+    if (okIds.size > 0) {
+      setInstitutions((prev) => prev.filter((i) => !okIds.has(i.id)));
+    }
+    // Keep only failed rows in the selection so the admin can retry
+    // them from the same bulk bar.
+    const failedIds = new Set(results.filter((r) => !r.ok).map((r) => r.id));
+    setSelected(failedIds);
+
+    setBulkResults(results);
+    setBulkConfirmOpen(false);
+    setBulkDeleting(false);
+
+    const okCount = results.length - failedIds.size;
+    if (failedIds.size === 0) {
+      setSuccessMsg(
+        `${okCount} institution${okCount === 1 ? '' : 's'} deleted permanently.`,
+      );
+    } else if (okCount > 0) {
+      setSuccessMsg(
+        `${okCount} deleted · ${failedIds.size} failed — see details below.`,
+      );
+    } else {
+      setError(`All ${failedIds.size} deletes failed — see details below.`);
+    }
+  };
+
   const visible = useMemo(() => {
     if (!search.trim()) return institutions;
     const q = search.trim().toLowerCase();
@@ -146,6 +244,27 @@ export function InstitutionsList({
         i.city?.toLowerCase().includes(q),
     );
   }, [institutions, search]);
+
+  // Header checkbox derives its state from selection ∩ current visible
+  // rows so filtering / searching doesn't lie about the "select all".
+  const visibleIds = useMemo(() => visible.map((i) => i.id), [visible]);
+  const allVisibleSelected =
+    visibleIds.length > 0 && visibleIds.every((id) => selected.has(id));
+  const someVisibleSelected =
+    !allVisibleSelected && visibleIds.some((id) => selected.has(id));
+  const toggleAllVisible = () => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (allVisibleSelected) {
+        // Everything visible is checked → uncheck them all.
+        visibleIds.forEach((id) => next.delete(id));
+      } else {
+        // Otherwise add every visible row.
+        visibleIds.forEach((id) => next.add(id));
+      }
+      return next;
+    });
+  };
 
   const counts = useMemo(() => {
     const c = { all: institutions.length, active: 0, approved: 0, pending_approval: 0, rejected: 0, expired: 0 };
@@ -211,6 +330,94 @@ export function InstitutionsList({
         />
       </div>
 
+      {/* ── Bulk action bar ───────────────────────────────────────── */}
+      {/* Sticky-ish bar that appears whenever at least one row is
+          checked. Shows the selection count and a Delete N button.
+          Deliberately kept above the table (rather than floating) so
+          the underlying rows stay legible. */}
+      {selected.size > 0 && (
+        <div className="flex items-center justify-between gap-3 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3">
+          <div className="flex items-center gap-3">
+            <span className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-semibold text-white">
+              {selected.size} selected
+            </span>
+            <button
+              onClick={clearSelection}
+              className="text-sm font-medium text-blue-700 hover:text-blue-900"
+            >
+              Clear
+            </button>
+          </div>
+          <button
+            onClick={() => setBulkConfirmOpen(true)}
+            className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-red-700"
+          >
+            <Trash2 size={15} />
+            Delete {selected.size} institution{selected.size === 1 ? '' : 's'}
+          </button>
+        </div>
+      )}
+
+      {/* ── Bulk results panel ────────────────────────────────────── */}
+      {/* Rendered after a bulk-delete cycle completes, whether or not
+          any rows failed. Lists every attempted row with a green tick
+          (success) or a red cross (failure + reason), so the admin
+          knows exactly what to retry. */}
+      {bulkResults && bulkResults.length > 0 && (
+        <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="mb-3 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-gray-900">
+              Bulk delete results
+              {' · '}
+              <span className="text-emerald-600">
+                {bulkResults.filter((r) => r.ok).length} deleted
+              </span>
+              {bulkResults.some((r) => !r.ok) && (
+                <>
+                  {' · '}
+                  <span className="text-red-600">
+                    {bulkResults.filter((r) => !r.ok).length} failed
+                  </span>
+                </>
+              )}
+            </h3>
+            <button
+              onClick={() => setBulkResults(null)}
+              className="rounded-lg p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+              title="Dismiss"
+            >
+              <X size={16} />
+            </button>
+          </div>
+          <ul className="divide-y divide-gray-100 rounded-lg border border-gray-100">
+            {bulkResults.map((r) => (
+              <li key={r.id} className="flex items-start gap-3 px-3 py-2 text-sm">
+                {r.ok ? (
+                  <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-emerald-500" />
+                ) : (
+                  <XCircle size={16} className="mt-0.5 shrink-0 text-red-500" />
+                )}
+                <div className="flex-1">
+                  <div className="font-medium text-gray-900">{r.name}</div>
+                  {!r.ok && (
+                    <div className="text-xs text-red-600">{r.error || 'Delete failed'}</div>
+                  )}
+                </div>
+                {r.ok ? (
+                  <span className="text-xs font-semibold uppercase tracking-wide text-emerald-600">
+                    Deleted
+                  </span>
+                ) : (
+                  <span className="text-xs font-semibold uppercase tracking-wide text-red-600">
+                    Failed
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {loading ? (
         <div className="flex items-center justify-center py-20">
           <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600" />
@@ -231,6 +438,22 @@ export function InstitutionsList({
             <table className="w-full">
               <thead className="bg-gray-50 border-b border-gray-100">
                 <tr className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                  {/* Master "select all visible" checkbox. Uses the DOM
+                      `indeterminate` state via a ref callback so it
+                      shows a mixed state whenever some — but not all —
+                      visible rows are selected. */}
+                  <th className="px-4 py-3 w-10">
+                    <input
+                      type="checkbox"
+                      checked={allVisibleSelected}
+                      ref={(el) => {
+                        if (el) el.indeterminate = someVisibleSelected;
+                      }}
+                      onChange={toggleAllVisible}
+                      aria-label="Select all visible institutions"
+                      className="h-4 w-4 cursor-pointer rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                    />
+                  </th>
                   <th className="px-5 py-3">Academy</th>
                   <th className="px-5 py-3">Owner</th>
                   <th className="px-5 py-3">Plan</th>
@@ -252,6 +475,8 @@ export function InstitutionsList({
                     onView={() => navigate(`/institutions/${inst.id}`)}
                     onToggle={() => handleToggleActive(inst)}
                     onDelete={() => setPendingDelete(inst)}
+                    selected={selected.has(inst.id)}
+                    onToggleSelect={() => toggleOne(inst.id)}
                   />
                 ))}
               </tbody>
@@ -301,23 +526,110 @@ export function InstitutionsList({
           </div>
         </div>
       )}
+
+      {/* ── Bulk delete confirmation modal ────────────────────────── */}
+      {bulkConfirmOpen && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-lg shadow-2xl">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center shrink-0">
+                <AlertTriangle size={20} className="text-red-600" />
+              </div>
+              <div className="flex-1">
+                <h3 className="text-lg font-bold text-gray-900">
+                  Delete {selected.size} institution{selected.size === 1 ? '' : 's'}?
+                </h3>
+                <p className="text-sm text-gray-600 mt-1">
+                  Every selected academy will be permanently removed along with
+                  its courses, batches, students, and attendance records.
+                  Owner user accounts stay intact so they can re-register.
+                </p>
+                {/* Quick preview of what's about to be deleted so the
+                    admin can catch a rogue selection before it fires. */}
+                <div className="mt-3 max-h-40 overflow-y-auto rounded-lg border border-gray-100 bg-gray-50 p-2">
+                  <ul className="space-y-1">
+                    {Array.from(selected).slice(0, 12).map((id) => {
+                      const inst = institutions.find((i) => i.id === id);
+                      return (
+                        <li key={id} className="text-xs text-gray-700">
+                          • {inst?.name || `#${id}`}
+                        </li>
+                      );
+                    })}
+                    {selected.size > 12 && (
+                      <li className="text-xs italic text-gray-500">
+                        …and {selected.size - 12} more
+                      </li>
+                    )}
+                  </ul>
+                </div>
+                <p className="text-sm text-red-600 font-semibold mt-3">
+                  This action cannot be undone.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={() => setBulkConfirmOpen(false)}
+                disabled={bulkDeleting}
+                className="flex-1 px-4 py-2.5 border border-gray-200 text-gray-700 rounded-xl font-medium hover:bg-gray-50 disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={runBulkDelete}
+                disabled={bulkDeleting}
+                className="flex-1 px-4 py-2.5 bg-red-600 text-white rounded-xl font-semibold hover:bg-red-700 disabled:opacity-60"
+              >
+                {bulkDeleting
+                  ? `Deleting ${selected.size}…`
+                  : `Delete ${selected.size} forever`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 // ─────────── Row ───────────
 function Row({
-  inst, busyToggle, onView, onToggle, onDelete,
+  inst, busyToggle, onView, onToggle, onDelete, selected, onToggleSelect,
 }: {
   inst: Institution;
   busyToggle: boolean;
   onView: () => void;
   onToggle: () => void;
   onDelete: () => void;
+  selected: boolean;
+  onToggleSelect: () => void;
 }) {
   const expiresInfo = expiresLabel(inst.subscription_end);
   return (
-    <tr className="hover:bg-gray-50 transition-colors">
+    <tr
+      className={
+        selected
+          ? 'bg-blue-50/60 transition-colors hover:bg-blue-50'
+          : 'transition-colors hover:bg-gray-50'
+      }
+    >
+      {/* Row checkbox. Clicking anywhere in the cell (not just the
+          checkbox itself) toggles selection to make it easier to hit. */}
+      <td
+        className="px-4 py-4 cursor-pointer"
+        onClick={onToggleSelect}
+      >
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={onToggleSelect}
+          onClick={(e) => e.stopPropagation()}
+          aria-label={`Select ${inst.name}`}
+          className="h-4 w-4 cursor-pointer rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+        />
+      </td>
       <td className="px-5 py-4">
         <div className="flex items-center gap-3">
           <Logo logoUrl={inst.logo_url} name={inst.name} />

@@ -17,15 +17,17 @@
 // Route params:
 //   event   the full event row (or at least { title, event_date })
 
-import React from 'react';
+import React, { useState } from 'react';
 import {
   View, Text, Image, ScrollView, TouchableOpacity, Linking, StyleSheet,
+  ActivityIndicator, Alert,
 } from 'react-native';
 import {
   ArrowLeft, Calendar, MapPin, Clock, ExternalLink,
-  CheckCircle2, Share2,
+  CheckCircle2, Share2, CreditCard,
 } from 'lucide-react-native';
 
+import apiClient from '../api/client';
 import resolveAssetUrl from '../utils/assetUrl';
 
 const BRAND       = '#E63946';
@@ -49,7 +51,12 @@ function formatFullDate(iso) {
 }
 
 export default function EventDetailScreen({ route, navigation }) {
-  const event = route?.params?.event || {};
+  // Local mirror of the event so we can flip has_paid to true after a
+  // successful pay round-trip without needing the caller screen to
+  // refetch.
+  const [event, setEvent] = useState(route?.params?.event || {});
+  const [paying, setPaying] = useState(false);
+
   const isPast = event.status === 'past'
     || (event.event_date && new Date(event.event_date) < new Date(new Date().toDateString()));
 
@@ -60,6 +67,41 @@ export default function EventDetailScreen({ route, navigation }) {
   const openLink = () => {
     if (!event.link) return;
     Linking.openURL(event.link).catch(() => {});
+  };
+
+  // ── Pay Now ────────────────────────────────────────────────────────
+  // POSTs to /institutions/events/:id/pay, which mints (or reuses) a
+  // Razorpay Payment Link and returns its short URL. We then open that
+  // URL in the phone browser — same pattern as the subscription Pay
+  // Now on AdminDashboardScreen.
+  const payForEvent = async () => {
+    if (paying) return;
+    if (!event?.id) return;
+
+    setPaying(true);
+    try {
+      const res = await apiClient.post(`/institutions/events/${event.id}/pay`);
+      if (res.data?.already_paid) {
+        setEvent((e) => ({ ...e, has_paid: true }));
+        Alert.alert('Already paid', 'Our records show you have already paid for this event.');
+        return;
+      }
+      const url = res.data?.short_url;
+      if (!url) {
+        Alert.alert('Could not start payment', 'The payment link is missing. Please try again.');
+        return;
+      }
+      try {
+        await Linking.openURL(url);
+      } catch {
+        Alert.alert('Could not open payment page', 'Please try again in a moment.');
+      }
+    } catch (err) {
+      const msg = err.response?.data?.message || err.message || 'Payment failed to start.';
+      Alert.alert('Payment error', msg);
+    } finally {
+      setPaying(false);
+    }
   };
 
   return (
@@ -158,6 +200,39 @@ export default function EventDetailScreen({ route, navigation }) {
             <Text style={styles.sectionTitle}>About this event</Text>
             <Text style={styles.body}>{event.description}</Text>
           </View>
+        ) : null}
+
+        {/* Payment CTA — only when the admin turned on Payment Required
+            AND the event isn't already past AND the caller hasn't paid.
+            Same visual language as the External link CTA so the two
+            buttons stack nicely when both are present. */}
+        {event.payment_required && !isPast ? (
+          event.has_paid ? (
+            <View style={styles.paidBadge}>
+              <CheckCircle2 size={16} color={GREEN} strokeWidth={2.4} />
+              <Text style={styles.paidBadgeText}>
+                Paid — you're all set for this event.
+              </Text>
+            </View>
+          ) : (
+            <TouchableOpacity
+              style={[styles.payBtn, paying && { opacity: 0.7 }]}
+              onPress={payForEvent}
+              disabled={paying}
+              activeOpacity={0.85}
+            >
+              {paying ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <>
+                  <CreditCard size={16} color="#fff" strokeWidth={2.4} />
+                  <Text style={styles.payBtnText}>
+                    Pay ₹{Number(event.payment_amount || 0).toLocaleString('en-IN')} · Pay Now
+                  </Text>
+                </>
+              )}
+            </TouchableOpacity>
+          )
         ) : null}
 
         {/* External link CTA */}
@@ -290,7 +365,7 @@ const styles = StyleSheet.create({
   linkBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
     gap: 8,
-    marginHorizontal: 16, marginTop: 18,
+    marginHorizontal: 16, marginTop: 12,
     paddingVertical: 14,
     borderRadius: 12,
     backgroundColor: BRAND,
@@ -298,5 +373,31 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 8 },
     elevation: 6,
   },
+
+  // Pay Now — same shape as linkBtn but on a green shade so it reads as
+  // a distinct action from Open registration / details.
+  payBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 8,
+    marginHorizontal: 16, marginTop: 18,
+    paddingVertical: 14,
+    borderRadius: 12,
+    backgroundColor: GREEN,
+    shadowColor: GREEN, shadowOpacity: 0.3, shadowRadius: 14,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 6,
+  },
+  payBtnText: { color: '#fff', fontWeight: '800', fontSize: 15, letterSpacing: 0.2 },
+
+  // Green success chip shown after a successful payment (has_paid=true).
+  paidBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    marginHorizontal: 16, marginTop: 18,
+    paddingVertical: 12, paddingHorizontal: 14,
+    backgroundColor: GREEN + '15',
+    borderRadius: 12,
+    borderWidth: 1, borderColor: GREEN + '55',
+  },
+  paidBadgeText: { color: GREEN, fontWeight: '800', fontSize: 13 },
   linkBtnText: { color: '#fff', fontSize: 14, fontWeight: '800', letterSpacing: 0.3 },
 });

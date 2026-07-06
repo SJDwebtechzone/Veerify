@@ -51,7 +51,14 @@ async function getUsage(institutionId, kind) {
   let currentSql;
   if (kind === 'trainers') {
     limitCol = plan.max_trainers;
-    currentSql = `SELECT COUNT(*)::int AS c FROM trainers WHERE institution_id = $1`;
+    // IMPORTANT: filter out soft-deleted trainers. Otherwise deleting a
+    // trainer doesn't free up a slot on the cap and the admin gets stuck
+    // seeing "upgrade plan" even after removing people.
+    currentSql = `SELECT COUNT(*)::int AS c
+                    FROM trainers t
+                    JOIN users u ON t.user_id = u.id
+                   WHERE t.institution_id = $1
+                     AND COALESCE(u.is_deleted, false) = false`;
   } else if (kind === 'branches') {
     limitCol = plan.max_branches;
     // No branches table yet — return 1 (the institution itself).
@@ -65,9 +72,14 @@ async function getUsage(institutionId, kind) {
     };
   } else {
     // default 'students' — distinct paid + pending students enrolled.
+    // Same soft-delete filter as trainers so removed students free up
+    // their slot on the plan cap.
     limitCol = plan.max_students;
-    currentSql = `SELECT COUNT(DISTINCT student_id)::int AS c
-                    FROM enrollments WHERE institution_id = $1`;
+    currentSql = `SELECT COUNT(DISTINCT e.student_id)::int AS c
+                    FROM enrollments e
+                    JOIN users u ON e.student_id = u.id
+                   WHERE e.institution_id = $1
+                     AND COALESCE(u.is_deleted, false) = false`;
   }
 
   const limit = limitCol == null ? null : Number(limitCol);

@@ -90,16 +90,38 @@ export default function StaffNotificationsScreen({ navigation }) {
 
   const onTap = async (n) => {
     await markRead(n);
-    const screen = n.data?.screen;
-    if (screen) {
-      // Strip the reserved `screen` key — React Navigation v7 treats it as a
-      // nested-navigator hint and can mis-route silently when we pass it as
-      // params for a top-level Stack.Screen. Everything else in n.data is
-      // safe to forward as route.params.
-      const { screen: _drop, ...params } = n.data || {};
-      try { navigation.navigate(screen, params); } catch (err) {
-        console.log('[notif] navigate failed:', screen, err?.message);
-      }
+
+    // The `data` column is JSONB and normally deserializes into an
+    // object, but if a driver hiccup ever hands it back as a string we
+    // parse defensively so notifications don't silently no-op.
+    let data = n.data;
+    if (typeof data === 'string') {
+      try { data = JSON.parse(data); } catch { data = {}; }
+    }
+    data = data || {};
+
+    // Explicit deep-link takes precedence.
+    let screen = data.screen;
+
+    // Backwards-compat fallback for notifications minted before we
+    // started stamping data.screen — infer the destination from the
+    // semantic `kind` so old rows sitting in the inbox still route.
+    if (!screen && data.kind) {
+      const KIND_TO_SCREEN = {
+        branch_event_pending:  'EventsList',
+        branch_event_approved: 'EventsList',
+        branch_event_rejected: 'EventsList',
+      };
+      screen = KIND_TO_SCREEN[data.kind];
+    }
+
+    if (!screen) return;
+    // Strip the reserved `screen` key — React Navigation v7 treats it
+    // as a nested-navigator hint and can mis-route silently when passed
+    // as params. Everything else in data is safe to forward.
+    const { screen: _drop, ...params } = data;
+    try { navigation.navigate(screen, params); } catch (err) {
+      console.log('[notif] navigate failed:', screen, err?.message);
     }
   };
 

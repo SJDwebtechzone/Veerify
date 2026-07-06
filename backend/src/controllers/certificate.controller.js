@@ -1,4 +1,8 @@
 const pool = require('../config/db');
+// Branch-scoped access check — main admin can only see students
+// enrolled in main-institution batches; sub-branch admins only see
+// students enrolled in their own branch's batches.
+const { getBranchScope, adminCanSeeStudent } = require('../utils/branchScope');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Certificates
@@ -92,12 +96,19 @@ exports.listForStudent = async (req, res) => {
       );
       if (link.rows.length === 0) return res.status(403).json({ message: 'Access denied' });
     }
-    // Permission: admin in same institution
+    // Permission: admin whose branch scope includes this student. A main
+    // admin can only see students enrolled in main-institution batches;
+    // sub-branch admins only see their own branch's students.
     if (role === 'admin') {
-      const sRow = await pool.query(`SELECT institution_id FROM users WHERE id = $1`, [studentId]);
-      const my = await getInstitutionId(req.user.id);
-      if (sRow.rows[0]?.institution_id !== my) {
-        return res.status(403).json({ message: 'Not your student' });
+      const scope = await getBranchScope(req.user.id);
+      const canSee = await adminCanSeeStudent(pool, scope, studentId);
+      if (!canSee) {
+        // Fallback: allow when the student is directly registered under
+        // the admin's institution (edge case: no enrollments yet).
+        const sRow = await pool.query(`SELECT institution_id FROM users WHERE id = $1`, [studentId]);
+        if (!scope || sRow.rows[0]?.institution_id !== scope.callerInstId) {
+          return res.status(403).json({ message: 'Not your student' });
+        }
       }
     }
     // Permission: trainer in any of student's batches

@@ -13,6 +13,10 @@ router.post('/reset-password', authController.resetPassword);
 
 // Protected route - get logged-in user info
 router.get('/me', verifyToken, authController.getMe);
+// Super-admin "My Profile" editor — same shape as /me, plus org_name,
+// org_logo_url and alt_phone editing. Role enforcement lives in the
+// controller (only admin / super_admin are accepted).
+router.put('/me/profile', verifyToken, authController.updateMyProfile);
 
 // Change own password
 router.post('/change-password', verifyToken, authController.changePassword);

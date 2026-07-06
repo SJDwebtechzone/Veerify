@@ -95,7 +95,11 @@ exports.getProgress = async (req, res) => {
     if (!course) return res.status(404).json({ message: 'Course not found' });
 
     const pRes = await pool.query(
-      `SELECT p.lesson_index, p.completed_at, p.notes,
+      `SELECT p.lesson_index,
+              p.completed_at, p.notes,
+              p.student_rating,
+              p.student_remarks,
+              p.student_remarked_at,
               u.name AS completed_by_name
          FROM student_curriculum_progress p
          LEFT JOIN users u ON u.id = p.completed_by
@@ -164,6 +168,98 @@ exports.markComplete = async (req, res) => {
     res.status(201).json({ progress: r.rows[0] });
   } catch (err) {
     console.error('Curriculum markComplete error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// POST /api/curriculum-progress/feedback
+//
+// Student-side write: lets the signed-in student (or a parent acting on
+// their behalf) attach a rating + remarks to a specific lesson. Unlike
+// markComplete this DOES auto-create a progress row if one doesn't exist
+// yet — the student shouldn't have to wait for the trainer to tick the
+// lesson before they can rate it.
+//
+// Body: { course_id, lesson_index, rating?, remarks? }
+//       (student_id is implicit — pulled from req.user)
+//
+// Either rating or remarks must be supplied; both can be cleared by
+// passing null explicitly.
+exports.submitStudentFeedback = async (req, res) => {
+  try {
+    const { course_id, lesson_index } = req.body || {};
+    let { rating, remarks } = req.body || {};
+    const cid = parseInt(course_id,    10);
+    const idx = parseInt(lesson_index, 10);
+    if (!cid || Number.isNaN(idx) || idx < 0) {
+      return res.status(400).json({ message: 'course_id and lesson_index are required' });
+    }
+
+    // Only the student themself (or their parent — handled the same as the
+    // student in the existing assertCanManage helper) can write feedback.
+    if (!['student', 'parent'].includes(req.user.role)) {
+      return res.status(403).json({
+        message: 'Only students can submit feedback for their own lessons.',
+      });
+    }
+    const sid = req.user.id;
+
+    // Validate rating range when supplied. Allow explicit null to clear.
+    if (rating !== undefined && rating !== null && rating !== '') {
+      const r = Number(rating);
+      if (!Number.isInteger(r) || r < 1 || r > 5) {
+        return res.status(400).json({ message: 'rating must be an integer 1–5' });
+      }
+      rating = r;
+    } else {
+      rating = null;
+    }
+    remarks = (remarks === undefined || remarks === null) ? null
+      : String(remarks).trim() || null;
+
+    if (rating === null && remarks === null) {
+      return res.status(400).json({
+        message: 'Provide at least a rating or a remark.',
+      });
+    }
+
+    // Sanity-check the lesson index against the course's curriculum length.
+    const cRes = await pool.query(
+      `SELECT jsonb_array_length(COALESCE(curriculum, '[]'::jsonb)) AS n
+         FROM courses WHERE id = $1`,
+      [cid],
+    );
+    const n = Number(cRes.rows[0]?.n || 0);
+    if (idx >= n) {
+      return res.status(400).json({
+        message: `Lesson index ${idx} out of range (course has ${n} lessons)`,
+      });
+    }
+
+    // Upsert. completed_at is required by the table — when we're auto-
+    // creating a row purely for student feedback we still need to seed
+    // a date, so we use today (the trainer can edit it later when they
+    // formally mark the lesson done).
+    const today = new Date().toISOString().slice(0, 10);
+    const r = await pool.query(
+      `INSERT INTO student_curriculum_progress
+         (student_id, course_id, lesson_index,
+          completed_at, student_rating, student_remarks, student_remarked_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())
+       ON CONFLICT (student_id, course_id, lesson_index)
+       DO UPDATE SET
+         student_rating      = EXCLUDED.student_rating,
+         student_remarks     = EXCLUDED.student_remarks,
+         student_remarked_at = NOW(),
+         updated_at          = NOW()
+       RETURNING lesson_index, completed_at,
+                 student_rating, student_remarks, student_remarked_at`,
+      [sid, cid, idx, today, rating, remarks],
+    );
+
+    res.status(201).json({ feedback: r.rows[0] });
+  } catch (err) {
+    console.error('Curriculum submitStudentFeedback error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };

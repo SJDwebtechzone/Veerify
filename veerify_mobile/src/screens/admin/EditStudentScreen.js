@@ -21,13 +21,18 @@ import React, { useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView,
   Alert, ActivityIndicator, StyleSheet, KeyboardAvoidingView, Platform,
+  Image,
 } from 'react-native';
 import {
   ArrowLeft, User, Mail, Phone, MapPin, Calendar, Save,
+  Camera, X as XIcon,
 } from 'lucide-react-native';
+import { launchImageLibrary, launchCamera } from 'react-native-image-picker';
 
 import apiClient from '../../api/client';
 import DateField from '../../components/DateField';
+import resolveAssetUrl from '../../utils/assetUrl';
+import { confirm } from '../../components/ConfirmDialog';
 
 const BRAND = '#E63946';
 const BRAND_SOFT = '#FFE4E6';
@@ -57,7 +62,92 @@ export default function EditStudentScreen({ route, navigation }) {
   const [fatherName,   setFatherName]   = useState(student.father_name || '');
   const [motherName,   setMotherName]   = useState(student.mother_name || '');
 
+  // ── Photo state ─────────────────────────────────────────────────────
+  // photoUrl:  server path (e.g. "/uploads/xyz.jpg") that gets persisted.
+  //            null    → admin removed it; the backend clears the column.
+  //            ''      → no change requested; backend leaves it as-is.
+  // photoUri:  local preview URI from the picker BEFORE upload finishes.
+  // photoDirty: true whenever the admin touched the photo (upload OR remove).
+  const initialPhoto = student.photo_url || student.student_photo_url || '';
+  const [photoUrl,   setPhotoUrl]  = useState(initialPhoto);
+  const [photoUri,   setPhotoUri]  = useState('');
+  const [photoDirty, setPhotoDirty] = useState(false);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+
   const [saving, setSaving] = useState(false);
+
+  // Preview: local pick > uploaded server path > empty (initials fallback).
+  const previewUri = photoUri || (photoUrl ? resolveAssetUrl(photoUrl) : '');
+
+  // ── Photo picker + upload ───────────────────────────────────────────
+  const pickPhoto = () => {
+    Alert.alert('Update photo', 'Choose how to upload the student\'s photo:', [
+      { text: 'Gallery', onPress: () => fromGallery() },
+      { text: 'Camera',  onPress: () => fromCamera() },
+      { text: 'Cancel',  style: 'cancel' },
+    ]);
+  };
+  const fromGallery = () => launchImageLibrary(
+    { mediaType: 'photo', quality: 0.85, maxWidth: 1200, maxHeight: 1200 },
+    (resp) => {
+      if (!resp.didCancel && !resp.errorCode && resp.assets?.[0]) uploadAsset(resp.assets[0]);
+    },
+  );
+  const fromCamera = () => launchCamera(
+    { mediaType: 'photo', quality: 0.85, maxWidth: 1200, maxHeight: 1200 },
+    (resp) => {
+      if (!resp.didCancel && !resp.errorCode && resp.assets?.[0]) uploadAsset(resp.assets[0]);
+    },
+  );
+  const uploadAsset = async (asset) => {
+    setUploadingPhoto(true);
+    setPhotoUri(asset.uri);
+    try {
+      const fd = new FormData();
+      fd.append('file', {
+        uri:  asset.uri,
+        type: asset.type || 'image/jpeg',
+        name: asset.fileName || 'photo.jpg',
+      });
+      // Use the student's name as the on-disk filename hint so uploads
+      // stay identifiable ("priya-r-student-1738485293-xy12.jpg").
+      const hintName = (name || 'student').trim();
+      const hint = encodeURIComponent(`${hintName}-student`);
+      const resp = await apiClient.post(`/uploads?name_hint=${hint}`, fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      const stored = resp.data?.path || resp.data?.url || '';
+      setPhotoUrl(stored);
+      setPhotoDirty(true);
+    } catch (err) {
+      confirm({
+        title:       'Upload failed',
+        message:     'That image is too large to upload. Please try a smaller one.',
+        variant:     'destructive',
+        confirmText: 'OK',
+        hideCancel:  true,
+      });
+      setPhotoUri('');
+    } finally {
+      setUploadingPhoto(false);
+    }
+  };
+
+  // Remove — clears the local preview + the server-side column on save.
+  const removePhoto = () => {
+    confirm({
+      title:       'Remove photo?',
+      message:     `${name || 'This student'}'s profile photo will be removed. You can upload a new one anytime.`,
+      variant:     'destructive',
+      confirmText: 'Remove',
+      cancelText:  'Cancel',
+      onConfirm:   () => {
+        setPhotoUri('');
+        setPhotoUrl('');
+        setPhotoDirty(true);
+      },
+    });
+  };
 
   const handleSave = async () => {
     if (!studentId) {
@@ -80,6 +170,14 @@ export default function EditStudentScreen({ route, navigation }) {
         father_name:   fatherName.trim(),
         mother_name:   motherName.trim(),
       };
+      // Only include photo_url when the admin actually touched the
+      // photo. Sending it always would send stale server-URL back on
+      // every save, which is wasteful. When they removed the photo,
+      // send explicit null so the backend clears the column (per the
+      // CASE WHEN $9 THEN … contract in updateStudentByAdmin).
+      if (photoDirty) {
+        payload.photo_url = photoUrl && photoUrl.trim() ? photoUrl.trim() : null;
+      }
       const { data } = await apiClient.patch(
         `/enrollments/student/${studentId}`,
         payload,
@@ -130,6 +228,60 @@ export default function EditStudentScreen({ route, navigation }) {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
+          {/* ── Photo section ─────────────────────────────────────────
+              Preview shows the current server photo (or the just-picked
+              local URI while an upload is in flight). Camera badge in
+              the bottom-right lets the admin re-upload; the small red
+              × in the top-right clears the photo. If nothing's set we
+              render the student's initials on a soft-brand background. */}
+          <Section title="Photo">
+            <View style={styles.photoBlock}>
+              <TouchableOpacity
+                style={styles.photoWrap}
+                onPress={pickPhoto}
+                disabled={uploadingPhoto}
+                activeOpacity={0.85}
+              >
+                {uploadingPhoto ? (
+                  <ActivityIndicator color={BRAND} />
+                ) : previewUri ? (
+                  <Image source={{ uri: previewUri }} style={styles.photoImg} resizeMode="cover" />
+                ) : (
+                  <Text style={styles.photoInitials}>
+                    {(name || '?')
+                      .split(' ')
+                      .map((w) => w[0])
+                      .filter(Boolean)
+                      .slice(0, 2)
+                      .join('')
+                      .toUpperCase()}
+                  </Text>
+                )}
+                <View style={styles.photoBadge}>
+                  <Camera size={12} color="#fff" strokeWidth={2.6} />
+                </View>
+                {previewUri && !uploadingPhoto ? (
+                  <TouchableOpacity
+                    style={styles.photoRemove}
+                    onPress={removePhoto}
+                    hitSlop={8}
+                  >
+                    <XIcon size={12} color="#fff" strokeWidth={2.8} />
+                  </TouchableOpacity>
+                ) : null}
+              </TouchableOpacity>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.photoHelpTitle}>
+                  {previewUri ? 'Tap the photo to replace' : 'Tap to upload a photo'}
+                </Text>
+                <Text style={styles.photoHelpSub}>
+                  JPG or PNG, up to a few MB. The photo shows on the student's
+                  profile, cards, and roster.
+                </Text>
+              </View>
+            </View>
+          </Section>
+
           <Section title="Basic info">
             <Field label="Full name" icon={User}>
               <TextInput
@@ -309,6 +461,39 @@ const styles = StyleSheet.create({
     backgroundColor: SURFACE, borderRadius: 14, padding: 14,
     borderWidth: 1, borderColor: BORDER,
   },
+
+  // ── Photo block ─────────────────────────────────────────────────
+  photoBlock: {
+    flexDirection: 'row', alignItems: 'center', gap: 14,
+  },
+  photoWrap: {
+    width: 84, height: 84, borderRadius: 42,
+    backgroundColor: BRAND_SOFT,
+    alignItems: 'center', justifyContent: 'center',
+    overflow: 'visible',
+  },
+  photoImg: {
+    width: 84, height: 84, borderRadius: 42,
+  },
+  photoInitials: {
+    fontSize: 26, fontWeight: '900', color: BRAND,
+  },
+  photoBadge: {
+    position: 'absolute', bottom: 0, right: 0,
+    width: 26, height: 26, borderRadius: 13,
+    backgroundColor: BRAND,
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 2, borderColor: SURFACE,
+  },
+  photoRemove: {
+    position: 'absolute', top: 0, right: 0,
+    width: 22, height: 22, borderRadius: 11,
+    backgroundColor: '#B91C1C',
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 2, borderColor: SURFACE,
+  },
+  photoHelpTitle: { fontSize: 13, fontWeight: '800', color: TEXT },
+  photoHelpSub:   { fontSize: 11, color: TEXT_MUTED, marginTop: 3, lineHeight: 16, fontWeight: '500' },
 
   field: { marginBottom: 12 },
   fieldLabelRow: {

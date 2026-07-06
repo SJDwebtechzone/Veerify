@@ -19,7 +19,7 @@ import {
 import {
   LogIn, UserPlus, Sparkles, ChevronRight, GraduationCap, ClipboardCheck,
   Award, Wallet, Gift, Settings, LifeBuoy, LogOut, ShieldCheck, Edit3,
-  Crown, Lock, Star,
+  Crown, Lock, Star, KeyRound, MessageSquare,
 } from 'lucide-react-native';
 
 import { useAuth } from '../../../context/AuthContext';
@@ -78,8 +78,15 @@ function GuestView({ navigation }) {
     <View style={{ paddingHorizontal: spacing.xl, gap: spacing.lg }}>
       {/* Hero card */}
       <View style={styles.guestHero}>
-        <View style={styles.guestEmoji}>
-          <Text style={{ fontSize: 36 }}>👋</Text>
+        {/* Brand mark — circular tile holding the Veerify logo. Replaces
+            the wave-hand emoji we had as a placeholder so the guest hero
+            opens with the actual brand identity. */}
+        <View style={styles.guestLogo}>
+          <Image
+            source={require('../../../assets/veerify-logo.png')}
+            style={styles.guestLogoImage}
+            resizeMode="cover"
+          />
         </View>
         <Text style={styles.guestTitle}>Welcome to Veerify</Text>
         <Text style={styles.guestBody}>
@@ -106,23 +113,10 @@ function GuestView({ navigation }) {
         </TouchableOpacity>
       </View>
 
-      {/* View Plans CTA */}
-      <TouchableOpacity
-        onPress={() => placeholder('View Plans')}
-        activeOpacity={0.9}
-        style={styles.planCta}
-      >
-        <View style={styles.planCtaIcon}>
-          <Sparkles size={20} color="#fff" strokeWidth={2.4} />
-        </View>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.planCtaTitle}>See subscription plans</Text>
-          <Text style={styles.planCtaBody}>
-            From ₹499/month — unlock full courses, live classes, and certificates.
-          </Text>
-        </View>
-        <ChevronRight size={18} color="#fff" strokeWidth={2.4} />
-      </TouchableOpacity>
+      {/* "See subscription plans" CTA intentionally removed from the
+          guest Profile view — the paywall flow only makes sense once
+          the user has signed in, so we don't promote it to anonymous
+          visitors. Login / Sign up remain the primary actions. */}
 
       {/* Why sign up */}
       <View style={styles.benefitsCard}>
@@ -223,7 +217,10 @@ function LoggedInView({ user, subscription, selectedInstitution, onLogout, navig
         ) : null}
       </View>
 
-      {/* Subscription card */}
+      {/* Subscription card — only renders when the student already has an
+          active subscription. The "Upgrade to Premium" CTA that used to
+          appear for non-subscribers has been removed; we don't promote
+          paid plans to students from the Profile tab anymore. */}
       {subscription ? (
         <View style={[styles.subCard, { backgroundColor: palette.purple.vivid }]}>
           <Crown size={22} color="#fff" strokeWidth={2.2} />
@@ -237,24 +234,7 @@ function LoggedInView({ user, subscription, selectedInstitution, onLogout, navig
             <ChevronRight size={20} color="#fff" strokeWidth={2.4} />
           </TouchableOpacity>
         </View>
-      ) : (
-        <TouchableOpacity
-          onPress={() => placeholder('View Plans')}
-          activeOpacity={0.9}
-          style={styles.upgradeCard}
-        >
-          <View style={styles.upgradeIcon}>
-            <Lock size={20} color="#fff" strokeWidth={2.4} />
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.upgradeTitle}>Upgrade to Premium</Text>
-            <Text style={styles.upgradeBody}>
-              From ₹499/month — full courses, live classes, and certificates.
-            </Text>
-          </View>
-          <ChevronRight size={18} color="#fff" strokeWidth={2.4} />
-        </TouchableOpacity>
-      )}
+      ) : null}
 
       {/* Grid menu */}
       <View style={styles.grid}>
@@ -271,7 +251,24 @@ function LoggedInView({ user, subscription, selectedInstitution, onLogout, navig
       <View style={styles.listCard}>
         <ListRow icon={ShieldCheck} label="Privacy & Security" accent={palette.green} onPress={() => placeholder('Privacy & Security')} />
         <View style={styles.divider} />
+        {/* Change Password — same screen the first-login dialog routes
+            into. Lets students who picked "I'll do it later" rotate
+            their temp password whenever they want. */}
+        <ListRow
+          icon={KeyRound}
+          label="Change Password"
+          accent={palette.purple}
+          onPress={() => navigation.navigate('ChangePassword')}
+        />
+        <View style={styles.divider} />
         <ListRow icon={LifeBuoy}    label="Help Center"         accent={palette.blue}  onPress={() => placeholder('Help Center')} />
+        <View style={styles.divider} />
+        <ListRow
+          icon={MessageSquare}
+          label="Send Feedback"
+          accent={palette.pink}
+          onPress={() => navigation.navigate('SendFeedback')}
+        />
       </View>
 
       {/* Sign out */}
@@ -337,6 +334,22 @@ const styles = StyleSheet.create({
     backgroundColor: palette.purple.soft,
     alignItems: 'center', justifyContent: 'center',
     marginBottom: spacing.lg,
+  },
+  // Brand-logo tile — mirrors the LoginScreen.brandBlock treatment so the
+  // navy/V logo PNG is rendered correctly. The image fills the entire
+  // circle (same size, same borderRadius applied to the image itself) and
+  // resizeMode="cover" lets the PNG's built-in navy background BE the
+  // tile's background, instead of leaving an awkward square inside a
+  // pink circle. overflow:'hidden' clips any edge bleed.
+  guestLogo: {
+    width: 84, height: 84, borderRadius: 42,
+    backgroundColor: '#0E1A2E',          // logo navy — matches PNG bg
+    alignItems: 'center', justifyContent: 'center',
+    overflow: 'hidden',
+    marginBottom: spacing.lg,
+  },
+  guestLogoImage: {
+    width: 84, height: 84, borderRadius: 42,
   },
   guestTitle: { ...type.h1, color: palette.text, marginBottom: 6, textAlign: 'center' },
   guestBody: {

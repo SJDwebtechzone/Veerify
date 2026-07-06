@@ -122,13 +122,20 @@ export function StudentsList() {
     return Array.from(map.entries()).sort((a, b) => a[1].localeCompare(b[1]));
   }, [students]);
 
-  const genders = useMemo(() => {
-    const set = new Set<string>();
-    students.forEach((s) => {
-      if (s.gender) set.add(s.gender);
-    });
-    return Array.from(set).sort();
-  }, [students]);
+  // Canonical filter buckets. Instead of surfacing every distinct gender
+  // string the DB happens to hold (e.g. "Other", "Prefer not to say",
+  // null, ""), we collapse them into three product-facing options:
+  // Female, Male, and Not preferred. "Not preferred" matches anything that
+  // isn't an explicit male/female so the staff can still find those rows.
+  const GENDER_OPTIONS = ['Female', 'Male', 'Not preferred'] as const;
+  type GenderBucket = (typeof GENDER_OPTIONS)[number];
+  const bucketFor = (raw: string | null): GenderBucket | null => {
+    const v = (raw || '').trim().toLowerCase();
+    if (!v) return 'Not preferred';
+    if (v === 'female' || v === 'f') return 'Female';
+    if (v === 'male'   || v === 'm') return 'Male';
+    return 'Not preferred';
+  };
 
   // ── Apply filters client-side ──
   const filtered = useMemo(() => {
@@ -152,7 +159,7 @@ export function StudentsList() {
       out = out.filter((s) => (s.institutions || []).some((i) => i.id === id));
     }
     if (genderFilter) {
-      out = out.filter((s) => s.gender === genderFilter);
+      out = out.filter((s) => bucketFor(s.gender) === genderFilter);
     }
     return out;
   }, [students, search, institutionFilter, genderFilter]);
@@ -236,7 +243,7 @@ export function StudentsList() {
               className="w-full appearance-none border border-gray-200 rounded-lg pl-3 pr-9 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white"
             >
               <option value="">All genders</option>
-              {genders.map((g) => (
+              {GENDER_OPTIONS.map((g) => (
                 <option key={g} value={g}>{g}</option>
               ))}
             </select>

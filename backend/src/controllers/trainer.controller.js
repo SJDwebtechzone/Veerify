@@ -18,18 +18,57 @@ const getAdminInstitutionId = async (userId) => {
 
 // CREATE trainer (admin only)
 // This creates BOTH a user account AND a trainer profile in one transaction
+// Normalise the multi-skill array. Accepts an array of
+//   { name, belt_level, experience_years, certificate_url }
+// and cleans each entry. Returns `null` when the input isn't a usable
+// array so the caller can decide what to do (fall back to legacy fields).
+function normaliseSkills(raw) {
+  if (!Array.isArray(raw)) return null;
+  const cleaned = raw
+    .map((s) => ({
+      name:             s?.name ? String(s.name).trim() : '',
+      belt_level:       s?.belt_level ? String(s.belt_level).trim() : null,
+      experience_years: (() => {
+        const n = Number(s?.experience_years);
+        return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
+      })(),
+      certificate_url:  s?.certificate_url ? String(s.certificate_url).trim() : null,
+    }))
+    .filter((s) => s.name);   // drop rows without a skill name
+  return cleaned;
+}
+
+// Derive legacy single-value columns from the skills array so existing
+// consumers (student list, trainer cards, etc.) that read
+// specialization / belt_level / experience_years / certificate_url
+// keep rendering something sensible.
+function legacyFromSkills(skills) {
+  if (!Array.isArray(skills) || skills.length === 0) return {};
+  const first = skills[0];
+  return {
+    specialization:   skills.map((s) => s.name).filter(Boolean).join(', '),
+    belt_level:       first.belt_level || null,
+    experience_years: Math.max(0, ...skills.map((s) => Number(s.experience_years) || 0)),
+    certificate_url:  first.certificate_url || null,
+  };
+}
+
 exports.createTrainer = async (req, res) => {
   const client = await pool.connect();
   try {
     const {
       // Account
       name, email, phone, password,
-      // Profile (legacy fields)
+      // Profile (legacy fields — still accepted for backward compat)
       specialization, belt_level, experience_years, bio,
       // Personal (migration 016)
       gender, date_of_birth,
       // Identity + documents (migration 016)
       govt_proof_type, govt_proof_number, photo_url, certificate_url,
+      // NEW: structured multi-skill array (migration 046). When present,
+      // it drives the row and derives the legacy columns; when absent,
+      // the legacy columns are used as-is and skills is empty.
+      skills: rawSkills,
     } = req.body;
     const adminId = req.user.id;
 
@@ -72,32 +111,52 @@ exports.createTrainer = async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Step 1: Create user
+    // Step 1: Create user.
+    // must_change_password=TRUE — the trainer was provisioned by the
+    // institution admin with a temp password emailed to them, so the
+    // mobile login flow pops a "set a new password / I'll do it later"
+    // dialog on their first sign-in.
     const userResult = await client.query(
-      `INSERT INTO users (name, email, phone, password, role, institution_id)
-       VALUES ($1, $2, $3, $4, 'trainer', $5)
+      `INSERT INTO users (name, email, phone, password, role, institution_id,
+                          must_change_password)
+       VALUES ($1, $2, $3, $4, 'trainer', $5, TRUE)
        RETURNING id, name, email, phone, role`,
       [name, cleanEmail, cleanPhone, hashedPassword, institutionId]
     );
     const user = userResult.rows[0];
 
-    // Step 2: Create trainer profile with all the extended-enrollment fields
+    // Step 2: Create trainer profile with all the extended-enrollment fields.
+    // If the client sent the structured skills array, that becomes the
+    // source of truth and we back-fill the legacy singletons from it. If
+    // it didn't, we use whatever legacy singletons were on req.body (old
+    // clients / API tests).
+    const skillsArr = normaliseSkills(rawSkills);
+    const legacy = skillsArr && skillsArr.length > 0
+      ? legacyFromSkills(skillsArr)
+      : {
+          specialization:   specialization || null,
+          belt_level:       belt_level || null,
+          experience_years: experience_years || 0,
+          certificate_url:  certificate_url || null,
+        };
     const trainerResult = await client.query(
       `INSERT INTO trainers (
          user_id, institution_id,
          specialization, belt_level, experience_years, bio,
          gender, date_of_birth,
          govt_proof_type, govt_proof_number,
-         photo_url, certificate_url
+         photo_url, certificate_url,
+         skills
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)
        RETURNING *`,
       [
         user.id, institutionId,
-        specialization || null, belt_level || null, experience_years || 0, bio || null,
+        legacy.specialization, legacy.belt_level, legacy.experience_years, bio || null,
         gender || null, date_of_birth || null,
         govt_proof_type || null, govt_proof_number || null,
-        photo_url || null, certificate_url || null,
+        photo_url || null, legacy.certificate_url,
+        JSON.stringify(skillsArr || []),
       ]
     );
 
@@ -303,6 +362,7 @@ exports.getMyTrainers = async (req, res) => {
        FROM trainers t
        JOIN users u ON t.user_id = u.id
        WHERE t.institution_id = $1
+         AND COALESCE(u.is_deleted, false) = false
        ORDER BY t.created_at DESC`,
       [institutionId]
     );
@@ -327,7 +387,9 @@ exports.getTrainerById = async (req, res) => {
       `SELECT t.*, u.name, u.email, u.phone
        FROM trainers t
        JOIN users u ON t.user_id = u.id
-       WHERE t.id = $1 AND t.institution_id = $2`,
+       WHERE t.id = $1
+         AND t.institution_id = $2
+         AND COALESCE(u.is_deleted, false) = false`,
       [id, adminInstitutionId]
     );
 
@@ -357,13 +419,15 @@ exports.updateTrainer = async (req, res) => {
     const { id } = req.params;
     const {
       // Identity (users table)
-      name, phone,
+      name, email, phone,
       // Profile (legacy)
       specialization, belt_level, experience_years, bio,
       // Personal (migration 016)
       gender, date_of_birth,
       // Identity + documents (migration 016)
       govt_proof_type, govt_proof_number, photo_url, certificate_url,
+      // NEW: structured multi-skill array (migration 046).
+      skills: rawSkills,
     } = req.body;
     const adminInstitutionId = await getAdminInstitutionId(req.user.id);
 
@@ -377,6 +441,25 @@ exports.updateTrainer = async (req, res) => {
     }
     if (check.rows[0].institution_id !== adminInstitutionId) {
       return res.status(403).json({ message: 'You can only update trainers in your own institution' });
+    }
+
+    // ── Email validation on edit ──────────────────────────────────────
+    // Optional in the request. When present:
+    //   • Must pass the shared email format check.
+    //   • Must be unique across users (excluding the trainer's own row so
+    //     leaving it unchanged doesn't self-collide).
+    // Note: changing the email here is a real rename of the trainer's
+    // login id. They'll sign in with the new address on their next
+    // session; existing JWTs stay valid until expiry.
+    let cleanEmail = null;
+    if (email !== undefined && email !== null && String(email).trim() !== '') {
+      const eFmt = validateEmailFormat(email, { required: true });
+      if (!eFmt.ok) return res.status(eFmt.status).json(eFmt.body);
+      const eUnique = await ensureEmailUnique(eFmt.value, {
+        excludeUserId: check.rows[0].user_id,
+      });
+      if (!eUnique.ok) return res.status(eUnique.status).json(eUnique.body);
+      cleanEmail = eFmt.value;
     }
 
     // ── Phone validation on edit ──────────────────────────────────────
@@ -395,6 +478,22 @@ exports.updateTrainer = async (req, res) => {
 
     await client.query('BEGIN');
 
+    // When the client sends a structured skills array, that becomes the
+    // source of truth: we replace the JSONB and derive legacy singletons
+    // from it (specialization / belt_level / experience_years /
+    // certificate_url). When it doesn't, the individual legacy fields
+    // pass through the normal COALESCE-based partial update below.
+    const skillsArr = normaliseSkills(rawSkills);
+    const useSkillsArr = skillsArr !== null;
+    const legacy = useSkillsArr && skillsArr.length > 0
+      ? legacyFromSkills(skillsArr)
+      : {
+          specialization,
+          belt_level,
+          experience_years: experience_years != null ? Number(experience_years) : null,
+          certificate_url,
+        };
+
     // Trainer profile fields
     await client.query(
       `UPDATE trainers SET
@@ -407,27 +506,32 @@ exports.updateTrainer = async (req, res) => {
          govt_proof_type   = COALESCE($7, govt_proof_type),
          govt_proof_number = COALESCE($8, govt_proof_number),
          photo_url         = COALESCE($9, photo_url),
-         certificate_url   = COALESCE($10, certificate_url)
-       WHERE id = $11`,
+         certificate_url   = COALESCE($10, certificate_url),
+         skills            = COALESCE($11::jsonb, skills)
+       WHERE id = $12`,
       [
-        specialization || null, belt_level || null,
-        experience_years != null ? Number(experience_years) : null,
+        legacy.specialization || null, legacy.belt_level || null,
+        legacy.experience_years != null ? Number(legacy.experience_years) : null,
         bio || null,
         gender || null, date_of_birth || null,
         govt_proof_type || null, govt_proof_number || null,
-        photo_url || null, certificate_url || null,
+        photo_url || null, legacy.certificate_url || null,
+        useSkillsArr ? JSON.stringify(skillsArr) : null,
         id,
       ]
     );
 
-    // User identity fields (kept in users table so admin lists + login work)
-    if (name || phone) {
+    // User identity fields (kept in users table so admin lists + login work).
+    // Email is now editable too — cleanEmail is set only when a valid
+    // non-empty value was supplied and passed the uniqueness gate.
+    if (name || phone || cleanEmail) {
       await client.query(
         `UPDATE users SET
            name  = COALESCE($1, name),
-           phone = COALESCE($2, phone)
-         WHERE id = $3`,
-        [name || null, phone || null, check.rows[0].user_id]
+           email = COALESCE($2, email),
+           phone = COALESCE($3, phone)
+         WHERE id = $4`,
+        [name || null, cleanEmail, phone || null, check.rows[0].user_id]
       );
     }
 
@@ -456,7 +560,14 @@ exports.updateTrainer = async (req, res) => {
   }
 };
 
-// DELETE trainer (also deletes their user account)
+// DELETE trainer — SOFT delete so email/phone can be reused later.
+//
+// We flip users.is_deleted = TRUE and stamp deleted_at / deleted_by
+// instead of running a hard DELETE. That preserves audit history
+// (batches / attendance / feedback rows that FK to the user stay
+// intact) AND — combined with the partial-unique indexes from
+// migration 050 — clears the email/phone from the "live" uniqueness
+// pool so a new user can register with them immediately.
 exports.deleteTrainer = async (req, res) => {
   try {
     const { id } = req.params;
@@ -475,10 +586,46 @@ exports.deleteTrainer = async (req, res) => {
       return res.status(403).json({ message: 'You can only delete trainers in your own institution' });
     }
 
-    // Delete the user — trainer row will cascade-delete (because of ON DELETE CASCADE)
-    await pool.query('DELETE FROM users WHERE id = $1', [check.rows[0].user_id]);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      // Soft-delete the user row. Also mark them 'inactive' so future
+      // sign-in attempts are rejected cleanly.
+      await client.query(
+        `UPDATE users
+            SET is_deleted = TRUE,
+                deleted_at = CURRENT_TIMESTAMP,
+                deleted_by = $2,
+                status     = 'inactive'
+          WHERE id = $1`,
+        [check.rows[0].user_id, req.user.id],
+      );
+      // Also flag the trainer row so lists filter it out. `trainers.is_deleted`
+      // is optional (older DBs don't have the column). We wrap the update in
+      // a SAVEPOINT so if the column doesn't exist, ONLY this statement is
+      // rolled back — otherwise the failed statement would abort the whole
+      // transaction and silently roll back the users soft-delete too.
+      try {
+        await client.query('SAVEPOINT trainer_flag');
+        await client.query(
+          `UPDATE trainers SET is_deleted = TRUE WHERE id = $1`,
+          [id],
+        );
+        await client.query('RELEASE SAVEPOINT trainer_flag');
+      } catch (flagErr) {
+        await client.query('ROLLBACK TO SAVEPOINT trainer_flag');
+        // Column doesn't exist on older DBs — safe to ignore, the users
+        // filter alone excludes them from listings.
+      }
+      await client.query('COMMIT');
+    } catch (txErr) {
+      await client.query('ROLLBACK');
+      throw txErr;
+    } finally {
+      client.release();
+    }
 
-    res.json({ message: 'Trainer deleted successfully' });
+    res.json({ message: 'Trainer removed. Their email and phone are now free for reuse.' });
   } catch (err) {
     console.error('Delete trainer error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });

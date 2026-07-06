@@ -33,6 +33,7 @@ import { DataTable, type Column } from '../components/ui/DataTable';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
 import { useNotifications } from '../lib/notifications';
+import { useAuth } from '../lib/auth';
 import {
   revenueData,
   growthData,
@@ -98,6 +99,11 @@ export function Dashboard() {
   // are currently subscribed; pending_approval = academies waiting for super
   // admin review; total = every institution row that isn't soft-deleted.
   const { counts } = useNotifications();
+  // Owner name comes from the auth context, which is hydrated from
+  // /auth/me on app boot and again whenever the My Profile editor saves.
+  // We fall back to a polite "Admin" so the header never reads blank.
+  const { user } = useAuth();
+  const ownerFirstName = (user?.name || '').trim().split(/\s+/)[0] || 'Admin';
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -105,7 +111,7 @@ export function Dashboard() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">
-            Welcome back, Mohana 👋
+            Welcome back, {ownerFirstName} 👋
           </h1>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
             Here's what's happening across your academies today.
@@ -289,14 +295,28 @@ function RecentInstitutions() {
   const navigate = useNavigate();
   const [rows, setRows] = useState<RecentInstitutionRow[]>([]);
 
-  // Pull the freshest 10 institutions. The /onboarding/all endpoint is
-  // already ordered by created_at DESC, so we just slice the top 10 off.
+  // Pull the freshest 10 institutions that have actually completed setup.
+  //
+  // /onboarding/all also returns half-onboarded rows — `registered` and
+  // `plan_selected` — which are placeholder records the backend creates
+  // the moment an owner picks a plan, *before* they've filled in any
+  // details. Surfacing those here makes it look like a brand-new academy
+  // just registered when really the owner is still mid-form. We filter
+  // them out so this panel only shows academies that have submitted the
+  // setup wizard (pending_approval / approved / active / rejected).
   useEffect(() => {
     let cancelled = false;
+    const SUBMITTED = new Set([
+      'pending_approval', 'approved', 'active', 'rejected',
+    ]);
     apiClient
       .get('/onboarding/all')
       .then((r) => {
-        if (!cancelled) setRows((r.data?.institutions || []).slice(0, 10));
+        if (cancelled) return;
+        const submitted = (r.data?.institutions || []).filter(
+          (i: RecentInstitutionRow) => SUBMITTED.has(i.onboarding_status),
+        );
+        setRows(submitted.slice(0, 10));
       })
       .catch(() => {
         if (!cancelled) setRows([]);

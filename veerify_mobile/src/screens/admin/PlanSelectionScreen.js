@@ -1,13 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, TextInput,
-  StyleSheet, ActivityIndicator, Alert,
+  StyleSheet, ActivityIndicator, Alert, BackHandler, Image,
 } from 'react-native';
-import { Gift, ChevronDown, ChevronUp, LogOut } from 'lucide-react-native';
+import { Gift, ChevronDown, ChevronUp, LogOut, Sparkles } from 'lucide-react-native';
 import apiClient from '../../api/client';
 import { colors } from '../../utils/styles';
 import { useAuth } from '../../context/AuthContext';
 import { confirm } from '../../components/ConfirmDialog';
+import resolveAssetUrl from '../../utils/assetUrl';
 
 export default function PlanSelectionScreen({ navigation }) {
   const { logout } = useAuth();
@@ -54,10 +55,6 @@ export default function PlanSelectionScreen({ navigation }) {
     });
   };
 
-  useEffect(() => {
-    loadPlans();
-  }, []);
-
   const loadPlans = async () => {
     try {
       const res = await apiClient.get('/plans');
@@ -86,26 +83,59 @@ export default function PlanSelectionScreen({ navigation }) {
     }
   };
 
-  const featureList = (plan) => [
-    plan.max_branches === 1 
-      ? '🏛️ Single Branch' 
-      : '🏛️ Unlimited Branches',
-    plan.max_students < 999 
-      ? `👥 Up to ${plan.max_students} Students` 
-      : '👥 Unlimited Students',
-    plan.max_trainers < 999 
-      ? `👨‍🏫 Up to ${plan.max_trainers} Trainers` 
-      : '👨‍🏫 Unlimited Trainers',
-    '💰 Fee Tracking & Receipts',
-    '🔔 Push Notifications',
-    '✅ Basic Attendance',
-    '📧 Email Support',
-    '🎁 Vendor Discounts',
-    ...(plan.features?.attendance_reports ? ['📊 Attendance Reports'] : []),
-    ...(plan.features?.whatsapp_integration ? ['💬 WhatsApp Integration'] : []),
-    ...(plan.features?.revenue_trends ? ['📈 Revenue Growth & Trends'] : []),
-    ...(plan.features?.event_discounts ? ['🎉 Event Discounts'] : []),
-  ];
+  // Intercept Android hardware back button — PlanSelection is the root of
+  // the admin stack so there's no previous screen to pop to. Without this,
+  // pressing back closes the entire app. Instead we show the sign-out
+  // confirmation dialog, which is the only valid escape valve from here.
+  useEffect(() => {
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      confirmSignOut();
+      return true; // prevent default (app close)
+    });
+    return () => sub.remove();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    loadPlans();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Coerce max_* values coming from the API into either a positive
+  // integer or null (treated as unlimited). Anything ≥ 999 is also
+  // treated as unlimited for backward compat with earlier plan rows
+  // seeded that way.
+  const capOrNull = (v) => {
+    if (v === null || v === undefined || v === '') return null;
+    const n = Number(v);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    if (n >= 999) return null;
+    return Math.floor(n);
+  };
+  const featureList = (plan) => {
+    const students = capOrNull(plan.max_students);
+    const trainers = capOrNull(plan.max_trainers);
+    const branches = capOrNull(plan.max_branches);
+    // plan.features is stored as a JSONB **array of strings** on the
+    // backend (admin web collects them line-by-line). Previously we
+    // treated it as an object of flags and never rendered the admin's
+    // custom feature list.
+    const custom = Array.isArray(plan.features) ? plan.features : [];
+    return [
+      branches === 1
+        ? '🏛️ Single Branch'
+        : branches === null
+          ? '🏛️ Unlimited Branches'
+          : `🏛️ Up to ${branches} Branches`,
+      students === null
+        ? '👥 Unlimited Students'
+        : `👥 Up to ${students} Students`,
+      trainers === null
+        ? '👨‍🏫 Unlimited Trainers'
+        : `👨‍🏫 Up to ${trainers} Trainers`,
+      ...custom,
+    ];
+  };
 
   if (loading) {
     return (
@@ -194,43 +224,51 @@ export default function PlanSelectionScreen({ navigation }) {
             </View>
           )}
 
-          {/* Plan header */}
+          {/* Plan header — image sits to the right of the plan name
+              AND price so it visually anchors the whole title block.
+              Falls back to a soft brand-tinted placeholder when no
+              image is uploaded so cards stay aligned. */}
           <View style={styles.planHeader}>
-            <Text style={styles.planName}>{plan.name}</Text>
-            {(() => {
-              const price = Number(plan.price) || 0;
-              const discountOn = !!plan.discount_enabled;
-              const discountPct = Number(plan.discount_percent) || 0;
-              const effective = discountOn && discountPct > 0
-                ? Math.round(price * (1 - discountPct / 100))
-                : price;
-              return (
-                <View style={styles.planPriceRow}>
-                  {discountOn && discountPct > 0 ? (
-                    <>
-                      <Text style={styles.planPriceStruck}>
-                        ₹{price.toLocaleString('en-IN')}
-                      </Text>
-                      <Text style={styles.planPriceDiscounted}>
-                        ₹{effective.toLocaleString('en-IN')}
-                      </Text>
-                    </>
-                  ) : (
-                    <Text style={styles.planPrice}>
-                      ₹{price.toLocaleString('en-IN')}
-                    </Text>
-                  )}
-                  <Text style={styles.planCycle}>/month</Text>
-                  {discountOn && discountPct > 0 ? (
-                    <View style={styles.discountPill}>
-                      <Text style={styles.discountPillText}>
-                        {discountPct}% OFF
-                      </Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.planName}>{plan.name}</Text>
+                {(() => {
+                  const price = Number(plan.price) || 0;
+                  const discountOn = !!plan.discount_enabled;
+                  const discountPct = Number(plan.discount_percent) || 0;
+                  const effective = discountOn && discountPct > 0
+                    ? Math.round(price * (1 - discountPct / 100))
+                    : price;
+                  return (
+                    <View style={styles.planPriceRow}>
+                      {discountOn && discountPct > 0 ? (
+                        <>
+                          <Text style={styles.planPriceStruck}>
+                            ₹{price.toLocaleString('en-IN')}
+                          </Text>
+                          <Text style={styles.planPriceDiscounted}>
+                            ₹{effective.toLocaleString('en-IN')}
+                          </Text>
+                        </>
+                      ) : (
+                        <Text style={styles.planPrice}>
+                          ₹{price.toLocaleString('en-IN')}
+                        </Text>
+                      )}
+                      <Text style={styles.planCycle}>/month</Text>
+                      {discountOn && discountPct > 0 ? (
+                        <View style={styles.discountPill}>
+                          <Text style={styles.discountPillText}>
+                            {discountPct}% OFF
+                          </Text>
+                        </View>
+                      ) : null}
                     </View>
-                  ) : null}
-                </View>
-              );
-            })()}
+                  );
+                })()}
+              </View>
+              <PlanImageThumb src={plan.image_url} />
+            </View>
 
             {/* Trial + grace period pills */}
             {(Number(plan.trial_days) > 0 || Number(plan.grace_days) > 0) ? (
@@ -299,6 +337,20 @@ export default function PlanSelectionScreen({ navigation }) {
 
       <View style={{ height: 30 }} />
     </ScrollView>
+  );
+}
+
+// Plan-image thumbnail — a 44x44 circle with a subtle brand-tinted
+// placeholder fallback when no image is uploaded on the plan.
+function PlanImageThumb({ src }) {
+  const url = src ? resolveAssetUrl(src) : null;
+  if (url) {
+    return <Image source={{ uri: url }} style={styles.planThumbImg} resizeMode="cover" />;
+  }
+  return (
+    <View style={styles.planThumbPlaceholder}>
+      <Sparkles size={26} color={colors.primary} strokeWidth={2.2} />
+    </View>
   );
 }
 
@@ -426,6 +478,16 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: colors.dark,
     marginBottom: 6,
+  },
+  planThumbImg: {
+    width: 64, height: 64, borderRadius: 12,
+    backgroundColor: '#FFE4E6',
+  },
+  planThumbPlaceholder: {
+    width: 64, height: 64, borderRadius: 12,
+    backgroundColor: '#FFE4E6',
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: '#F1D4D7',
   },
   planPriceRow: {
     flexDirection: 'row',

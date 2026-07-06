@@ -10,6 +10,7 @@ import {
   Star,
   Settings,
   Smartphone,
+  MessageSquare,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -99,6 +100,11 @@ export const navSections: NavSection[] = [
       { label: 'Reviews', to: '/ratings' },
       { label: 'Trainer Ratings', to: '/ratings/trainers' },
     ],
+  },
+  {
+    label: 'Feedback',
+    icon: MessageSquare,
+    to: '/feedback',
   },
   {
     label: 'Settings',

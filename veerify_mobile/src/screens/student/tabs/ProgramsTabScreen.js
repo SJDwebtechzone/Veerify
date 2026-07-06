@@ -263,11 +263,11 @@ export default function ProgramsTabScreen({ navigation }) {
           </View>
         )}
 
-        {/* All programs */}
+        {/* All courses */}
         <View style={{ marginTop: spacing.xl }}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>
-              {activeCategory ? `${activeCategory.name} programs` : 'All programs'}
+              {activeCategory ? `${activeCategory.name} courses` : 'All courses'}
             </Text>
             <Text style={styles.countText}>{visible.length} result{visible.length === 1 ? '' : 's'}</Text>
           </View>

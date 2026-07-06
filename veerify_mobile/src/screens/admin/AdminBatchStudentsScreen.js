@@ -25,6 +25,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import {
   ArrowLeft, Phone, Mail, Plus, GraduationCap, BookOpen,
   Calendar, Clock, User, CircleDollarSign, CheckCircle2, AlertCircle,
+  ClipboardCheck,
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
@@ -160,6 +161,21 @@ export default function AdminBatchStudentsScreen({ route, navigation }) {
               : `${enrollments.length} student${enrollments.length === 1 ? '' : 's'} enrolled`}
           </Text>
         </View>
+        {/* Mark Attendance shortcut — opens the same bulk-marking screen
+            the trainer uses. Backend accepts admin role (branch admins
+            can mark for their own branch's batches) and audits every
+            create/update into attendance_history. */}
+        <TouchableOpacity
+          onPress={() => navigation.navigate('BatchStudents', {
+            batchId: batchId,
+            batchName: batch?.name || 'Batch',
+          })}
+          style={styles.markAttendanceBtn}
+          activeOpacity={0.85}
+        >
+          <ClipboardCheck size={13} color="#fff" strokeWidth={2.6} />
+          <Text style={styles.markAttendanceBtnText}>Attendance</Text>
+        </TouchableOpacity>
         <View style={styles.headerCountPill}>
           <GraduationCap size={12} color={BRAND} strokeWidth={2.4} />
           <Text style={styles.headerCountPillText}>{enrollments.length}</Text>
@@ -420,6 +436,19 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   headerTitle: { fontSize: 16, fontWeight: '800', color: TEXT, letterSpacing: -0.2 },
+  // Brand-red "Attendance" chip that opens the shared bulk-marking
+  // screen. Sits between the title column and the count pill.
+  markAttendanceBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: BRAND,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    marginRight: 8,
+  },
+  markAttendanceBtnText: {
+    color: '#fff', fontWeight: '800', fontSize: 12, letterSpacing: 0.2,
+  },
   headerSub: { fontSize: 11, color: TEXT_MUTED, fontWeight: '600', marginTop: 1 },
   headerCountPill: {
     flexDirection: 'row',

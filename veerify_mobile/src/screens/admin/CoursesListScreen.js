@@ -48,11 +48,18 @@ export default function CoursesListScreen({ navigation }) {
   const [courses, setCourses] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  // Sub-branch admins get a read-only view of the courses their branch
+  // handles (courses that have at least one batch pinned to their
+  // branch). No Edit / Delete / FAB — the catalog is owned by the main
+  // institution and edits ripple across branches, so branch admins
+  // shouldn't be able to change it.
+  const [isSubBranch, setIsSubBranch] = useState(false);
 
   const load = useCallback(async () => {
     try {
       const res = await apiClient.get('/courses');
       setCourses(res.data.courses || []);
+      setIsSubBranch(!!res.data.is_sub_branch);
     } catch (err) {
       console.log('[CoursesList] load error:', err.message);
     } finally {
@@ -65,8 +72,13 @@ export default function CoursesListScreen({ navigation }) {
 
   const onView = (course) => {
     // Admin gets the operational detail screen (batches, students, revenue),
-    // not the student-facing CourseDetail.
-    navigation.navigate('AdminCourseDetail', { courseId: course.id });
+    // not the student-facing CourseDetail. `readOnly` mirrors the list-side
+    // flag so a sub-branch admin who tapped View doesn't get an Edit /
+    // Delete option on the detail screen either.
+    navigation.navigate('AdminCourseDetail', {
+      courseId: course.id,
+      readOnly: isSubBranch,
+    });
   };
   const onEdit = (course) => {
     navigation.navigate('CreateCourse', { courseId: course.id, course });
@@ -105,9 +117,11 @@ export default function CoursesListScreen({ navigation }) {
     <View style={styles.screen}>
       <View style={styles.header}>
         <View>
-          <Text style={styles.title}>My Courses</Text>
+          <Text style={styles.title}>{isSubBranch ? 'Courses at this branch' : 'My Courses'}</Text>
           <Text style={styles.subtitle}>
-            {courses.length} {courses.length === 1 ? 'course' : 'courses'} published
+            {isSubBranch
+              ? `${courses.length} ${courses.length === 1 ? 'course' : 'courses'} handled here`
+              : `${courses.length} ${courses.length === 1 ? 'course' : 'courses'} published`}
           </Text>
         </View>
       </View>
@@ -126,13 +140,20 @@ export default function CoursesListScreen({ navigation }) {
         ListEmptyComponent={
           <View style={styles.emptyCard}>
             <BookOpen size={32} color={palette.textLight} strokeWidth={1.6} />
-            <Text style={styles.emptyTitle}>No courses yet</Text>
-            <Text style={styles.emptySub}>Tap the + button to publish your first course.</Text>
+            <Text style={styles.emptyTitle}>
+              {isSubBranch ? 'No courses assigned' : 'No courses yet'}
+            </Text>
+            <Text style={styles.emptySub}>
+              {isSubBranch
+                ? 'Courses show up here once a batch under one of them is pinned to this branch.'
+                : 'Tap the + button to publish your first course.'}
+            </Text>
           </View>
         }
         renderItem={({ item }) => (
           <CourseRow
             course={item}
+            readOnly={isSubBranch}
             onView={() => onView(item)}
             onEdit={() => onEdit(item)}
             onDelete={() => onDelete(item)}
@@ -140,19 +161,22 @@ export default function CoursesListScreen({ navigation }) {
         )}
       />
 
-      <TouchableOpacity
-        style={styles.fab}
-        onPress={() => navigation.navigate('CreateCourse')}
-        activeOpacity={0.9}
-      >
-        <Plus size={24} color="#fff" strokeWidth={2.6} />
-      </TouchableOpacity>
+      {/* FAB is main-admin only. Branch admins can't publish courses. */}
+      {isSubBranch ? null : (
+        <TouchableOpacity
+          style={styles.fab}
+          onPress={() => navigation.navigate('CreateCourse')}
+          activeOpacity={0.9}
+        >
+          <Plus size={24} color="#fff" strokeWidth={2.6} />
+        </TouchableOpacity>
+      )}
     </View>
   );
 }
 
 // ── Row ──────────────────────────────────────────────────────────────────────
-function CourseRow({ course, onView, onEdit, onDelete }) {
+function CourseRow({ course, onView, onEdit, onDelete, readOnly }) {
   const badge  = BADGE_STYLE[course.badge];
   const status = STATUS_STYLE[course.status] || STATUS_STYLE.active;
 
@@ -217,9 +241,15 @@ function CourseRow({ course, onView, onEdit, onDelete }) {
       </View>
 
       <View style={styles.actions}>
+        {/* Sub-branch admins only see View — the catalog is owned by
+            the main institution, so Edit/Delete are hidden here. */}
         <ActionButton icon={Eye}    label="View"   accent={palette.blue}   onPress={onView} />
-        <ActionButton icon={Pencil} label="Edit"   accent={palette.purple} onPress={onEdit} />
-        <ActionButton icon={Trash2} label="Delete" accent={palette.rose}   onPress={onDelete} />
+        {readOnly ? null : (
+          <>
+            <ActionButton icon={Pencil} label="Edit"   accent={palette.purple} onPress={onEdit} />
+            <ActionButton icon={Trash2} label="Delete" accent={palette.rose}   onPress={onDelete} />
+          </>
+        )}
       </View>
     </View>
   );
@@ -324,10 +354,13 @@ const styles = StyleSheet.create({
   },
   actionText: { ...type.caption, fontWeight: '700' },
 
-  // FAB
+  // FAB — sits above the bottom tab bar. spacing.xl alone (~20pt) was
+  // hidden behind the tabs (≈60–80pt) so the user couldn't see the +
+  // button at all on the Courses tab. Bumping to ~90pt clears the bar
+  // on both Android and iOS without overlapping the last list row.
   fab: {
     position: 'absolute',
-    bottom: spacing.xl,
+    bottom: 90,
     right: spacing.xl,
     width: 56, height: 56, borderRadius: 28,
     backgroundColor: palette.purple.vivid,

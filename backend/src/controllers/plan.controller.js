@@ -12,9 +12,10 @@ exports.getUsage = async (req, res) => {
     const institutionId = u.rows[0]?.institution_id;
     if (!institutionId) return res.status(403).json({ message: 'No institution linked' });
 
-    const [students, trainers] = await Promise.all([
+    const [students, trainers, branches] = await Promise.all([
       getUsage(institutionId, 'students'),
       getUsage(institutionId, 'trainers'),
+      getUsage(institutionId, 'branches'),
     ]);
     // Diagnostic log — visible in the backend terminal. Helps catch
     // the "why didn't the cap fire?" case (usually missing plan_id or
@@ -25,9 +26,11 @@ exports.getUsage = async (req, res) => {
       `students ${students.current}/${students.limit ?? '∞'} ` +
       `(unlimited=${students.unlimited}) | ` +
       `trainers ${trainers.current}/${trainers.limit ?? '∞'} ` +
-      `(unlimited=${trainers.unlimited}) | plan="${students.plan_name || 'none'}"`,
+      `(unlimited=${trainers.unlimited}) | ` +
+      `branches ${branches.current}/${branches.limit ?? '∞'} ` +
+      `(unlimited=${branches.unlimited}) | plan="${students.plan_name || 'none'}"`,
     );
-    res.json({ students, trainers });
+    res.json({ students, trainers, branches });
   } catch (err) {
     console.error('Plan usage error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
@@ -87,7 +90,54 @@ function sanitizePayload(body) {
     grace_days:    body.grace_days !== undefined && body.grace_days !== '' ? Math.max(0, parseInt(body.grace_days, 10) || 0) : 0,
     discount_enabled: discountEnabled,
     discount_percent: discountPercent,
+    // Optional plan image (migration 051). Empty string → null so the
+    // COALESCE on update doesn't accidentally clear a saved image
+    // when the admin re-saves the form without touching the upload.
+    image_url:     body.image_url ? String(body.image_url).trim() : null,
   };
+}
+
+// ── Pricing terms helper ─────────────────────────────────────────────
+// Load plan_pricing rows for the given plan ids in one query and
+// group them into per-plan arrays keyed by plan_id.
+async function loadPricingByPlan(planIds) {
+  if (!planIds.length) return new Map();
+  const r = await pool.query(
+    `SELECT plan_id, billing_term, price, is_enabled
+       FROM plan_pricing
+      WHERE plan_id = ANY($1::int[])
+      ORDER BY
+        CASE billing_term
+          WHEN 'monthly'     THEN 1
+          WHEN 'quarterly'   THEN 2
+          WHEN 'half_yearly' THEN 3
+          WHEN 'annual'      THEN 4
+          ELSE 5
+        END`,
+    [planIds],
+  );
+  const byPlan = new Map();
+  for (const row of r.rows) {
+    if (!byPlan.has(row.plan_id)) byPlan.set(row.plan_id, []);
+    byPlan.get(row.plan_id).push({
+      billing_term: row.billing_term,
+      price:        Number(row.price),
+      is_enabled:   !!row.is_enabled,
+    });
+  }
+  return byPlan;
+}
+
+// Attach pricing_terms to each plan row so the mobile shows the correct
+// term options + prices. For consumers that only understand the legacy
+// singleton `price` + `billing_cycle`, both stay populated on the row.
+async function attachPricing(plans) {
+  const ids = plans.map((p) => p.id);
+  const byPlan = await loadPricingByPlan(ids);
+  return plans.map((p) => {
+    const terms = byPlan.get(p.id) || [];
+    return { ...p, pricing_terms: terms };
+  });
 }
 
 // PUBLIC — list of ACTIVE plans for the institution-admin's "Choose Plan" UI.
@@ -98,7 +148,8 @@ exports.getPlans = async (req, res) => {
     const result = await pool.query(
       `SELECT * FROM subscription_plans ${where} ORDER BY price ASC`
     );
-    res.json({ plans: result.rows });
+    const plans = await attachPricing(result.rows);
+    res.json({ plans });
   } catch (err) {
     console.error('Get plans error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
@@ -115,26 +166,102 @@ exports.getPlanById = async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ message: 'Plan not found' });
     }
-    res.json({ plan: result.rows[0] });
+    const [plan] = await attachPricing(result.rows);
+    res.json({ plan });
   } catch (err) {
     console.error('Get plan error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
 
+// Upsert the pricing terms for a plan. Accepts an array of
+//   { billing_term, price, is_enabled }
+// entries. Missing terms are left alone (partial edit possible), sent
+// terms overwrite. Cleans invalid terms silently to avoid 400ing on a
+// stale client payload.
+const VALID_TERMS = new Set(['monthly', 'quarterly', 'half_yearly', 'annual']);
+async function upsertPricingTerms(planId, rawTerms) {
+  if (!Array.isArray(rawTerms)) return;
+  for (const t of rawTerms) {
+    if (!t || !VALID_TERMS.has(t.billing_term)) continue;
+    const priceNum = Number(t.price);
+    if (!Number.isFinite(priceNum) || priceNum < 0) continue;
+    const enabled = t.is_enabled === false ? false : true;
+    await pool.query(
+      `INSERT INTO plan_pricing (plan_id, billing_term, price, is_enabled)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (plan_id, billing_term) DO UPDATE SET
+         price      = EXCLUDED.price,
+         is_enabled = EXCLUDED.is_enabled,
+         updated_at = NOW()`,
+      [planId, t.billing_term, priceNum, enabled],
+    );
+  }
+}
+
+// Derive the legacy singleton `price` + `billing_cycle` columns from
+// the enabled terms so the old readers (mobile PlanSelection legacy
+// screens, subscription-status endpoint, etc.) keep working. Picks the
+// lowest-priced ENABLED term; falls back to monthly if nothing enabled.
+async function refreshLegacyPricing(planId) {
+  const r = await pool.query(
+    `SELECT billing_term, price
+       FROM plan_pricing
+      WHERE plan_id = $1 AND is_enabled = TRUE
+      ORDER BY price ASC
+      LIMIT 1`,
+    [planId],
+  );
+  if (r.rows.length === 0) return;
+  const { billing_term, price } = r.rows[0];
+  await pool.query(
+    `UPDATE subscription_plans SET price = $1, billing_cycle = $2 WHERE id = $3`,
+    [price, billing_term, planId],
+  );
+}
+
 // SUPER ADMIN — create a new plan.
+//
+// New shape accepts `pricing_terms: [{ billing_term, price, is_enabled }, ...]`.
+// If provided, the legacy singleton `price` + `billing_cycle` are
+// derived from the enabled terms (cheapest wins). If omitted, the
+// legacy singletons are used as before and a matching plan_pricing row
+// is inserted so the new endpoint still returns pricing_terms.
 exports.createPlan = async (req, res) => {
   try {
     const p = sanitizePayload(req.body);
-    if (!p.name || p.price === null || isNaN(p.price)) {
-      return res.status(400).json({ message: 'name and price are required' });
+    const rawTerms = Array.isArray(req.body?.pricing_terms) ? req.body.pricing_terms : null;
+
+    if (!p.name) {
+      return res.status(400).json({ message: 'name is required' });
     }
+
+    // Derive legacy fallback from pricing_terms if the caller didn't
+    // send a top-level price.
+    if ((p.price === null || isNaN(p.price)) && rawTerms) {
+      const enabled = rawTerms.filter(
+        (t) => t && VALID_TERMS.has(t.billing_term) && t.is_enabled !== false && Number(t.price) >= 0,
+      );
+      if (enabled.length === 0) {
+        return res.status(400).json({ message: 'At least one enabled pricing term is required.' });
+      }
+      const cheapest = enabled.reduce((acc, t) =>
+        acc == null || Number(t.price) < Number(acc.price) ? t : acc, null);
+      p.price = Number(cheapest.price);
+      p.billing_cycle = cheapest.billing_term;
+    }
+
+    if (p.price === null || isNaN(p.price)) {
+      return res.status(400).json({ message: 'price is required' });
+    }
+
     const result = await pool.query(
       `INSERT INTO subscription_plans
          (name, price, billing_cycle, max_branches, max_students, max_trainers,
           features, is_popular, is_active,
-          trial_days, grace_days, discount_enabled, discount_percent)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13)
+          trial_days, grace_days, discount_enabled, discount_percent,
+          image_url)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14)
        RETURNING *`,
       [
         p.name, p.price, p.billing_cycle,
@@ -142,9 +269,27 @@ exports.createPlan = async (req, res) => {
         JSON.stringify(p.features),
         p.is_popular, p.is_active,
         p.trial_days, p.grace_days, p.discount_enabled, p.discount_percent,
+        p.image_url,
       ],
     );
-    res.status(201).json({ message: 'Plan created', plan: result.rows[0] });
+    const plan = result.rows[0];
+
+    // Persist pricing_terms if the caller sent them; otherwise seed a
+    // single row from the legacy singleton pair so the new shape is
+    // always returnable.
+    if (rawTerms) {
+      await upsertPricingTerms(plan.id, rawTerms);
+    } else {
+      await upsertPricingTerms(plan.id, [{
+        billing_term: p.billing_cycle || 'monthly',
+        price:        Number(p.price),
+        is_enabled:   true,
+      }]);
+    }
+    await refreshLegacyPricing(plan.id);
+
+    const [enriched] = await attachPricing([plan]);
+    res.status(201).json({ message: 'Plan created', plan: enriched });
   } catch (err) {
     console.error('Create plan error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
@@ -164,6 +309,14 @@ exports.updatePlan = async (req, res) => {
     // returns [] when missing, which would otherwise wipe existing features.
     const featuresOrNull = has('features') ? JSON.stringify(p.features) : null;
 
+    // image_url uses a present-check too so an admin who saves without
+    // touching the upload doesn't clear the existing image. The
+    // sanitised value is used regardless — passing `image_url: null`
+    // in the body is how the client clears it.
+    const imageOrNull = has('image_url')
+      ? (p.image_url === null ? null : p.image_url)
+      : null;
+
     const result = await pool.query(
       `UPDATE subscription_plans SET
          name             = COALESCE($1, name),
@@ -178,8 +331,9 @@ exports.updatePlan = async (req, res) => {
          trial_days       = COALESCE($10, trial_days),
          grace_days       = COALESCE($11, grace_days),
          discount_enabled = COALESCE($12, discount_enabled),
-         discount_percent = COALESCE($13, discount_percent)
-       WHERE id = $14
+         discount_percent = COALESCE($13, discount_percent),
+         image_url        = CASE WHEN $15::boolean THEN $14 ELSE image_url END
+       WHERE id = $16
        RETURNING *`,
       [
         has('name')             ? p.name             : null,
@@ -195,13 +349,25 @@ exports.updatePlan = async (req, res) => {
         has('grace_days')       ? p.grace_days       : null,
         has('discount_enabled') ? p.discount_enabled : null,
         has('discount_percent') ? p.discount_percent : null,
+        imageOrNull,
+        has('image_url'),
         id,
       ],
     );
     if (result.rows.length === 0) {
       return res.status(404).json({ message: 'Plan not found' });
     }
-    res.json({ message: 'Plan updated', plan: result.rows[0] });
+    const plan = result.rows[0];
+
+    // pricing_terms round-trip. Same semantics as create — the caller
+    // sends any subset (partial edits work), missing terms untouched.
+    if (Array.isArray(req.body?.pricing_terms)) {
+      await upsertPricingTerms(plan.id, req.body.pricing_terms);
+      await refreshLegacyPricing(plan.id);
+    }
+
+    const [enriched] = await attachPricing([plan]);
+    res.json({ message: 'Plan updated', plan: enriched });
   } catch (err) {
     console.error('Update plan error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });

@@ -1,6 +1,9 @@
 const pool = require('../config/db');
 const crypto = require('crypto');
 const { insertNotification } = require('./notification.controller');
+// Branch-scope + admin-can-see-student check. Ensures a main admin
+// can't view a sub-branch student's belt journey and vice versa.
+const { getBranchScope, adminCanSeeStudent } = require('../utils/branchScope');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Belt Badges & Certifications
@@ -153,9 +156,17 @@ exports.getJourney = async (req, res) => {
       if (link.rows.length === 0) return res.status(403).json({ message: 'Access denied' });
     }
     if (role === 'admin') {
-      const my = await getCallerInstitution(req.user.id);
-      if (my !== student.institution_id) {
-        return res.status(403).json({ message: 'Not your student' });
+      // Admin access = student is enrolled in at least one batch under
+      // the caller's branch scope (main-only for main admin; branch-only
+      // for sub-branch admin). Falls back to the legacy institution-id
+      // check when the student has no enrollments yet, so admins can
+      // still promote freshly-signed-up students they own.
+      const scope = await getBranchScope(req.user.id);
+      const canSee = await adminCanSeeStudent(pool, scope, studentId);
+      if (!canSee) {
+        if (!scope || scope.callerInstId !== student.institution_id) {
+          return res.status(403).json({ message: 'Not your student' });
+        }
       }
     }
     if (role === 'trainer') {
@@ -284,9 +295,13 @@ exports.promote = async (req, res) => {
     // Auth.
     const role = req.user.role;
     if (role === 'admin') {
-      const my = await getCallerInstitution(req.user.id);
-      if (my !== student.institution_id) {
-        return res.status(403).json({ message: 'Not your student' });
+      // Same branch-scoped access rule as the read side (getJourney).
+      const scope = await getBranchScope(req.user.id);
+      const canSee = await adminCanSeeStudent(pool, scope, student_id);
+      if (!canSee) {
+        if (!scope || scope.callerInstId !== student.institution_id) {
+          return res.status(403).json({ message: 'Not your student' });
+        }
       }
     } else if (role === 'trainer') {
       const ok = await pool.query(

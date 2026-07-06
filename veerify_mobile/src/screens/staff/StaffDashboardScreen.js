@@ -56,6 +56,17 @@ export default function StaffDashboardScreen({ navigation }) {
   const [batches, setBatches] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  // Institution promo banners targeted at trainers ("trainer" or "both"
+  // audience). Loaded once on focus; rendered as a small strip above
+  // the quick actions.
+  const [banners, setBanners] = useState([]);
+  React.useEffect(() => {
+    let cancelled = false;
+    apiClient.get('/institution-banners/for-me')
+      .then((r) => { if (!cancelled) setBanners(r.data?.banners || []); })
+      .catch(() => { if (!cancelled) setBanners([]); });
+    return () => { cancelled = true; };
+  }, []);
 
   // `myLeaves` is the trainer's OWN leave history (from /trainer-leave-requests/my,
   // backed by the trainer_leave_requests table). We compute how many days
@@ -223,6 +234,41 @@ export default function StaffDashboardScreen({ navigation }) {
         />
       </View>
 
+      {/* ───── Institution banners (trainer-targeted) ─────
+          Rendered as a horizontal carousel above the quick actions.
+          Pulled from /api/institution-banners/for-me which filters by
+          the trainer's institution and 'trainer' / 'both' audience. */}
+      {banners.length > 0 ? (
+        <View style={{ marginTop: spacing.lg }}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={{ paddingHorizontal: spacing.lg, gap: 10 }}
+            pagingEnabled
+          >
+            {banners.map((b) => {
+              const uri = resolveAssetUrl(b.image_url);
+              return (
+                <View key={b.id} style={dashStyles.banner}>
+                  {uri ? (
+                    <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="cover" />
+                  ) : null}
+                  <View style={dashStyles.bannerScrim} />
+                  <View style={dashStyles.bannerContent}>
+                    {b.title ? (
+                      <Text style={dashStyles.bannerTitle} numberOfLines={1}>{b.title}</Text>
+                    ) : null}
+                    {b.subtitle ? (
+                      <Text style={dashStyles.bannerSub} numberOfLines={2}>{b.subtitle}</Text>
+                    ) : null}
+                  </View>
+                </View>
+              );
+            })}
+          </ScrollView>
+        </View>
+      ) : null}
+
       {/* ───── Quick Actions ───── */}
       <SectionHeader title="Quick Actions" />
       <View style={styles.actionsGrid}>
@@ -388,6 +434,27 @@ function EventRow({ event, onPress }) {
           </Text>
         ) : null}
       </View>
+      {/* Fee / Paid chip — same rule as student HomeTab: unpaid paid
+          event shows the amount, paid event shows a PAID label. */}
+      {event.payment_required && !event.has_paid ? (
+        <View style={{
+          paddingHorizontal: 8, paddingVertical: 3,
+          borderRadius: 999, backgroundColor: '#10B98122',
+        }}>
+          <Text style={{ fontSize: 11, fontWeight: '800', color: '#10B981' }}>
+            ₹{Number(event.payment_amount || 0).toLocaleString('en-IN')}
+          </Text>
+        </View>
+      ) : event.payment_required && event.has_paid ? (
+        <View style={{
+          paddingHorizontal: 8, paddingVertical: 3,
+          borderRadius: 999, backgroundColor: '#10B98122',
+        }}>
+          <Text style={{ fontSize: 10, fontWeight: '800', color: '#10B981', letterSpacing: 0.4 }}>
+            PAID
+          </Text>
+        </View>
+      ) : null}
     </TouchableOpacity>
   );
 }
@@ -643,5 +710,40 @@ const styles = StyleSheet.create({
     padding: spacing.xl,
     alignItems: 'center', justifyContent: 'center',
     minHeight: 120,
+  },
+});
+
+// Institution-banner styles split out so the dashboard's main `styles`
+// stays clean. Width matches the screen minus side gutters so each
+// banner snaps as one full page in the horizontal pager.
+const SCREEN_W = require('react-native').Dimensions.get('window').width;
+const dashStyles = StyleSheet.create({
+  banner: {
+    width: SCREEN_W - spacing.lg * 2,
+    height: 130,
+    borderRadius: radius.lg,
+    overflow: 'hidden',
+    backgroundColor: palette.purple.soft,
+  },
+  bannerScrim: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(15,23,42,0.32)',
+  },
+  bannerContent: {
+    position: 'absolute',
+    left: 14, right: 14, bottom: 12,
+  },
+  bannerTitle: {
+    color: '#fff',
+    fontWeight: '800',
+    fontSize: 16,
+    letterSpacing: 0.2,
+  },
+  bannerSub: {
+    color: 'rgba(255,255,255,0.92)',
+    fontWeight: '600',
+    fontSize: 12,
+    marginTop: 2,
+    lineHeight: 16,
   },
 });

@@ -501,8 +501,12 @@ exports.setupAcademy = async (req, res) => {
         const hashed = await bcrypt.hash(tempPassword, 10);
         const branchAdminName = `${b.name || 'Branch'} Admin`;
         const newUser = await pool.query(
-          `INSERT INTO users (name, email, phone, password, role, status)
-           VALUES ($1, $2, $3, $4, 'admin', 'active')
+          // must_change_password is TRUE on first provisioning so the
+          // mobile pops the "change password / I'll do it later" dialog
+          // the first time this branch admin signs in.
+          `INSERT INTO users (name, email, phone, password, role, status,
+                              must_change_password)
+           VALUES ($1, $2, $3, $4, 'admin', 'active', TRUE)
            RETURNING id`,
           [branchAdminName, branchEmail, b.contact_number || null, hashed],
         );
@@ -928,22 +932,28 @@ exports.mockPayment = async (req, res) => {
 };
 
 // GET: List all pending institutions (for super admin)
+// NOTE: sub-branches (rows with parent_institution_id set) are excluded here.
+// A branch is not a standalone institution to the super admin — it only
+// appears nested inside its parent's detail page under "Branch Locations".
 exports.getPendingInstitutions = async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT 
+      `SELECT
          i.*,
-         u.name AS owner_name, 
-         u.email AS owner_email, 
+         u.name AS owner_name,
+         u.email AS owner_email,
          u.phone AS owner_phone,
-         sp.name AS plan_name, 
+         sp.name AS plan_name,
          sp.price AS plan_price,
-         sp.features AS plan_features
+         sp.features AS plan_features,
+         sp.trial_days AS plan_trial_days,
+         sp.grace_days AS plan_grace_days
        FROM institutions i
        JOIN users u ON i.owner_user_id = u.id
        LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
        WHERE i.onboarding_status = 'pending_approval'
          AND i.deleted_at IS NULL
+         AND i.parent_institution_id IS NULL
        ORDER BY i.created_at DESC`
     );
 
@@ -985,7 +995,7 @@ exports.getInstitutionById = async (req, res) => {
     const { id } = req.params;
 
     const result = await pool.query(
-      `SELECT 
+      `SELECT
          i.*,
          u.name AS owner_name,
          u.email AS owner_email,
@@ -1007,7 +1017,78 @@ exports.getInstitutionById = async (req, res) => {
       return res.status(404).json({ message: 'Institution not found' });
     }
 
-    res.json({ institution: result.rows[0] });
+    const inst = result.rows[0];
+
+    // Attach a thin list of sub-branches when this row is a main-branch
+    // institution. The admin web's "Branch Locations" section uses it to
+    // line up the JSONB-stored branch entries with the real child
+    // institutions row so it can render a "Resend credentials" button
+    // per branch (the endpoint needs the child institution id).
+    if (!inst.parent_institution_id) {
+      const kids = await pool.query(
+        `SELECT id, name, email, address, city, pincode, owner_user_id
+           FROM institutions
+          WHERE parent_institution_id = $1
+            AND COALESCE(deleted_at::text, '') = ''
+          ORDER BY created_at`,
+        [inst.id],
+      );
+      inst.sub_branches = kids.rows;
+    }
+
+    // Sub-branch policy: every non-location field is mirrored from the
+    // parent institution. The branch's own row only keeps location info
+    // (address, city, pincode, latitude, longitude). When we serve a
+    // sub-branch we hydrate the missing fields from the parent so the
+    // detail page (and the branch admin's mobile app, which reads the
+    // same shape) shows uniform branding without us having to copy data
+    // into every child row.
+    if (inst.parent_institution_id) {
+      const parentRes = await pool.query(
+        `SELECT name, brand_name, logo_url, institution_type, institution_types,
+                registration_number, date_of_establishment, skills,
+                email, phone, website_url, branches,
+                affiliation_or_board, accreditation_body_name,
+                accreditation_expiry_date, accreditation_certificate_url,
+                total_student_capacity, current_enrollment,
+                medium_of_instruction, operating_hours,
+                operating_hours_weekday, operating_hours_weekend,
+                master_name, master_role, master_email, master_phone_number
+           FROM institutions WHERE id = $1`,
+        [inst.parent_institution_id],
+      );
+      const parent = parentRes.rows[0];
+      if (parent) {
+        // Location fields stay on the child. branches[] is also kept
+        // empty on sub-branches because they don't manage other
+        // branches — that's the parent's concern. Inheriting it caused
+        // the admin web to render a Branch Locations card on the
+        // sub-branch's page with a chip that posted to the wrong id.
+        const SKIP_INHERIT = new Set([
+          'address', 'city', 'pincode', 'latitude', 'longitude',
+          'branches',
+        ]);
+        // ── GAP-FILL inheritance (not blanket override) ──────────────
+        // Old behaviour overwrote the sub-branch's own values with the
+        // parent's whenever the parent had one — which meant a sub-branch
+        // admin's phone / email / brand edits were invisible on the web
+        // detail page, and the "Institution profile updated" highlight
+        // in the notification bell pointed at fields whose displayed
+        // value hadn't actually changed. Now we only pull from the
+        // parent when the sub-branch's own column is null/undefined/'',
+        // so the child's edits always take precedence.
+        for (const [k, v] of Object.entries(parent)) {
+          if (SKIP_INHERIT.has(k)) continue;
+          if (v == null) continue;
+          const existing = inst[k];
+          const isBlank = existing === null || existing === undefined || existing === '';
+          if (isBlank) inst[k] = v;
+        }
+        inst.is_sub_branch = true;
+      }
+    }
+
+    res.json({ institution: inst });
   } catch (err) {
     console.error('Get institution error:', err);
     res.status(500).json({ message: 'Server error' });
@@ -1037,6 +1118,12 @@ exports.getAllInstitutions = async (req, res) => {
     } else if (include_deleted !== 'true') {
       where.push(`i.deleted_at IS NULL`);
     }
+
+    // Sub-branches are never surfaced in the top-level list — the super admin
+    // opens the parent and sees them under "Branch Locations". This keeps the
+    // dashboard showing one row per real academy instead of one row per
+    // (academy + each branch).
+    where.push(`i.parent_institution_id IS NULL`);
 
     if (status) {
       params.push(status);
@@ -1224,6 +1311,38 @@ exports.approveInstitution = async (req, res) => {
     //    notice. Now the email always goes out — when there's no link we send
     //    a "you've been approved, payment link to follow" version so the
     //    institution at least knows the super admin acted on their request.
+    //
+    // We also pull the plan's per-term pricing (migration 049) so the
+    // email lists Monthly / Quarterly / Half-Yearly / Yearly with their
+    // real prices instead of hard-coding "₹X / month".
+    let pricingTerms = [];
+    if (institution.plan_id) {
+      try {
+        const pp = await pool.query(
+          `SELECT billing_term, price, is_enabled
+             FROM plan_pricing
+            WHERE plan_id = $1
+              AND is_enabled = TRUE
+            ORDER BY
+              CASE billing_term
+                WHEN 'monthly'     THEN 1
+                WHEN 'quarterly'   THEN 2
+                WHEN 'half_yearly' THEN 3
+                WHEN 'annual'      THEN 4
+                ELSE 5
+              END`,
+          [institution.plan_id],
+        );
+        pricingTerms = pp.rows.map((r) => ({
+          billing_term: r.billing_term,
+          price:        Number(r.price),
+          is_enabled:   true,
+        }));
+      } catch (err) {
+        console.warn('[approve] plan_pricing lookup failed:', err?.message);
+      }
+    }
+
     const mailResult = await sendApprovalEmail({
       to:              institution.owner_email,
       ownerName:       institution.owner_name,
@@ -1236,6 +1355,8 @@ exports.approveInstitution = async (req, res) => {
       effectivePrice,
       discountEnabled: discountOn,
       discountPercent: discountPct,
+      pricingTerms,
+      institutionId:   institution.id,
     });
     if (!mailResult.ok) {
       warnings.push(`Email not sent: ${mailResult.error}`);
@@ -1327,6 +1448,35 @@ exports.resendPaymentLink = async (req, res) => {
       [linkResult.link.id, linkResult.link.short_url, linkResult.link.amountPaise, id]
     );
 
+    // Same per-term pricing lookup as approveInstitution so the resent
+    // email surfaces the full billing terms table too.
+    let resendPricingTerms = [];
+    if (institution.plan_id) {
+      try {
+        const pp = await pool.query(
+          `SELECT billing_term, price
+             FROM plan_pricing
+            WHERE plan_id = $1 AND is_enabled = TRUE
+            ORDER BY
+              CASE billing_term
+                WHEN 'monthly'     THEN 1
+                WHEN 'quarterly'   THEN 2
+                WHEN 'half_yearly' THEN 3
+                WHEN 'annual'      THEN 4
+                ELSE 5
+              END`,
+          [institution.plan_id],
+        );
+        resendPricingTerms = pp.rows.map((r) => ({
+          billing_term: r.billing_term,
+          price:        Number(r.price),
+          is_enabled:   true,
+        }));
+      } catch (err) {
+        console.warn('[resend] plan_pricing lookup failed:', err?.message);
+      }
+    }
+
     const mailResult = await sendApprovalEmail({
       to:              institution.owner_email,
       ownerName:       institution.owner_name,
@@ -1334,6 +1484,8 @@ exports.resendPaymentLink = async (req, res) => {
       planName:        institution.plan_name,
       planPrice:       institution.plan_price,
       paymentUrl:      linkResult.link.short_url,
+      pricingTerms:    resendPricingTerms,
+      institutionId:   institution.id,
     });
 
     res.json({
@@ -1525,11 +1677,60 @@ exports.handlePaymentWebhook = async (req, res) => {
     const paymentEntity = event.payload?.payment?.entity      || {};
     const linkId        = linkEntity.id;
     const paymentId     = paymentEntity.id;
-    const notesInstId   = linkEntity.notes?.institution_id;
+    const notes         = linkEntity.notes || {};
+    const notesInstId   = notes.institution_id;
 
     if (!linkId) {
       console.warn('[webhook] payment_link.paid with no link id');
       return res.status(400).json({ message: 'Missing payment_link.id' });
+    }
+
+    // ── Event payment branch ────────────────────────────────────────
+    // Institution admins can gate an event behind a fee. Students /
+    // trainers pay via a Razorpay Payment Link minted by
+    // institution.controller.js#payForInstitutionEvent, which stamps
+    // notes.event_payment='1' plus notes.event_id / notes.user_id. We
+    // flip the matching event_payments row to 'paid' and return early.
+    if (notes.event_payment === '1' || notes.event_payment === 1) {
+      const eventIdNote = parseInt(notes.event_id, 10);
+      const userIdNote  = parseInt(notes.user_id, 10);
+
+      // First try the direct link_id lookup — this is set when we insert
+      // the pending row, so it should always match.
+      let ep = await pool.query(
+        `SELECT id, status FROM event_payments WHERE razorpay_link_id = $1`,
+        [linkId],
+      );
+
+      // Fallback: (event_id, user_id, still-pending) if the link_id
+      // somehow wasn't recorded (defensive; shouldn't happen).
+      if (ep.rows.length === 0 && Number.isFinite(eventIdNote) && Number.isFinite(userIdNote)) {
+        ep = await pool.query(
+          `SELECT id, status FROM event_payments
+            WHERE event_id = $1 AND user_id = $2 AND status = 'pending'
+            ORDER BY created_at DESC LIMIT 1`,
+          [eventIdNote, userIdNote],
+        );
+      }
+
+      if (ep.rows.length === 0) {
+        console.warn('[webhook] event payment link=', linkId, 'not found in event_payments');
+        return res.json({ ok: true, matched: false });
+      }
+      if (ep.rows[0].status === 'paid') {
+        // Razorpay may retry — idempotent ack.
+        return res.json({ ok: true, already_paid: true });
+      }
+
+      await pool.query(
+        `UPDATE event_payments
+            SET status              = 'paid',
+                razorpay_payment_id = $2,
+                paid_at             = NOW()
+          WHERE id = $1`,
+        [ep.rows[0].id, paymentId || null],
+      );
+      return res.json({ ok: true, event_payment: true });
     }
 
     // Look up by stored payment_link_id first; fall back to notes.institution_id
@@ -1560,22 +1761,76 @@ exports.handlePaymentWebhook = async (req, res) => {
 
     const institution = inst.rows[0];
 
-    // Idempotent: if already active, just ack.
-    if (institution.onboarding_status === 'active') {
+    // Read the notes so we know what this payment is for. Legacy
+    // onboarding payments have no explicit action → treat as
+    // 'onboarding' for the transaction ledger; the state machine
+    // below is identical to before for that path.
+    const action = notes.action === 'renew' || notes.action === 'change_plan'
+      ? notes.action : 'onboarding';
+    const targetPlanId = notes.target_plan_id ? parseInt(notes.target_plan_id, 10) : null;
+
+    // Extension duration comes from the billing_term note when present.
+    // Maps: monthly → 30d, quarterly → 90d, half_yearly → 180d, annual → 365d.
+    // Falls back to 30 days for legacy links that don't carry the note.
+    const TERM_DAYS = { monthly: 30, quarterly: 90, half_yearly: 180, annual: 365 };
+    const extendDays = TERM_DAYS[notes.billing_term] || 30;
+
+    // Compute the new subscription window. Both renewal and plan-change
+    // extend by the term's day count from NOW OR from the current
+    // subscription_end (whichever is later, so a mid-cycle renewal stacks).
+    const extendClause = `GREATEST(NOW(), COALESCE(subscription_end, NOW())) + INTERVAL '${extendDays} days'`;
+
+    let updated;
+
+    if (institution.onboarding_status === 'active'
+        && (action === 'renew' || action === 'change_plan')) {
+      // Already active — extend subscription window and optionally swap
+      // the plan. Idempotency handled by transaction ledger below.
+      const alreadyPaid = await pool.query(
+        `SELECT id, new_subscription_end
+           FROM subscription_transactions
+          WHERE razorpay_link_id = $1 AND status = 'paid'
+          LIMIT 1`,
+        [linkId],
+      );
+      if (alreadyPaid.rows.length) {
+        return res.json({ ok: true, already_paid: true });
+      }
+
+      const params = [institution.id, paymentId || null];
+      let planSet = '';
+      if (action === 'change_plan' && targetPlanId) {
+        params.push(targetPlanId);
+        planSet = `, plan_id = $${params.length}`;
+      }
+      updated = await pool.query(
+        `UPDATE institutions SET
+           subscription_end     = ${extendClause},
+           payment_link_status  = 'paid',
+           payment_reference    = $2,
+           paid_at              = NOW()
+           ${planSet}
+         WHERE id = $1
+         RETURNING *`,
+        params,
+      );
+    } else if (institution.onboarding_status === 'active') {
+      // Already active but no known action tag — idempotent ack.
       return res.json({ ok: true, already_active: true });
-    }
+    } else {
 
-    // Activate.
-    // Track whether this is the first-ever paid event, so we only credit
-    // the referrer once per institution.
-    const wasAlreadyPaid = !!institution.paid_at;
-
-    const updated = await pool.query(
+    // First-time activation path (unchanged shape). The referral credit
+    // block below reads institution.paid_at directly to gate the credit
+    // to a single lifetime firing.
+    // First-time activation uses the same billing-term day count as
+    // renew / change_plan. Legacy onboarding without a billing_term
+    // note defaults to 30 days.
+    updated = await pool.query(
       `UPDATE institutions SET
          onboarding_status    = 'active',
          status               = 'approved',
          subscription_start   = NOW(),
-         subscription_end     = NOW() + INTERVAL '30 days',
+         subscription_end     = NOW() + INTERVAL '${extendDays} days',
          payment_link_status  = 'paid',
          payment_reference    = $2,
          paid_at              = NOW()
@@ -1583,29 +1838,53 @@ exports.handlePaymentWebhook = async (req, res) => {
        RETURNING *`,
       [institution.id, paymentId || null]
     );
-
+    }
+    // Ledger: flip the matching transaction to 'paid' and stamp the
+    // new subscription_end for the history row.
     await pool.query(
-      `UPDATE users SET status = 'active' WHERE id = $1`,
-      [institution.owner_user_id]
+      `UPDATE subscription_transactions
+          SET status              = 'paid',
+              razorpay_payment_id = $2,
+              paid_at             = NOW(),
+              new_subscription_end = $3
+        WHERE razorpay_link_id = $1
+          AND status = 'pending'`,
+      [linkId, paymentId || null, updated.rows[0]?.subscription_end || null],
     );
 
-    // Credit the referring institution (if any) — best effort, after commit.
-    if (!wasAlreadyPaid) {
-      creditReferralReward(institution.id).catch((err) =>
-        console.warn('[webhook] referral credit failed:', err?.message),
+    // Post-payment side effects — only fire on a first-time activation.
+    // Renewals and plan changes don't re-fire welcome emails or the
+    // referral credit (both are one-time-per-institution).
+    if (action === 'onboarding') {
+      await pool.query(
+        `UPDATE users SET status = 'active' WHERE id = $1`,
+        [institution.owner_user_id]
       );
+
+      // Credit the referring institution (if any) — best effort, after commit.
+      // The `wasAlreadyPaid` guard lives inside the else-branch above, so
+      // for legacy webhooks that fell through the onboarding path this
+      // remains true only on the first-ever paid event.
+      if (!institution.paid_at) {
+        creditReferralReward(institution.id).catch((err) =>
+          console.warn('[webhook] referral credit failed:', err?.message),
+        );
+      }
+
+      // Fire-and-forget welcome email. Don't let it block the webhook ack.
+      sendActivationEmail({
+        to:              institution.owner_email,
+        ownerName:       institution.owner_name,
+        institutionName: institution.name,
+        subscriptionEnd: updated.rows[0].subscription_end,
+      }).catch((e) => console.error('[webhook] activation email failed:', e.message));
+
+      console.log(`[webhook] activated institution ${institution.id} (${institution.name}) via payment ${paymentId}`);
+      return res.json({ ok: true, activated: true, institution_id: institution.id });
     }
 
-    // Fire-and-forget welcome email. Don't let it block the webhook ack.
-    sendActivationEmail({
-      to:              institution.owner_email,
-      ownerName:       institution.owner_name,
-      institutionName: institution.name,
-      subscriptionEnd: updated.rows[0].subscription_end,
-    }).catch((e) => console.error('[webhook] activation email failed:', e.message));
-
-    console.log(`[webhook] activated institution ${institution.id} (${institution.name}) via payment ${paymentId}`);
-    return res.json({ ok: true, activated: true, institution_id: institution.id });
+    console.log(`[webhook] ${action} institution ${institution.id} → ${updated.rows[0].subscription_end}`);
+    return res.json({ ok: true, action, institution_id: institution.id });
   } catch (err) {
     console.error('[webhook] handler error:', err);
     // 500 will cause Razorpay to retry, which is what we want on a transient
@@ -1710,6 +1989,29 @@ exports.deleteInstitution = async (req, res) => {
       return res.status(404).json({ message: 'Institution not found or already deleted' });
     }
 
+    // Also soft-delete the owner's user row so their email/phone frees
+    // up for reuse — someone else can register with the same address.
+    // We only do this on the ADMIN-triggered delete; owner-self-delete
+    // (deleteMyInstitution) leaves the user row alone so the owner can
+    // sign in and restore. Sub-branch admin users provisioned under this
+    // institution get the same treatment via parent_institution_id.
+    await pool.query(
+      `UPDATE users
+          SET is_deleted = TRUE,
+              deleted_at = CURRENT_TIMESTAMP,
+              deleted_by = $2,
+              status     = 'inactive'
+        WHERE COALESCE(is_deleted, FALSE) = FALSE
+          AND (
+            id = (SELECT owner_user_id FROM institutions WHERE id = $1)
+            OR institution_id IN (
+              SELECT id FROM institutions
+               WHERE id = $1 OR parent_institution_id = $1
+            )
+          )`,
+      [id, adminId],
+    );
+
     res.json({
       message: `${row.name} deleted. The owner can sign in again to restore or start fresh.`,
       deleted_id: row.id,
@@ -1717,6 +2019,90 @@ exports.deleteInstitution = async (req, res) => {
     });
   } catch (err) {
     console.error('Delete institution error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// SUPER ADMIN: soft-delete MANY institutions in one call.
+// POST /api/onboarding/bulk-delete   body: { ids: number[], reason?: string }
+//
+// Applies exactly the same deletion rules as the single-delete above —
+// soft-delete the institution row (snapshot status, deactivate) and
+// soft-delete the owner + branch-admin user rows so their emails free up.
+// Each id is processed independently: one failure never aborts the rest,
+// and the response carries a per-id result so the UI can report both
+// successes and failures.
+exports.bulkDeleteInstitutions = async (req, res) => {
+  try {
+    const { ids, reason } = req.body || {};
+    const adminId = req.user?.id || null;
+
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ message: 'ids must be a non-empty array of institution ids' });
+    }
+
+    // Sanitise: numeric, unique. Cap the batch so a bad client can't ask
+    // us to walk the whole table in one request.
+    const uniqueIds = [...new Set(ids.map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+    if (uniqueIds.length === 0) {
+      return res.status(400).json({ message: 'ids must contain valid numeric institution ids' });
+    }
+    if (uniqueIds.length > 100) {
+      return res.status(400).json({ message: 'Cannot delete more than 100 institutions at once' });
+    }
+
+    const results = [];
+    for (const id of uniqueIds) {
+      try {
+        const row = await softDeleteInstitution({
+          id,
+          deletedById: adminId,
+          source: 'admin',
+          reason,
+        });
+
+        if (!row) {
+          results.push({ id, success: false, message: 'Institution not found or already deleted' });
+          continue;
+        }
+
+        // Same user-row cleanup as the single admin delete: free up the
+        // owner's email/phone and deactivate any branch-admin users.
+        await pool.query(
+          `UPDATE users
+              SET is_deleted = TRUE,
+                  deleted_at = CURRENT_TIMESTAMP,
+                  deleted_by = $2,
+                  status     = 'inactive'
+            WHERE COALESCE(is_deleted, FALSE) = FALSE
+              AND (
+                id = (SELECT owner_user_id FROM institutions WHERE id = $1)
+                OR institution_id IN (
+                  SELECT id FROM institutions
+                   WHERE id = $1 OR parent_institution_id = $1
+                )
+              )`,
+          [id, adminId],
+        );
+
+        results.push({ id, name: row.name, success: true, message: `${row.name} deleted.` });
+      } catch (err) {
+        console.error(`Bulk delete: institution ${id} failed:`, err);
+        results.push({ id, success: false, message: err.message || 'Server error' });
+      }
+    }
+
+    const deleted = results.filter((r) => r.success).length;
+    const failed = results.length - deleted;
+
+    res.json({
+      message: `${deleted} deleted, ${failed} failed.`,
+      deleted,
+      failed,
+      results,
+    });
+  } catch (err) {
+    console.error('Bulk delete institutions error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
@@ -2097,16 +2483,19 @@ exports.getOnboardingCounts = async (_req, res) => {
     // platform-wide people totals, and the platform MRR (sum of plan price
     // for every currently-active institution = the monthly subscription
     // revenue the super admin sees on the dashboard).
+    // All institution counters exclude sub-branch rows (parent_institution_id
+    // IS NOT NULL) so the sidebar totals stay in sync with the list, which
+    // also excludes them.
     const [summary, recent, peopleCounts, mrrRow] = await Promise.all([
       pool.query(`
         SELECT
-          COUNT(*) FILTER (WHERE onboarding_status = 'pending_approval' AND deleted_at IS NULL) AS pending_approval,
-          COUNT(*) FILTER (WHERE onboarding_status = 'approved'         AND deleted_at IS NULL) AS approved,
-          COUNT(*) FILTER (WHERE onboarding_status = 'active'           AND deleted_at IS NULL) AS active,
-          COUNT(*) FILTER (WHERE onboarding_status = 'rejected'         AND deleted_at IS NULL) AS rejected,
-          COUNT(*) FILTER (WHERE subscription_end IS NOT NULL AND subscription_end < NOW() AND deleted_at IS NULL) AS expired,
-          COUNT(*) FILTER (WHERE deleted_at IS NOT NULL)                AS deleted,
-          COUNT(*) FILTER (WHERE deleted_at IS NULL)                    AS total
+          COUNT(*) FILTER (WHERE onboarding_status = 'pending_approval' AND deleted_at IS NULL AND parent_institution_id IS NULL) AS pending_approval,
+          COUNT(*) FILTER (WHERE onboarding_status = 'approved'         AND deleted_at IS NULL AND parent_institution_id IS NULL) AS approved,
+          COUNT(*) FILTER (WHERE onboarding_status = 'active'           AND deleted_at IS NULL AND parent_institution_id IS NULL) AS active,
+          COUNT(*) FILTER (WHERE onboarding_status = 'rejected'         AND deleted_at IS NULL AND parent_institution_id IS NULL) AS rejected,
+          COUNT(*) FILTER (WHERE subscription_end IS NOT NULL AND subscription_end < NOW() AND deleted_at IS NULL AND parent_institution_id IS NULL) AS expired,
+          COUNT(*) FILTER (WHERE deleted_at IS NOT NULL                                     AND parent_institution_id IS NULL) AS deleted,
+          COUNT(*) FILTER (WHERE deleted_at IS NULL                                         AND parent_institution_id IS NULL) AS total
         FROM institutions
       `),
       pool.query(`
@@ -2125,6 +2514,7 @@ exports.getOnboardingCounts = async (_req, res) => {
         LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
         WHERE i.onboarding_status = 'pending_approval'
           AND i.deleted_at IS NULL
+          AND i.parent_institution_id IS NULL
         ORDER BY i.created_at DESC
         LIMIT 5
       `),
@@ -2137,12 +2527,15 @@ exports.getOnboardingCounts = async (_req, res) => {
       `),
       // Monthly Recurring Revenue: sum of plan price for every currently-
       // active institution. Institutions without a linked plan contribute 0.
+      // Sub-branches are billed under the parent's subscription, so we count
+      // one plan price per parent institution only.
       pool.query(`
         SELECT COALESCE(SUM(sp.price), 0)::numeric AS monthly_revenue
         FROM institutions i
         LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
         WHERE i.onboarding_status = 'active'
           AND i.deleted_at IS NULL
+          AND i.parent_institution_id IS NULL
       `),
     ]);
 
@@ -2173,6 +2566,274 @@ exports.getOnboardingCounts = async (_req, res) => {
 
 // ─── Generate a Razorpay renewal payment link for the logged-in admin ──────
 // POST /api/onboarding/renew
+//
+// Institution-admin endpoint that mints a Razorpay Payment Link for one
+// of three actions:
+//   • body omitted or plan_id === current plan → 'renew'
+//   • plan_id === a different plan             → 'change_plan'
+//     (server further classifies as upgrade / downgrade based on price
+//      for the notes payload; the ledger just records 'change_plan')
+//
+// Records a row in subscription_transactions BEFORE the redirect so
+// Payment History always shows the attempt. Status flips to 'paid' from
+// the webhook; the client can flip it to 'cancelled' if the admin
+// backs out.
+// Renders the lightweight HTML page the approval email links to.
+// One button per enabled billing term; each button re-hits the same
+// route with ?term=<term>, which mints the Razorpay link and 302s.
+function renderApprovalPickerHtml({ institution, planName, terms }) {
+  const TERM_LABEL = {
+    monthly:     'Monthly',
+    quarterly:   'Quarterly',
+    half_yearly: 'Half-Yearly',
+    annual:      'Yearly',
+  };
+  const TERM_HINT = {
+    monthly:     'Billed every month',
+    quarterly:   'Billed every 3 months',
+    half_yearly: 'Billed every 6 months',
+    annual:      'Billed once per year',
+  };
+  const fmtINR = (n) => `₹${Number(n || 0).toLocaleString('en-IN')}`;
+
+  const escape = (s) => String(s || '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+  const rows = terms.map((t) => `
+    <a href="./${institution.id}?term=${encodeURIComponent(t.billing_term)}"
+       style="display:flex;align-items:center;gap:12px;text-decoration:none;color:inherit;
+              padding:14px 16px;border:1px solid #e2e8f0;border-radius:12px;
+              background:#ffffff;">
+      <div style="flex:1;min-width:0;">
+        <div style="font-weight:800;font-size:15px;color:#0f172a;">
+          ${escape(TERM_LABEL[t.billing_term] || t.billing_term)}
+        </div>
+        <div style="font-size:12px;color:#64748b;margin-top:2px;">
+          ${escape(TERM_HINT[t.billing_term] || '')}
+        </div>
+      </div>
+      <div style="font-weight:900;font-size:17px;color:#E63946;letter-spacing:-0.2px;">
+        ${fmtINR(t.price)}
+      </div>
+    </a>
+  `).join('');
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Choose your billing term — Veerify</title>
+</head>
+<body style="margin:0;padding:0;background:#f4f4f8;
+             font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;">
+  <div style="max-width:560px;margin:0 auto;padding:32px 20px;">
+    <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:16px;
+                padding:28px 24px;">
+      <div style="text-align:center;margin-bottom:20px;">
+        <div style="display:inline-block;background:#dcfce7;color:#166534;font-weight:800;
+                    font-size:11px;padding:5px 12px;border-radius:999px;letter-spacing:.5px;">
+          ✓ APPROVED
+        </div>
+      </div>
+      <h1 style="text-align:center;font-size:22px;font-weight:900;color:#0f172a;
+                 margin:0 0 6px;letter-spacing:-0.4px;">
+        Pick your billing term
+      </h1>
+      <p style="text-align:center;font-size:13px;color:#475569;margin:0 0 20px;line-height:1.6;">
+        <b>${escape(institution.name)}</b> is on the <b>${escape(planName || 'Subscription')}</b> plan.
+        Pick a term to continue to secure Razorpay payment.
+      </p>
+
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        ${rows}
+      </div>
+
+      <p style="font-size:12px;color:#94a3b8;text-align:center;margin:22px 0 0;line-height:1.6;">
+        🔒 Payment happens entirely on Razorpay's secure page.<br/>
+        Your subscription activates instantly once payment is confirmed.
+      </p>
+    </div>
+    <p style="text-align:center;font-size:11px;color:#94a3b8;margin-top:14px;">
+      Veerify — the command center for martial arts academies.
+    </p>
+  </div>
+</body>
+</html>`;
+}
+
+// GET /api/onboarding/pay-approval/:institutionId?term=<billing_term>
+//
+// Public-facing endpoint the approval email uses. Two modes:
+//   • no ?term=   → renders a "pick your term" HTML page (buttons post
+//                   back to this URL with ?term=)
+//   • ?term=<X>   → mints a Razorpay Payment Link at that term's price
+//                   and 302-redirects the owner to Razorpay checkout.
+//
+// Security posture:
+//   • The URL carries the institution id in plain text — same posture
+//     as the callback_url on the existing Razorpay Payment Link. Anyone
+//     with the link can only start a payment for THAT institution's
+//     plan; they can't attach it to a different institution.
+//   • The endpoint refuses to mint a link when the institution is
+//     already active (short-circuit — no double payment).
+//   • Records a subscription_transactions row so the ledger stays
+//     truthful when someone pays via email vs the mobile picker.
+exports.startApprovalPayment = async (req, res) => {
+  try {
+    const institutionId = parseInt(req.params.institutionId, 10);
+    const rawTerm       = String(req.query.term || '').trim();
+    if (!Number.isFinite(institutionId)) {
+      return res.status(400).send('Invalid link.');
+    }
+
+    // Two-mode endpoint:
+    //   • no ?term=            → render the pick-a-term HTML page
+    //   • ?term=<billing_term> → mint the Razorpay link + 302 there
+    // The email only ever carries the no-term URL; the buttons on the
+    // rendered page carry the term back to this same endpoint.
+    const wantsPickerPage = !rawTerm;
+    if (rawTerm && !['monthly', 'quarterly', 'half_yearly', 'annual'].includes(rawTerm)) {
+      return res.status(400).send('Invalid billing term. Expected one of monthly / quarterly / half_yearly / annual.');
+    }
+
+    const { rows } = await pool.query(
+      `SELECT i.id, i.name, i.email, i.phone, i.onboarding_status, i.plan_id,
+              u.email AS owner_email, u.name AS owner_name, u.phone AS owner_phone,
+              sp.name AS plan_name
+         FROM institutions i
+         JOIN users u ON i.owner_user_id = u.id
+         LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
+        WHERE i.id = $1
+          AND i.deleted_at IS NULL
+        LIMIT 1`,
+      [institutionId],
+    );
+    const institution = rows[0];
+    if (!institution) return res.status(404).send('Institution not found.');
+    if (institution.onboarding_status === 'active') {
+      return res.status(200).send(
+        '<h3>Your subscription is already active.</h3>' +
+        '<p>Open the Veerify mobile app and sign in to see your dashboard.</p>',
+      );
+    }
+    if (!institution.plan_id) {
+      return res.status(400).send('This institution has no plan selected yet.');
+    }
+
+    // ── Picker page render (no ?term=) ─────────────────────────────
+    // Pull every enabled term for this plan and render a lightweight
+    // HTML page. Each button posts back to this same endpoint with
+    // ?term=<term> — the second branch below then mints the Razorpay
+    // link and redirects.
+    if (wantsPickerPage) {
+      const allTerms = await pool.query(
+        `SELECT billing_term, price, is_enabled
+           FROM plan_pricing
+          WHERE plan_id = $1
+            AND is_enabled = TRUE
+            AND price > 0
+          ORDER BY
+            CASE billing_term
+              WHEN 'monthly'     THEN 1
+              WHEN 'quarterly'   THEN 2
+              WHEN 'half_yearly' THEN 3
+              WHEN 'annual'      THEN 4
+              ELSE 5
+            END`,
+        [institution.plan_id],
+      );
+      const enabled = allTerms.rows.map((r) => ({
+        billing_term: r.billing_term,
+        price:        Number(r.price),
+      }));
+      if (enabled.length === 0) {
+        return res.status(400).send('This plan has no billing terms configured yet. Please contact support.');
+      }
+      const html = renderApprovalPickerHtml({
+        institution,
+        planName: institution.plan_name,
+        terms:    enabled,
+      });
+      res.set('Content-Type', 'text/html; charset=utf-8');
+      return res.status(200).send(html);
+    }
+
+    // ── Redirect branch (?term=X) ──────────────────────────────────
+    // Look up the picked term's price.
+    const pp = await pool.query(
+      `SELECT price, is_enabled FROM plan_pricing
+        WHERE plan_id = $1 AND billing_term = $2`,
+      [institution.plan_id, rawTerm],
+    );
+    const priceRow = pp.rows[0];
+    if (!priceRow) {
+      return res.status(400).send(`This plan does not offer ${rawTerm} billing.`);
+    }
+    if (!priceRow.is_enabled) {
+      return res.status(400).send(`${rawTerm} billing is not currently available on this plan.`);
+    }
+    const priceRupees = Number(priceRow.price) || 0;
+    if (priceRupees <= 0) {
+      return res.status(400).send('This billing term has no payable amount configured.');
+    }
+
+    // Mint the Razorpay Payment Link. Notes carry the term so the
+    // webhook can extend subscription_end by the right number of days.
+    const linkResult = await createPaymentLink({
+      amountInRupees: priceRupees,
+      institution: { ...institution, plan_name: institution.plan_name },
+      notes: {
+        action:         'onboarding',
+        institution_id: String(institution.id),
+        target_plan_id: String(institution.plan_id),
+        plan_name:      institution.plan_name || '',
+        billing_term:   rawTerm,
+      },
+    });
+    if (!linkResult.ok) {
+      return res.status(502).send(`Payment gateway error: ${linkResult.error}`);
+    }
+
+    // Point the institution's current pending payment link at the fresh URL
+    // + record a pending transaction row so the ledger stays truthful.
+    await pool.query(
+      `UPDATE institutions SET
+         payment_link_id     = $1,
+         payment_link_url    = $2,
+         payment_link_status = 'pending',
+         payment_amount      = $3
+       WHERE id = $4`,
+      [linkResult.link.id, linkResult.link.short_url, linkResult.link.amountPaise, institution.id],
+    );
+    try {
+      await pool.query(
+        `INSERT INTO subscription_transactions
+           (institution_id, plan_id, plan_name_snapshot, action, previous_plan_id,
+            base_paise, referral_discount_paise, amount_paise,
+            status, razorpay_link_id, razorpay_short_url)
+         VALUES ($1, $2, $3, 'onboarding', NULL,
+                 $4, 0, $4,
+                 'pending', $5, $6)`,
+        [
+          institution.id, institution.plan_id, institution.plan_name || null,
+          linkResult.link.amountPaise,
+          linkResult.link.id, linkResult.link.short_url,
+        ],
+      );
+    } catch (err) {
+      console.warn('[startApprovalPayment] ledger insert failed:', err?.message);
+    }
+
+    // Straight 302 to Razorpay's hosted checkout.
+    res.redirect(302, linkResult.link.short_url);
+  } catch (err) {
+    console.error('startApprovalPayment error:', err);
+    res.status(500).send('Server error. Please try again in a moment.');
+  }
+};
+
 exports.createRenewalPaymentLink = async (req, res) => {
   try {
     const userId = req.user?.id || req.user?.userId;
@@ -2180,11 +2841,11 @@ exports.createRenewalPaymentLink = async (req, res) => {
       return res.status(401).json({ message: 'Not authenticated' });
     }
 
+    const { plan_id: requestedPlanId, billing_term: requestedTerm } = req.body || {};
+
     const { rows } = await pool.query(
       `SELECT i.*, u.email AS owner_email, u.name AS owner_name, u.phone AS owner_phone,
-              sp.name AS plan_name, sp.price AS plan_price,
-              sp.discount_enabled AS plan_discount_enabled,
-              sp.discount_percent AS plan_discount_percent
+              sp.name AS plan_name, sp.price AS plan_price
          FROM institutions i
          JOIN users u ON i.owner_user_id = u.id
          LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
@@ -2197,36 +2858,108 @@ exports.createRenewalPaymentLink = async (req, res) => {
     if (!institution) {
       return res.status(404).json({ message: 'Institution not found for this account' });
     }
-    if (!institution.plan_price) {
-      return res.status(400).json({ message: 'No active plan to renew. Please pick a plan first.' });
+
+    // Resolve target plan. When plan_id is provided we validate + fetch
+    // its own row (with discount cols) so upgrade / downgrade go
+    // through the same code path as renewal.
+    let targetPlanId = institution.plan_id;
+    let targetPlanName = institution.plan_name;
+    let targetPlanPrice = Number(institution.plan_price) || 0;
+    let targetDiscountOn = false;
+    let targetDiscountPct = 0;
+    let action = 'renew';
+
+    if (requestedPlanId && Number(requestedPlanId) !== Number(institution.plan_id)) {
+      const tp = await pool.query(
+        `SELECT id, name, price, discount_enabled, discount_percent, is_active
+           FROM subscription_plans WHERE id = $1 LIMIT 1`,
+        [requestedPlanId],
+      );
+      const t = tp.rows[0];
+      if (!t)               return res.status(404).json({ message: 'Target plan not found.' });
+      if (!t.is_active)     return res.status(400).json({ message: 'Target plan is not currently available.' });
+      targetPlanId    = t.id;
+      targetPlanName  = t.name;
+      targetPlanPrice = Number(t.price) || 0;
+      targetDiscountOn  = !!t.discount_enabled;
+      targetDiscountPct = Number(t.discount_percent) || 0;
+      action = 'change_plan';
+    } else {
+      // Renewing the current plan — read its discount cols separately.
+      if (institution.plan_id) {
+        const cp = await pool.query(
+          `SELECT discount_enabled, discount_percent FROM subscription_plans WHERE id = $1`,
+          [institution.plan_id],
+        );
+        targetDiscountOn  = !!cp.rows[0]?.discount_enabled;
+        targetDiscountPct = Number(cp.rows[0]?.discount_percent) || 0;
+      }
     }
 
-    const discountOn  = !!institution.plan_discount_enabled;
-    const discountPct = Number(institution.plan_discount_percent) || 0;
-    const basePrice   = Number(institution.plan_price);
-    const effectivePrice = discountOn && discountPct > 0
-      ? Math.round(basePrice * (1 - discountPct / 100))
+    // ── Per-term pricing (migration 049) ────────────────────────────
+    // When the client sends a billing_term, resolve the price from
+    // plan_pricing so the payment amount matches whichever term the
+    // admin picked on mobile. Falls back to the legacy singleton price
+    // for older clients or plans without per-term rows.
+    let resolvedTerm = requestedTerm || null;
+    if (resolvedTerm) {
+      const pp = await pool.query(
+        `SELECT price, is_enabled FROM plan_pricing
+          WHERE plan_id = $1 AND billing_term = $2`,
+        [targetPlanId, resolvedTerm],
+      );
+      const row = pp.rows[0];
+      if (!row) {
+        return res.status(400).json({ message: `This plan does not offer ${resolvedTerm} billing.` });
+      }
+      if (!row.is_enabled) {
+        return res.status(400).json({ message: `${resolvedTerm} billing is not available on this plan.` });
+      }
+      targetPlanPrice = Number(row.price) || 0;
+    }
+
+    if (!targetPlanPrice || targetPlanPrice <= 0) {
+      return res.status(400).json({ message: 'Selected plan has no payable amount. Please pick another plan.' });
+    }
+
+    const basePrice = targetPlanPrice;
+    const effectivePrice = targetDiscountOn && targetDiscountPct > 0
+      ? Math.round(basePrice * (1 - targetDiscountPct / 100))
       : basePrice;
 
-    // ── Apply referral wallet discount to the next renewal ───────────
-    // consumeDiscount debits the institution's accumulated referral
-    // wallet (₹250 per referral that landed) and returns the rupee
-    // discount we should subtract from the renewal price. Capped by
-    // settings.max_discount_pct.
+    // Referral wallet discount — only apply to a straight renewal, not
+    // to plan changes (avoids double-dipping on cross-plan pricing).
     let referralDiscount = 0;
-    try {
-      const r = await consumeDiscount(institution.id, effectivePrice);
-      referralDiscount = Number(r?.discount) || 0;
-    } catch (err) {
-      console.warn('[renew] referral discount failed:', err?.message);
+    if (action === 'renew') {
+      try {
+        const r = await consumeDiscount(institution.id, effectivePrice);
+        referralDiscount = Number(r?.discount) || 0;
+      } catch (err) {
+        console.warn('[renew] referral discount failed:', err?.message);
+      }
     }
     const finalPayable = Math.max(0, effectivePrice - referralDiscount);
 
-    const linkResult = await createPaymentLink({ amountInRupees: finalPayable, institution });
+    // Mint the Razorpay Payment Link with rich notes so the webhook
+    // knows exactly what it's confirming — action, plan, AND billing
+    // term. The billing_term drives the subscription-window extension
+    // (30 / 90 / 180 / 365 days) on webhook confirmation.
+    const linkResult = await createPaymentLink({
+      amountInRupees: finalPayable,
+      institution: { ...institution, plan_name: targetPlanName },
+      notes: {
+        action,
+        institution_id: String(institution.id),
+        target_plan_id: String(targetPlanId),
+        plan_name:      targetPlanName || '',
+        billing_term:   resolvedTerm || '',
+      },
+    });
     if (!linkResult.ok) {
       return res.status(502).json({ message: `Could not create payment link: ${linkResult.error}` });
     }
 
+    // Store payment reference on the institution (used by /subscription-status).
     await pool.query(
       `UPDATE institutions SET
          payment_link_id     = $1,
@@ -2237,16 +2970,658 @@ exports.createRenewalPaymentLink = async (req, res) => {
       [linkResult.link.id, linkResult.link.short_url, linkResult.link.amountPaise, institution.id],
     );
 
+    // Record a pending row in the transactions ledger.
+    await pool.query(
+      `INSERT INTO subscription_transactions
+         (institution_id, plan_id, plan_name_snapshot, action, previous_plan_id,
+          base_paise, referral_discount_paise, amount_paise,
+          status, razorpay_link_id, razorpay_short_url)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10)`,
+      [
+        institution.id,
+        targetPlanId,
+        targetPlanName || null,
+        action,
+        action === 'change_plan' ? institution.plan_id : null,
+        Math.round(basePrice * 100),
+        Math.round(referralDiscount * 100),
+        linkResult.link.amountPaise,
+        linkResult.link.id,
+        linkResult.link.short_url,
+      ],
+    );
+
     res.json({
-      message: 'Renewal payment link created',
+      message:          'Payment link created',
+      action,
       payment_link_url: linkResult.link.short_url,
-      amount: finalPayable,
-      base_price: effectivePrice,
+      link_id:          linkResult.link.id,
+      amount:           finalPayable,
+      base_price:       effectivePrice,
       referral_discount: referralDiscount,
-      plan_name: institution.plan_name,
+      plan_id:          targetPlanId,
+      plan_name:        targetPlanName,
     });
   } catch (err) {
     console.error('createRenewalPaymentLink error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// POST /api/onboarding/payment-history
+//
+// Institution-admin views their subscription transaction history under
+// Pricing & Plans → Payment History.
+exports.listPaymentHistory = async (req, res) => {
+  try {
+    const userId = req.user?.id || req.user?.userId;
+    const uRow = await pool.query(
+      `SELECT institution_id FROM users WHERE id = $1`, [userId],
+    );
+    const institutionId = uRow.rows[0]?.institution_id;
+    if (!institutionId) return res.status(400).json({ message: 'No institution linked' });
+
+    const rows = await pool.query(
+      `SELECT id, plan_id, plan_name_snapshot AS plan_name, action, previous_plan_id,
+              base_paise, referral_discount_paise, amount_paise,
+              status, razorpay_link_id, razorpay_payment_id,
+              created_at, paid_at, new_subscription_end
+         FROM subscription_transactions
+        WHERE institution_id = $1
+        ORDER BY created_at DESC
+        LIMIT 200`,
+      [institutionId],
+    );
+    res.json({ count: rows.rowCount, transactions: rows.rows });
+  } catch (err) {
+    console.error('listPaymentHistory error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// POST /api/onboarding/mark-payment-cancelled
+//
+// Mobile calls this if the admin backs out of the Razorpay page without
+// paying (checkout page tab closed). Sets the still-pending transaction
+// to 'cancelled' so the history is truthful.
+exports.markPaymentCancelled = async (req, res) => {
+  try {
+    const userId = req.user?.id || req.user?.userId;
+    const uRow = await pool.query(
+      `SELECT institution_id FROM users WHERE id = $1`, [userId],
+    );
+    const institutionId = uRow.rows[0]?.institution_id;
+    if (!institutionId) return res.status(400).json({ message: 'No institution linked' });
+
+    const { link_id } = req.body || {};
+    if (!link_id) return res.status(400).json({ message: 'link_id required' });
+
+    await pool.query(
+      `UPDATE subscription_transactions
+          SET status = 'cancelled'
+        WHERE institution_id = $1
+          AND razorpay_link_id = $2
+          AND status = 'pending'`,
+      [institutionId, link_id],
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('markPaymentCancelled error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// ─── Super-admin: edit any institution's details ────────────────────────────
+// PUT /api/onboarding/:id/super-admin-edit
+//
+// Used by the admin web to fill in / update institution fields on behalf of
+// an institution. Particularly useful for branches whose parent only
+// provided basic info — super admin can complete the Accreditation /
+// Operations / Master sections here without bothering the branch admin.
+//
+// Accepts any subset of fields; uses COALESCE NULLIF so unsent / blank
+// values leave the existing value untouched. Touches every category
+// EXCEPT staff (trainers) and courses, which live on their own tables.
+// POST /api/onboarding/:id/resend-branch-credentials
+//
+// Recovery flow for sub-branches whose credentials email got lost, never
+// arrived (landed in spam), or where the branch admin forgot their temp
+// password. The endpoint:
+//   1. Validates that :id is a SUB-branch (parent_institution_id is set).
+//      Main-branch institutions use the regular password-reset flow.
+//   2. Generates a fresh temp password, hashes it, writes it to the
+//      branch admin's users row.
+//   3. Sends sendBranchSetupEmail with the new password to the branch's
+//      official email. Awaited this time (not fire-and-forget) so the
+//      caller knows whether the SMTP send succeeded.
+//
+// Idempotent — each call rotates the temp password, so a second click
+// invalidates the password from the first click. That's the correct
+// behavior for credential recovery.
+exports.resendBranchCredentials = async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ message: 'Invalid institution id' });
+    }
+
+    // Pull the branch row + its parent's name (used in the email copy)
+    // + the branch admin user's id and email.
+    const r = await pool.query(
+      `SELECT
+         child.id            AS branch_id,
+         child.name          AS branch_name,
+         child.address       AS branch_address,
+         child.city          AS branch_city,
+         child.pincode       AS branch_pincode,
+         child.email         AS branch_email,
+         child.owner_user_id AS branch_user_id,
+         child.parent_institution_id,
+         parent.name         AS parent_name,
+         parent_owner.name   AS parent_owner_name
+       FROM institutions child
+       LEFT JOIN institutions parent
+              ON parent.id = child.parent_institution_id
+       LEFT JOIN users parent_owner
+              ON parent_owner.id = parent.owner_user_id
+       WHERE child.id = $1`,
+      [id],
+    );
+    if (r.rows.length === 0) {
+      return res.status(404).json({ message: 'Institution not found' });
+    }
+    const row = r.rows[0];
+    if (!row.parent_institution_id) {
+      return res.status(400).json({
+        message: 'This is a main-branch institution. Use the standard password reset flow instead.',
+      });
+    }
+    if (!row.branch_user_id) {
+      return res.status(400).json({
+        message: 'No branch admin user is linked to this sub-branch. Please contact support.',
+      });
+    }
+    if (!row.branch_email) {
+      return res.status(400).json({
+        message: 'This sub-branch has no email on file — add one before resending credentials.',
+      });
+    }
+
+    // Rotate the password.
+    const newPassword = generateTempPassword();
+    const hashed = await bcrypt.hash(newPassword, 10);
+    await pool.query(
+      // Re-arm must_change_password so the first-login dialog reappears
+      // after a credential reset too — the user now has another temp
+      // password they should rotate.
+      `UPDATE users
+          SET password = $1, must_change_password = TRUE, updated_at = NOW()
+        WHERE id = $2`,
+      [hashed, row.branch_user_id],
+    );
+
+    // Send the email — awaited so we surface the outcome.
+    const branchAddress = [row.branch_address, row.branch_city, row.branch_pincode]
+      .filter(Boolean).join(', ');
+    const mailResult = await sendBranchSetupEmail({
+      to:              row.branch_email,
+      branchName:      row.branch_name,
+      branchAddress,
+      institutionName: row.parent_name || '',
+      ownerName:       row.parent_owner_name || '',
+      loginEmail:      row.branch_email,
+      loginPassword:   newPassword,
+    });
+
+    if (!mailResult.ok) {
+      // Password is already rotated, but the email failed. Tell the
+      // caller so they can try again or copy the password manually.
+      return res.status(502).json({
+        message: 'Password rotated but email send failed. Try again, or share the temp password manually.',
+        temp_password: newPassword,
+        smtp_error:    mailResult.error,
+      });
+    }
+
+    res.json({
+      message: `Fresh login credentials sent to ${row.branch_email}.`,
+      sent_to: row.branch_email,
+    });
+  } catch (err) {
+    console.error('[resendBranchCredentials] error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// POST /api/onboarding/:parentId/provision-branch
+//
+// Sister of resendBranchCredentials, but operates on a branch row inside
+// the parent's JSONB branches[] array. Handles BOTH cases:
+//
+//   • Branch was never provisioned (no child institutions row) — the
+//     setupAcademy loop may have skipped it because the email already
+//     existed, threw silently, or the branch was added later. We run
+//     the missing provisioning step now: create the branch admin user,
+//     create the child institution row inheriting the parent's plan +
+//     lifecycle, link them, then email the credentials.
+//
+//   • Branch was already provisioned — same recovery path as
+//     resendBranchCredentials: rotate the temp password and re-email.
+//
+// Body: { branch_index } (the position in the parent's branches[] JSONB).
+exports.provisionOrResendBranch = async (req, res) => {
+  try {
+    const parentId = parseInt(req.params.parentId, 10);
+    const idx = parseInt(req.body?.branch_index, 10);
+    if (!Number.isInteger(parentId) || !Number.isInteger(idx) || idx < 0) {
+      return res.status(400).json({
+        message: 'parentId and branch_index are required',
+      });
+    }
+
+    // Pull the parent + its owner so we can use the parent's plan / lifecycle
+    // when creating a fresh child institution.
+    const parentRes = await pool.query(
+      `SELECT i.*, u.name AS owner_name
+         FROM institutions i
+         JOIN users u ON u.id = i.owner_user_id
+        WHERE i.id = $1`,
+      [parentId],
+    );
+    if (parentRes.rows.length === 0) {
+      return res.status(404).json({ message: 'Parent institution not found' });
+    }
+    const parent = parentRes.rows[0];
+    if (parent.parent_institution_id) {
+      return res.status(400).json({
+        message: 'This is a sub-branch. Pass its parent institution id instead.',
+      });
+    }
+    const branches = Array.isArray(parent.branches) ? parent.branches : [];
+    // Log what we actually got so we can diagnose blank-branch /
+    // missing-email errors against the parent row.
+    console.log(
+      '[provisionOrResendBranch]',
+      `parent=${parentId}`,
+      `branch_index=${idx}`,
+      `branches_count=${branches.length}`,
+      `branch_at_idx=`, branches[idx],
+    );
+    const branch = branches[idx];
+    if (!branch) {
+      return res.status(404).json({
+        message: branches.length === 0
+          ? 'This institution has no branches saved on its record. Re-run the setup wizard and add the branch with an email.'
+          : `No branch found at slot ${idx + 1}. The institution only has ${branches.length} branch${branches.length === 1 ? '' : 'es'} saved.`,
+      });
+    }
+    const branchEmail = (branch.email || '').toString().trim().toLowerCase();
+    if (!branchEmail) {
+      return res.status(400).json({
+        message: `Branch "${branch.name || `#${idx + 1}`}" has no email on file. Open the parent setup wizard, add an email to this branch, save, then try again.`,
+      });
+    }
+
+    // ── Look for an existing child institution.
+    //
+    // We try two matches in priority order:
+    //   (a) parent_id + case-insensitive email match — happy path,
+    //       JSONB and the child row are in sync.
+    //   (b) parent_id + case-insensitive name match — fallback for the
+    //       common desync case where someone edited the branch email in
+    //       the parent's setup wizard AFTER the child user was created,
+    //       so the JSONB says one address and the child row says another.
+    //       When (b) matches, we'll re-align both the child institution's
+    //       email column AND the linked user's login email to whatever
+    //       the JSONB now says, then rotate the password. The branch
+    //       admin's new login email becomes the one displayed on the
+    //       parent's page.
+    let childRes = await pool.query(
+      `SELECT id, owner_user_id, name, email
+         FROM institutions
+        WHERE parent_institution_id = $1
+          AND LOWER(email) = $2
+          AND COALESCE(deleted_at::text, '') = ''
+        LIMIT 1`,
+      [parentId, branchEmail],
+    );
+    let realignedFromEmail = null;
+    if (childRes.rows.length === 0 && (branch.name || '').trim()) {
+      const nameMatch = await pool.query(
+        `SELECT id, owner_user_id, name, email
+           FROM institutions
+          WHERE parent_institution_id = $1
+            AND LOWER(name) = $2
+            AND COALESCE(deleted_at::text, '') = ''
+          LIMIT 1`,
+        [parentId, branch.name.trim().toLowerCase()],
+      );
+      if (nameMatch.rows.length > 0) {
+        childRes = nameMatch;
+        realignedFromEmail = (nameMatch.rows[0].email || '').toLowerCase();
+        // Make sure the new email isn't already taken by an unrelated
+        // user — otherwise the realignment UPDATE below would fail.
+        if (realignedFromEmail !== branchEmail) {
+          const conflict = await pool.query(
+            `SELECT id FROM users
+              WHERE LOWER(email) = $1
+                AND id <> $2
+                AND COALESCE(is_deleted, FALSE) = FALSE
+              LIMIT 1`,
+            [branchEmail, nameMatch.rows[0].owner_user_id],
+          );
+          if (conflict.rows.length > 0) {
+            return res.status(409).json({
+              message:
+                `Another user already uses ${branchEmail}. Change the branch's email in the parent's setup wizard, or pick a different address.`,
+            });
+          }
+        }
+      }
+    }
+
+    const newPassword = generateTempPassword();
+    const hashed = await bcrypt.hash(newPassword, 10);
+
+    let branchUserId;
+    let childInstId;
+    let branchName;
+    let mode; // 'provisioned' or 'rotated'
+
+    if (childRes.rows.length > 0) {
+      // ── Recovery path — child exists, just rotate the password.
+      childInstId   = childRes.rows[0].id;
+      branchUserId  = childRes.rows[0].owner_user_id;
+      branchName    = childRes.rows[0].name;
+
+      // If we matched by NAME and the child's email differs from the
+      // JSONB email (the desync case), re-align both the child
+      // institution and the user's login email to what the parent's
+      // JSONB now says. This keeps the displayed email and the actual
+      // login id in sync going forward.
+      if (realignedFromEmail && realignedFromEmail !== branchEmail) {
+        await pool.query(
+          `UPDATE users SET email = $1, updated_at = NOW() WHERE id = $2`,
+          [branchEmail, branchUserId],
+        );
+        await pool.query(
+          `UPDATE institutions SET email = $1, updated_at = NOW() WHERE id = $2`,
+          [branchEmail, childInstId],
+        );
+        console.log(
+          `[provisionOrResendBranch] re-aligned branch ${childInstId} email`,
+          `${realignedFromEmail} → ${branchEmail}`,
+        );
+      }
+
+      await pool.query(
+        // Re-arm must_change_password so the first-login dialog reappears
+        // after a credential reset too — the user now has another temp
+        // password they should rotate.
+        `UPDATE users
+            SET password = $1, must_change_password = TRUE, updated_at = NOW()
+          WHERE id = $2`,
+        [hashed, branchUserId],
+      );
+      mode = 'rotated';
+    } else {
+      // ── First-time provisioning — create user + child institution.
+      // Check the email isn't already taken by some unrelated user.
+      const dup = await pool.query(
+        `SELECT id, institution_id FROM users WHERE LOWER(email) = $1 LIMIT 1`,
+        [branchEmail],
+      );
+      if (dup.rows.length > 0) {
+        return res.status(409).json({
+          message:
+            'A user with this email already exists but isn\'t linked to this branch. Change the branch email to a unique address, or contact support to re-link.',
+          existing_user_id: dup.rows[0].id,
+        });
+      }
+
+      const adminName = `${branch.name || 'Branch'} Admin`;
+      const newUser = await pool.query(
+        // must_change_password TRUE — mobile pops the "change password /
+        // do it later" dialog on the branch admin's first sign-in.
+        `INSERT INTO users (name, email, phone, password, role, status,
+                            must_change_password)
+         VALUES ($1, $2, $3, $4, 'admin', 'active', TRUE)
+         RETURNING id`,
+        [adminName, branchEmail, branch.contact_number || null, hashed],
+      );
+      branchUserId = newUser.rows[0].id;
+      branchName   = branch.name || `${parent.name} - Branch`;
+
+      const childInst = await pool.query(
+        `INSERT INTO institutions (
+           owner_user_id, parent_institution_id, name, brand_name,
+           institution_type, institution_types,
+           address, city, pincode, email, phone,
+           plan_id, onboarding_status, status,
+           paid_at, subscription_start, subscription_end,
+           trial_starts_at, trial_ends_at, grace_ends_at
+         )
+         VALUES (
+           $1, $2, $3, $4,
+           $5, $6,
+           $7, $8, $9, $10, $11,
+           $12, $13, $14,
+           $15, $16, $17,
+           $18, $19, $20
+         )
+         RETURNING id`,
+        [
+          branchUserId,
+          parent.id,
+          branchName,
+          parent.brand_name,
+          parent.institution_type,
+          parent.institution_types,
+          branch.address || parent.address,
+          branch.city    || parent.city,
+          branch.pincode || parent.pincode,
+          branchEmail,
+          branch.contact_number || parent.phone,
+          parent.plan_id,
+          parent.onboarding_status,
+          parent.status,
+          parent.paid_at,
+          parent.subscription_start,
+          parent.subscription_end,
+          parent.trial_starts_at,
+          parent.trial_ends_at,
+          parent.grace_ends_at,
+        ],
+      );
+      childInstId = childInst.rows[0].id;
+      await pool.query(
+        `UPDATE users SET institution_id = $1 WHERE id = $2`,
+        [childInstId, branchUserId],
+      );
+      mode = 'provisioned';
+    }
+
+    // ── Send email (awaited so we surface the outcome).
+    const branchAddress = [branch.address, branch.city, branch.pincode]
+      .filter(Boolean).join(', ');
+    const mailResult = await sendBranchSetupEmail({
+      to:              branchEmail,
+      branchName,
+      branchAddress,
+      institutionName: parent.name || '',
+      ownerName:       parent.owner_name || '',
+      loginEmail:      branchEmail,
+      loginPassword:   newPassword,
+    });
+
+    if (!mailResult.ok) {
+      return res.status(502).json({
+        message: `Branch ${mode === 'provisioned' ? 'created' : 'password rotated'}, but the email send failed. Share the temp password manually.`,
+        mode,
+        child_institution_id: childInstId,
+        temp_password:        newPassword,
+        smtp_error:           mailResult.error,
+      });
+    }
+
+    res.json({
+      message: mode === 'provisioned'
+        ? `Branch provisioned and credentials sent to ${branchEmail}.`
+        : `Fresh credentials sent to ${branchEmail}.`,
+      mode,
+      child_institution_id: childInstId,
+      sent_to:              branchEmail,
+    });
+  } catch (err) {
+    console.error('[provisionOrResendBranch] error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+exports.superAdminEditInstitution = async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ message: 'Invalid institution id' });
+    }
+
+    // Sub-branch policy: a child institution mirrors its parent for every
+    // non-location field, so editing one in isolation would just create
+    // drift. Reject the request and tell the caller to edit the parent
+    // instead. The admin web hides the Edit button on sub-branches, but
+    // this guard makes sure the rule still holds for direct API calls.
+    const parentCheck = await pool.query(
+      `SELECT parent_institution_id FROM institutions WHERE id = $1`,
+      [id],
+    );
+    if (parentCheck.rows.length === 0) {
+      return res.status(404).json({ message: 'Institution not found' });
+    }
+    if (parentCheck.rows[0].parent_institution_id) {
+      return res.status(403).json({
+        message:
+          'Sub-branch details are inherited from the main branch — edit the parent institution to update them everywhere.',
+        code: 'SUB_BRANCH_READ_ONLY',
+      });
+    }
+
+    const b = req.body || {};
+
+    // Sanitise the few jsonb / array fields. Anything not in the body is
+    // sent as null and the SQL COALESCE keeps the existing column value.
+    const safeTypes = Array.isArray(b.institution_types) ? b.institution_types : null;
+    const safeSkills = Array.isArray(b.skills)
+      ? b.skills.map((s) => String(s).trim()).filter(Boolean) : null;
+    const safeMedium = Array.isArray(b.medium_of_instruction) ? b.medium_of_instruction : null;
+    const safeBranches = Array.isArray(b.branches)
+      ? JSON.stringify(b.branches.map((x) => ({
+          name: String(x?.name || '').trim(),
+          address: String(x?.address || '').trim(),
+          city: String(x?.city || '').trim(),
+          pincode: String(x?.pincode || '').trim(),
+          email: String(x?.email || '').trim(),
+          contact_number: String(x?.contact_number || '').trim(),
+          latitude: x?.latitude != null && x.latitude !== '' ? Number(x.latitude) : null,
+          longitude: x?.longitude != null && x.longitude !== '' ? Number(x.longitude) : null,
+        })))
+      : null;
+    const sanitiseSlots = (raw) => {
+      if (!Array.isArray(raw)) return null;
+      const cleaned = raw
+        .map((s) => ({ start: String(s?.start || ''), end: String(s?.end || '') }))
+        .filter((s) => s.start && s.end);
+      return JSON.stringify(cleaned);
+    };
+    const safeWeekday = sanitiseSlots(b.operating_hours_weekday);
+    const safeWeekend = sanitiseSlots(b.operating_hours_weekend);
+    // NOTE: there is no operating_hours_by_day column in the institutions
+    // table — per-day slots are merged into operating_hours_weekday /
+    // operating_hours_weekend at write time by the mobile wizard.
+
+    // Single UPDATE — COALESCE+NULLIF means: only overwrite if the new
+    // value is non-empty / non-null. This lets the form submit just the
+    // fields the super admin actually filled in.
+    const result = await pool.query(
+      `UPDATE institutions SET
+         -- core
+         name                          = COALESCE(NULLIF($2,  ''), name),
+         brand_name                    = COALESCE(NULLIF($3,  ''), brand_name),
+         institution_type              = COALESCE(NULLIF($4,  ''), institution_type),
+         institution_types             = COALESCE($5, institution_types),
+         registration_number           = COALESCE(NULLIF($6,  ''), registration_number),
+         date_of_establishment         = COALESCE($7::date, date_of_establishment),
+         skills                        = COALESCE($8, skills),
+         -- contact
+         address                       = COALESCE(NULLIF($9,  ''), address),
+         city                          = COALESCE(NULLIF($10, ''), city),
+         pincode                       = COALESCE(NULLIF($11, ''), pincode),
+         email                         = COALESCE(NULLIF($12, ''), email),
+         phone                         = COALESCE(NULLIF($13, ''), phone),
+         website_url                   = COALESCE(NULLIF($14, ''), website_url),
+         latitude                      = COALESCE($15::numeric, latitude),
+         longitude                     = COALESCE($16::numeric, longitude),
+         branches                      = COALESCE($17::jsonb, branches),
+         -- accreditation
+         affiliation_or_board          = COALESCE(NULLIF($18, ''), affiliation_or_board),
+         accreditation_body_name       = COALESCE(NULLIF($19, ''), accreditation_body_name),
+         accreditation_expiry_date     = COALESCE($20::date, accreditation_expiry_date),
+         accreditation_certificate_url = COALESCE(NULLIF($21, ''), accreditation_certificate_url),
+         -- operations
+         total_student_capacity        = COALESCE($22::int, total_student_capacity),
+         current_enrollment            = COALESCE($23::int, current_enrollment),
+         medium_of_instruction         = COALESCE($24, medium_of_instruction),
+         operating_hours_weekday       = COALESCE($25::jsonb, operating_hours_weekday),
+         operating_hours_weekend       = COALESCE($26::jsonb, operating_hours_weekend),
+         -- master / point of contact
+         master_name                   = COALESCE(NULLIF($27, ''), master_name),
+         master_role                   = COALESCE(NULLIF($28, ''), master_role),
+         master_email                  = COALESCE(NULLIF($29, ''), master_email),
+         master_phone_number           = COALESCE(NULLIF($30, ''), master_phone_number),
+         updated_at                    = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [
+        id,
+        b.name || '',
+        b.brand_name || '',
+        b.institution_type || '',
+        safeTypes,
+        b.registration_number || '',
+        b.date_of_establishment || null,
+        safeSkills,
+        b.address || '',
+        b.city || '',
+        b.pincode || '',
+        b.email || '',
+        b.phone || '',
+        b.website_url || '',
+        b.latitude != null && b.latitude !== '' ? Number(b.latitude) : null,
+        b.longitude != null && b.longitude !== '' ? Number(b.longitude) : null,
+        safeBranches,
+        b.affiliation_or_board || '',
+        b.accreditation_body_name || '',
+        b.accreditation_expiry_date || null,
+        b.accreditation_certificate_url || '',
+        b.total_student_capacity != null && b.total_student_capacity !== ''
+          ? Number(b.total_student_capacity) : null,
+        b.current_enrollment != null && b.current_enrollment !== ''
+          ? Number(b.current_enrollment) : null,
+        safeMedium,
+        safeWeekday,
+        safeWeekend,
+        b.master_name || '',
+        b.master_role || '',
+        b.master_email || '',
+        b.master_phone_number || '',
+      ],
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'Institution not found' });
+    }
+    res.json({ message: 'Institution updated', institution: result.rows[0] });
+  } catch (err) {
+    console.error('superAdminEditInstitution error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };

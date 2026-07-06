@@ -24,7 +24,7 @@ import {
 import {
   ArrowLeft, Mail, Phone, Award, BookOpen, Briefcase, Lock,
   Wallet, LogOut, ChevronRight, X as XIcon, Eye, EyeOff,
-  GraduationCap, Users, Calendar,
+  GraduationCap, Users, Calendar, MessageSquare,
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
@@ -56,14 +56,21 @@ export default function StaffProfileScreen({ navigation }) {
   useEffect(() => { load(); }, [load]);
 
   const confirmLogout = () => {
-    confirm({
-      title: 'Sign out?',
-      message: 'You\'ll need to log in again to access the app.',
-      variant: 'destructive',
-      confirmText: 'Sign out',
-      cancelText: 'Cancel',
-      onConfirm: () => logout(),
-    });
+    // eslint-disable-next-line no-console
+    console.log('[Staff] SIGN OUT TAPPED @', new Date().toISOString(),
+      'logout typeof =', typeof logout);
+    // Sledgehammer: skip any dialog and log out immediately. If this
+    // doesn't fire, the bundle didn't reload. If this fires but the
+    // app stays on the trainer stack, the issue is inside logout() /
+    // AuthContext.
+    if (typeof logout === 'function') {
+      // eslint-disable-next-line no-console
+      console.log('[Staff] invoking logout() directly');
+      logout();
+    } else {
+      // eslint-disable-next-line no-console
+      console.log('[Staff] logout is not a function — AuthContext broken?');
+    }
   };
 
   // ── Render ──
@@ -225,12 +232,20 @@ export default function StaffProfileScreen({ navigation }) {
             description="Update your account password"
             onPress={() => setPwOpen(true)}
           />
+          <Divider />
+          <SettingRow
+            icon={MessageSquare}
+            accent={palette.pink}
+            label="Send Feedback"
+            description="Tell us what you think about Veerify"
+            onPress={() => navigation.navigate('SendFeedback')}
+          />
         </Card>
 
         {/* Logout */}
         <TouchableOpacity style={styles.logoutBtn} onPress={confirmLogout} activeOpacity={0.85}>
           <LogOut size={18} color={palette.rose.on} strokeWidth={2.4} />
-          <Text style={styles.logoutBtnText}>Sign out</Text>
+          <Text style={styles.logoutBtnText}>Sign out NOW</Text>
         </TouchableOpacity>
 
         <Text style={styles.version}>Veerify · v1.0.0</Text>

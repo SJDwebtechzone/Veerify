@@ -1,4 +1,20 @@
 const pool = require('../config/db');
+const Razorpay = require('razorpay');
+const { insertNotification } = require('./notification.controller');
+
+// Lazy Razorpay client — shared with utils/razorpay.js but instantiated
+// separately so this controller can build the tiny event-fee payment
+// link directly without pulling in the subscription-specific helper's
+// customer/notes shape.
+let _rzp = null;
+function rzp() {
+  if (_rzp) return _rzp;
+  const keyId = process.env.RAZORPAY_KEY_ID;
+  const keySecret = process.env.RAZORPAY_KEY_SECRET;
+  if (!keyId || !keySecret) return null;
+  _rzp = new Razorpay({ key_id: keyId, key_secret: keySecret });
+  return _rzp;
+}
 
 // CREATE institution (admin only)
 exports.createInstitution = async (req, res) => {
@@ -119,48 +135,300 @@ exports.getMyInstitution = async (req, res) => {
 };
 
 // UPDATE institution (admin only — updates their own)
+//
+// The Academy Profile screen on the More tab drives most fields here.
+// Every column is COALESCE'd so a partial payload only touches what it
+// carries; sending `null` or omitting a field is a no-op for that
+// column. Fields are grouped into: core identity, contact, location,
+// social handles, operating hours, and master (point-of-contact) block.
+//
+// After a successful update we fan out a single notification to every
+// super_admin user with the institution name, the list of fields the
+// admin actually changed, and a timestamp — that's what powers the
+// admin-web activity bell.
 exports.updateInstitution = async (req, res) => {
   try {
     const adminId = req.user.id;
-    const { name, description, address, city, pincode, phone, email, logo_url } = req.body;
+    const {
+      // Core identity (setup wizard step 1)
+      name, brand_name, description, logo_url, website_url,
+      institution_type, institution_types, registration_number,
+      date_of_establishment, skills,
+      // Contact
+      phone, email,
+      // Location
+      address, city, pincode, latitude, longitude,
+      // Social handles — full URLs; validated as http(s) below when present.
+      facebook_url, instagram_url, youtube_url, linkedin_url,
+      // Accreditation (setup step 3)
+      affiliation_or_board, accreditation_body_name,
+      accreditation_expiry_date, accreditation_certificate_url,
+      // Operations (setup step 4)
+      total_student_capacity, current_enrollment, medium_of_instruction,
+      operating_hours_weekday, operating_hours_weekend,
+      // Point-of-contact (setup step 5)
+      master_name, master_role, master_email, master_phone_number,
+      // Legacy per-day map (kept for older mobile builds). Priority is
+      // still weekday/weekend since that's what the wizard writes.
+      operating_hours_by_day,
+    } = req.body || {};
 
-    // Make sure this admin owns an institution
+    // Make sure this admin owns an institution.
     const existing = await pool.query(
-      'SELECT id FROM institutions WHERE owner_user_id = $1',
+      `SELECT * FROM institutions WHERE owner_user_id = $1`,
       [adminId]
     );
-
     if (existing.rows.length === 0) {
       return res.status(404).json({ message: 'You have not created an institution yet' });
     }
+    const before = existing.rows[0];
+    const institutionId = before.id;
 
-    const institutionId = existing.rows[0].id;
+    // Reject obviously-broken URLs early — every social/website field
+    // must be either empty (skip) or start with http(s)://.
+    const urlFields = { website_url, facebook_url, instagram_url, youtube_url, linkedin_url };
+    for (const [key, val] of Object.entries(urlFields)) {
+      if (val && !/^https?:\/\//i.test(String(val).trim())) {
+        return res.status(400).json({ field: key, message: `${key} must start with http:// or https://` });
+      }
+    }
+
+    // Small helper — trims strings, keeps null/undefined intact so
+    // COALESCE preserves the existing DB value.
+    const trim = (v) => (v == null ? null : String(v).trim() || null);
+
+    // JSONB / array normalization — mirrors what onboarding.setupAcademy
+    // does so both entry points behave identically for the same shapes.
+    const jsonOrNull = (v) => (v === undefined ? null : JSON.stringify(v));
+    const hoursJson    = jsonOrNull(operating_hours_by_day);
+    const hoursWeekday = jsonOrNull(operating_hours_weekday);
+    const hoursWeekend = jsonOrNull(operating_hours_weekend);
+    // TEXT[] arrays — pg maps a JS array cleanly. Undefined skips.
+    const arrOrNull = (v) => {
+      if (v === undefined) return null;
+      if (v === null) return null;
+      if (!Array.isArray(v)) return null;
+      return v.map((x) => (x == null ? '' : String(x).trim())).filter(Boolean);
+    };
+    const typesArr  = arrOrNull(institution_types);
+    const skillsArr = arrOrNull(skills);
+    const mediumArr = arrOrNull(medium_of_instruction);
+
+    // Numeric coercion — preserve null for untouched, coerce empty to null
+    // for touched-but-blank.
+    const intOrNull = (v) => {
+      if (v === undefined) return null;
+      if (v === '' || v === null) return null;
+      const n = Number(v);
+      return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
+    };
+    const latVal = (() => {
+      if (latitude === undefined) return null;
+      if (latitude === '' || latitude === null) return null;
+      const n = Number(latitude);
+      return Number.isFinite(n) && n >= -90 && n <= 90 ? n : null;
+    })();
+    const lngVal = (() => {
+      if (longitude === undefined) return null;
+      if (longitude === '' || longitude === null) return null;
+      const n = Number(longitude);
+      return Number.isFinite(n) && n >= -180 && n <= 180 ? n : null;
+    })();
 
     const result = await pool.query(
-      `UPDATE institutions 
-       SET name = COALESCE($1, name),
-           description = COALESCE($2, description),
-           address = COALESCE($3, address),
-           city = COALESCE($4, city),
-           pincode = COALESCE($5, pincode),
-           phone = COALESCE($6, phone),
-           email = COALESCE($7, email),
-           logo_url = COALESCE($8, logo_url),
-           updated_at = CURRENT_TIMESTAMP
-       WHERE id = $9
-       RETURNING *`,
-      [name, description, address, city, pincode, phone, email, logo_url, institutionId]
+      `UPDATE institutions
+          SET name                          = COALESCE($1,  name),
+              brand_name                    = COALESCE($2,  brand_name),
+              description                   = COALESCE($3,  description),
+              logo_url                      = COALESCE($4,  logo_url),
+              website_url                   = COALESCE($5,  website_url),
+              institution_type              = COALESCE($6,  institution_type),
+              institution_types             = COALESCE($7::text[], institution_types),
+              registration_number           = COALESCE($8,  registration_number),
+              date_of_establishment         = COALESCE($9::date, date_of_establishment),
+              skills                        = COALESCE($10::text[], skills),
+              phone                         = COALESCE($11, phone),
+              email                         = COALESCE($12, email),
+              address                       = COALESCE($13, address),
+              city                          = COALESCE($14, city),
+              pincode                       = COALESCE($15, pincode),
+              latitude                      = COALESCE($16, latitude),
+              longitude                     = COALESCE($17, longitude),
+              facebook_url                  = COALESCE($18, facebook_url),
+              instagram_url                 = COALESCE($19, instagram_url),
+              youtube_url                   = COALESCE($20, youtube_url),
+              linkedin_url                  = COALESCE($21, linkedin_url),
+              affiliation_or_board          = COALESCE($22, affiliation_or_board),
+              accreditation_body_name       = COALESCE($23, accreditation_body_name),
+              accreditation_expiry_date     = COALESCE($24::date, accreditation_expiry_date),
+              accreditation_certificate_url = COALESCE($25, accreditation_certificate_url),
+              total_student_capacity        = COALESCE($26, total_student_capacity),
+              current_enrollment            = COALESCE($27, current_enrollment),
+              medium_of_instruction         = COALESCE($28::text[], medium_of_instruction),
+              operating_hours_weekday       = COALESCE($29::jsonb, operating_hours_weekday),
+              operating_hours_weekend       = COALESCE($30::jsonb, operating_hours_weekend),
+              operating_hours_by_day        = COALESCE($31::jsonb, operating_hours_by_day),
+              master_name                   = COALESCE($32, master_name),
+              master_role                   = COALESCE($33, master_role),
+              master_email                  = COALESCE($34, master_email),
+              master_phone_number           = COALESCE($35, master_phone_number),
+              updated_at                    = CURRENT_TIMESTAMP
+        WHERE id = $36
+      RETURNING *`,
+      [
+        trim(name), trim(brand_name), trim(description), trim(logo_url), trim(website_url),
+        trim(institution_type), typesArr, trim(registration_number),
+        trim(date_of_establishment), skillsArr,
+        trim(phone), trim(email),
+        trim(address), trim(city), trim(pincode),
+        latVal, lngVal,
+        trim(facebook_url), trim(instagram_url), trim(youtube_url), trim(linkedin_url),
+        trim(affiliation_or_board), trim(accreditation_body_name),
+        trim(accreditation_expiry_date), trim(accreditation_certificate_url),
+        intOrNull(total_student_capacity), intOrNull(current_enrollment),
+        mediumArr,
+        hoursWeekday, hoursWeekend, hoursJson,
+        trim(master_name), trim(master_role), trim(master_email), trim(master_phone_number),
+        institutionId,
+      ],
     );
+    const after = result.rows[0];
+
+    // ── Compute the diff — what actually changed ──────────────────
+    // Only include fields the admin sent AND whose value differs from
+    // the DB row we loaded at the start. This keeps the super-admin
+    // notification tight and truthful (no "nothing actually changed"
+    // pings).
+    const WATCHED = [
+      'name', 'brand_name', 'description', 'logo_url', 'website_url',
+      'institution_type', 'institution_types', 'registration_number',
+      'date_of_establishment', 'skills',
+      'phone', 'email',
+      'address', 'city', 'pincode', 'latitude', 'longitude',
+      'facebook_url', 'instagram_url', 'youtube_url', 'linkedin_url',
+      'affiliation_or_board', 'accreditation_body_name',
+      'accreditation_expiry_date', 'accreditation_certificate_url',
+      'total_student_capacity', 'current_enrollment', 'medium_of_instruction',
+      'operating_hours_weekday', 'operating_hours_weekend', 'operating_hours_by_day',
+      'master_name', 'master_role', 'master_email', 'master_phone_number',
+    ];
+    const changed = [];
+    for (const key of WATCHED) {
+      if (!(key in (req.body || {}))) continue;   // untouched
+      const b = before[key];
+      const a = after[key];
+      // Cheap deep-equal via JSON — safe for the string / JSONB shapes
+      // we store here.
+      if (JSON.stringify(b == null ? null : b) !== JSON.stringify(a == null ? null : a)) {
+        changed.push(key);
+      }
+    }
+
+    // ── Notify every super admin (best-effort) ────────────────────
+    // Fires a single notification per super_admin user. Failure here
+    // doesn't fail the update — the row already saved.
+    if (changed.length > 0) {
+      try {
+        const supers = await pool.query(
+          `SELECT id FROM users WHERE role = 'super_admin' AND COALESCE(is_deleted, false) = false`,
+        );
+        const humanFields = changed.map(niceFieldLabel).join(', ');
+        // Snapshot the new values for the changed fields only. Small
+        // JSON payload; the notifications table is JSONB so this stays
+        // compact. Web admin uses this to render truthful "changed to X"
+        // hints without relying on a fresh fetch.
+        const changedValues = {};
+        for (const k of changed) {
+          const v = after[k];
+          // Skip large blobs — anything we wouldn't want to inline in
+          // the bell dropdown.
+          if (typeof v === 'string' && v.length > 300) continue;
+          changedValues[k] = v == null ? null : v;
+        }
+        for (const s of supers.rows) {
+          await insertNotification({
+            user_id:        s.id,
+            institution_id: institutionId,
+            category:       'system',
+            title:          'Institution profile updated',
+            message:        `${after.name || 'An institution'} updated: ${humanFields}.`,
+            data: {
+              // Deep-link into the super-admin web's institution detail
+              // page. On mobile this maps to the InstitutionDetail
+              // screen; on the admin web the notifications provider
+              // picks kind='institution_profile_updated' and routes.
+              kind:             'institution_profile_updated',
+              institution_id:   institutionId,
+              institution_name: after.name || null,
+              updated_fields:   changed,
+              // NEW: values-after snapshot so the web can render an
+              // accurate "changed to <value>" hint even if the detail
+              // fetch is stale for some transient reason.
+              changed_values:   changedValues,
+              updated_at:       new Date().toISOString(),
+            },
+            created_by: adminId,
+          });
+        }
+      } catch (err) {
+        console.warn('[institution/update] super-admin notify failed:', err?.message);
+      }
+    }
 
     res.json({
       message: 'Institution updated successfully',
-      institution: result.rows[0]
+      institution: after,
+      updated_fields: changed,
     });
   } catch (err) {
     console.error('Update institution error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
+
+// niceFieldLabel — turns a snake_case column key into a human label used
+// in the super-admin notification message. Kept small on purpose;
+// unknown keys fall through to the raw column name.
+function niceFieldLabel(key) {
+  const LABELS = {
+    name: 'Name',
+    brand_name: 'Brand name',
+    description: 'Description',
+    logo_url: 'Logo',
+    website_url: 'Website',
+    institution_type: 'Institution type',
+    institution_types: 'Institution types',
+    registration_number: 'Registration number',
+    date_of_establishment: 'Establishment date',
+    skills: 'Skills',
+    phone: 'Phone',
+    email: 'Email',
+    address: 'Address',
+    city: 'City',
+    pincode: 'Pincode',
+    latitude: 'Latitude',
+    longitude: 'Longitude',
+    facebook_url: 'Facebook',
+    instagram_url: 'Instagram',
+    youtube_url: 'YouTube',
+    linkedin_url: 'LinkedIn',
+    affiliation_or_board: 'Affiliation / board',
+    accreditation_body_name: 'Accreditation body',
+    accreditation_expiry_date: 'Accreditation expiry',
+    accreditation_certificate_url: 'Accreditation certificate',
+    total_student_capacity: 'Student capacity',
+    current_enrollment: 'Current enrollment',
+    medium_of_instruction: 'Medium of instruction',
+    operating_hours_weekday: 'Weekday hours',
+    operating_hours_weekend: 'Weekend hours',
+    operating_hours_by_day: 'Operating hours',
+    master_name: 'Point-of-contact name',
+    master_role: 'Point-of-contact role',
+    master_email: 'Point-of-contact email',
+    master_phone_number: 'Point-of-contact phone',
+  };
+  return LABELS[key] || key;
+}
 // ─────────────────────────────────────────────────────────────────────────────
 // STUDENT-FACING BROWSE ENDPOINTS (public — no auth required)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -345,26 +613,71 @@ exports.getInstitutionLiveClasses = async (_req, res) => {
 exports.getInstitutionEvents = async (req, res) => {
   try {
     const { id } = req.params;
+    // Caller may be a guest — req.user is optional on this endpoint.
+    // When authenticated, we surface `has_paid` so the mobile UI can
+    // switch the button from "Pay Now" to "Paid" without a second call.
+    const callerUserId = req.user?.id || null;
+
+    // Resolve the academy GROUP for the requested institution — the
+    // root (main) institution's id. Events from any sub-branch under
+    // the same root are visible to every student of the group, so an
+    // event approved by the parent doesn't stay confined to the
+    // sub-branch that submitted it.
+    const rootRow = await pool.query(
+      `SELECT COALESCE(parent_institution_id, id) AS root_id
+         FROM institutions WHERE id = $1`,
+      [id],
+    );
+    const rootId = rootRow.rows[0]?.root_id || parseInt(id, 10) || null;
+
     const result = await pool.query(
       `SELECT
-         id,
-         title,
-         subtitle,
-         description,
-         image_url,
-         event_date,
-         location,
-         link,
-         sort_order,
-         institution_id,
-         CASE WHEN institution_id IS NULL THEN 'global' ELSE 'institution' END AS source
-       FROM mobile_events
-       WHERE is_active = TRUE
-         AND event_date >= CURRENT_DATE
-         AND (institution_id = $1 OR institution_id IS NULL)
-       ORDER BY event_date ASC
+         e.id,
+         e.title,
+         e.subtitle,
+         e.description,
+         e.image_url,
+         e.event_date,
+         e.registration_closing_date,
+         e.location,
+         e.link,
+         e.payment_required,
+         e.payment_amount,
+         e.publish_at,
+         e.sort_order,
+         e.institution_id,
+         CASE WHEN e.institution_id IS NULL THEN 'global' ELSE 'institution' END AS source,
+         EXISTS (
+           SELECT 1 FROM event_payments ep
+            WHERE ep.event_id = e.id
+              AND ep.user_id  = $1
+              AND ep.status   = 'paid'
+         ) AS has_paid
+       FROM mobile_events e
+       WHERE e.is_active = TRUE
+         AND e.event_date >= CURRENT_DATE
+         -- Academy-group match: event belongs to the root itself or to
+         -- any sub-branch of that root, OR it's a global (NULL) row.
+         -- This lets a sub-branch's approved event surface for every
+         -- student in the same group, not just the sub-branch's own.
+         AND (
+           e.institution_id IS NULL
+           OR e.institution_id IN (
+             SELECT id FROM institutions
+             WHERE id = $2 OR parent_institution_id = $2
+           )
+         )
+         -- Scheduled rows stay hidden from student/trainer feeds until
+         -- their publish_at moment passes. NULL = publish immediately
+         -- (the legacy behaviour every pre-scheduling event still uses).
+         AND (e.publish_at IS NULL OR e.publish_at <= NOW())
+         -- Approval gate: sub-branches insert as 'pending'; only rows
+         -- the parent has explicitly approved (or main-branch rows,
+         -- which default to 'approved') ever reach students / guests.
+         AND e.approval_status = 'approved'
+       ORDER BY e.event_date ASC
        LIMIT 50`,
-      [id],
+      [callerUserId, rootId],
     );
     res.json({ count: result.rows.length, events: result.rows });
   } catch (err) {
@@ -393,6 +706,21 @@ exports.createInstitutionEvent = async (req, res) => {
       return res.status(403).json({ message: 'No institution linked to this admin.' });
     }
 
+    // Resolve parent (if this admin is a sub-branch). Events created by
+    // a sub-branch land as approval_status='pending' and are hidden from
+    // student/trainer feeds until the parent's admin approves them.
+    // Events created by a main-branch admin skip the gate entirely.
+    const instRow = await pool.query(
+      `SELECT id, name, parent_institution_id
+         FROM institutions
+        WHERE id = $1`,
+      [institutionId],
+    );
+    const inst = instRow.rows[0] || {};
+    const parentInstitutionId = inst.parent_institution_id || null;
+    const isSubBranch = !!parentInstitutionId;
+    const approvalStatus = isSubBranch ? 'pending' : 'approved';
+
     const {
       title,
       subtitle,
@@ -402,6 +730,18 @@ exports.createInstitutionEvent = async (req, res) => {
       image_url,
       link,
       registration_closing_date,
+      // Payment gate — when true, payment_amount is mandatory and the
+      // student/trainer app shows a "Pay Now" button that opens an
+      // integrated Razorpay Payment Link (same flow as the subscription
+      // Pay Now). No externally-pasted URL: we mint the link server-side
+      // per (event, user) at tap time and record it in event_payments.
+      payment_required,
+      payment_amount,
+      // ISO string (or null). Null / past = publish immediately. Future
+      // = row is inserted but hidden from student/trainer reads until
+      // NOW() catches up, at which point it appears automatically —
+      // no cron job needed because we filter on read.
+      publish_at,
     } = req.body || {};
 
     if (!title || !String(title).trim()) {
@@ -411,12 +751,59 @@ exports.createInstitutionEvent = async (req, res) => {
       return res.status(400).json({ field: 'event_date', message: 'Event date is required.' });
     }
 
+    // ── Payment field validation ──────────────────────────────────────
+    const paymentOn = payment_required === true || payment_required === 'true';
+    let feeRupees = null;
+    if (paymentOn) {
+      feeRupees = Number(payment_amount);
+      if (!Number.isFinite(feeRupees) || feeRupees <= 0) {
+        return res.status(400).json({
+          field: 'payment_amount',
+          message: 'Enter a positive amount (in ₹) when payment is required.',
+        });
+      }
+      // Razorpay minimum is ₹1. We reject anything smaller than a whole
+      // rupee to avoid weird sub-rupee UX; admins can always undercut by
+      // rounding down manually.
+      if (feeRupees < 1) {
+        return res.status(400).json({
+          field: 'payment_amount',
+          message: 'Minimum fee is ₹1.',
+        });
+      }
+      // Store to 2dp — event fees are always paise-exact.
+      feeRupees = Math.round(feeRupees * 100) / 100;
+    }
+
+    // ── Publish window validation ─────────────────────────────────────
+    // We accept any ISO-8601 the mobile picker emits (with or without a
+    // timezone). Falsy value = post immediately, stored as NULL. A
+    // publish_at in the past is silently coerced to NULL so the row goes
+    // live right away — safer than 400ing on a 500ms clock skew.
+    let publishAtIso = null;
+    if (publish_at) {
+      const d = new Date(publish_at);
+      if (Number.isNaN(d.getTime())) {
+        return res.status(400).json({
+          field: 'publish_at',
+          message: 'Scheduled time is invalid.',
+        });
+      }
+      if (d.getTime() > Date.now() + 30 * 1000) {
+        // 30s grace so the "Publish" button doesn't get rejected because
+        // the picker had a slightly-in-the-past minute rounded down.
+        publishAtIso = d.toISOString();
+      }
+    }
+
     const result = await pool.query(
       `INSERT INTO mobile_events
          (title, subtitle, description, location, event_date,
           registration_closing_date, image_url, link,
-          institution_id, created_by, is_active, sort_order)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, 0)
+          payment_required, payment_amount, publish_at,
+          institution_id, created_by, approval_status,
+          is_active, sort_order)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, TRUE, 0)
        RETURNING *`,
       [
         String(title).trim(),
@@ -427,17 +814,482 @@ exports.createInstitutionEvent = async (req, res) => {
         registration_closing_date || null,
         image_url || null,
         link || null,
+        paymentOn,
+        paymentOn ? feeRupees : null,
+        publishAtIso,
         institutionId,
         adminId,
+        approvalStatus,
       ],
     );
+    const eventRow = result.rows[0];
 
+    // ── Notify parent admin when a sub-branch is asking for approval.
+    // Best-effort: any DB blip is logged but doesn't fail the create.
+    if (isSubBranch) {
+      try {
+        const parentAdmin = await pool.query(
+          `SELECT owner_user_id, name FROM institutions WHERE id = $1`,
+          [parentInstitutionId],
+        );
+        const parentOwnerId = parentAdmin.rows[0]?.owner_user_id;
+        if (parentOwnerId) {
+          await insertNotification({
+            user_id:        parentOwnerId,
+            institution_id: parentInstitutionId,
+            category:       'system',
+            title:          'Branch event awaiting approval',
+            message:        `${inst.name || 'A branch'} submitted "${eventRow.title}" for your approval. Tap to review.`,
+            data: {
+              // StaffNotificationsScreen#onTap reads data.screen and
+              // navigation.navigate()s to it — this is what makes the
+              // notification actionable. EventsList opens with the
+              // "Pending Approvals" section at the top, where the
+              // Approve / Reject buttons live.
+              screen:      'EventsList',
+              kind:        'branch_event_pending',
+              event_id:    eventRow.id,
+              branch_id:   institutionId,
+              branch_name: inst.name || null,
+            },
+            created_by: adminId,
+          });
+        }
+      } catch (err) {
+        console.warn('[event/create] parent notify failed:', err?.message);
+      }
+    }
+
+    const isScheduled = !!publishAtIso;
+    let message;
+    if (isSubBranch) {
+      message = 'Event submitted — the main institution will review and approve it before students see it.';
+    } else if (isScheduled) {
+      message = `Event scheduled — it will go live on ${new Date(publishAtIso).toLocaleString()}.`;
+    } else {
+      message = 'Event published. Your students and trainers will see it on their home screen.';
+    }
     res.status(201).json({
-      message: 'Event created. Your students and trainers will see it on their home screen.',
-      event: result.rows[0],
+      message,
+      event: eventRow,
+      pending_approval: isSubBranch,
     });
   } catch (err) {
     console.error('createInstitutionEvent error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────
+// PATCH /api/institutions/me/location
+//
+// Sub-branch admin taps More → Update Location and saves their branch's
+// current GPS coords + address. Sub-branches keep their own location
+// fields (address, city, pincode, latitude, longitude) on their own
+// `institutions` row — the parent's copy is never touched. A main-branch
+// admin can also call this to move the head office; behavior is
+// identical because we only ever update the caller's own row.
+//
+// Body: { latitude, longitude, address, city, pincode }
+//   • Every field is optional; we COALESCE, so a partial payload only
+//     touches the fields it carries. Sending an empty payload no-ops.
+//   • Lat/lng are validated for the reasonable ranges. Text fields are
+//     trimmed on save so a stray whitespace doesn't create false diffs.
+// ─────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────
+// PATCH /api/institutions/sub-branches/:id
+//
+// Main-branch admin edits one of their SUB-BRANCH institution rows
+// (the ones the wizard creates with parent_institution_id set). These
+// don't live in institution_branches — they're rows in the institutions
+// table with their own admin login — so the standard /branches PUT
+// doesn't reach them. This endpoint updates the location + contact
+// fields the branch card exposes: name, address, city, pincode, phone,
+// email, latitude, longitude.
+//
+// Authorization:
+//   • caller must be a main-branch admin (parent_institution_id IS NULL)
+//   • the target sub-branch's parent_institution_id must equal the
+//     caller's institution id.
+// ─────────────────────────────────────────────────────────────────────────
+exports.updateSubBranch = async (req, res) => {
+  try {
+    const adminId = req.user.id;
+    const subId   = parseInt(req.params.id, 10);
+    if (!Number.isFinite(subId)) return res.status(400).json({ message: 'Bad sub-branch id.' });
+
+    // Caller must be a main-branch admin.
+    const u = await pool.query(
+      `SELECT institution_id FROM users WHERE id = $1`, [adminId],
+    );
+    const callerInstId = u.rows[0]?.institution_id;
+    if (!callerInstId) return res.status(403).json({ message: 'No institution linked.' });
+    const me = await pool.query(
+      `SELECT id, parent_institution_id FROM institutions WHERE id = $1`,
+      [callerInstId],
+    );
+    if (me.rows[0]?.parent_institution_id) {
+      return res.status(403).json({ message: 'Only the main institution admin can edit sub-branches from here.' });
+    }
+
+    // Load the sub-branch, verify it belongs to us.
+    const before = await pool.query(
+      `SELECT * FROM institutions WHERE id = $1 AND deleted_at IS NULL`,
+      [subId],
+    );
+    if (before.rows.length === 0) return res.status(404).json({ message: 'Sub-branch not found.' });
+    if (before.rows[0].parent_institution_id !== callerInstId) {
+      return res.status(403).json({ message: 'This sub-branch does not belong to your institution.' });
+    }
+
+    const {
+      name, address, city, pincode, phone, email, latitude, longitude,
+    } = req.body || {};
+
+    const trim = (v) => (v == null ? null : String(v).trim() || null);
+    const num  = (v, min, max) => {
+      if (v === undefined || v === null || v === '') return null;
+      const n = Number(v);
+      if (!Number.isFinite(n)) return null;
+      if (n < min || n > max) return null;
+      return n;
+    };
+    const latVal = num(latitude, -90, 90);
+    const lngVal = num(longitude, -180, 180);
+
+    const upd = await pool.query(
+      `UPDATE institutions
+          SET name       = COALESCE($2, name),
+              address    = COALESCE($3, address),
+              city       = COALESCE($4, city),
+              pincode    = COALESCE($5, pincode),
+              phone      = COALESCE($6, phone),
+              email      = COALESCE($7, email),
+              latitude   = COALESCE($8, latitude),
+              longitude  = COALESCE($9, longitude),
+              updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+      RETURNING *`,
+      [
+        subId,
+        trim(name), trim(address), trim(city), trim(pincode),
+        trim(phone), trim(email),
+        latVal, lngVal,
+      ],
+    );
+    const after = upd.rows[0];
+
+    // ── Also sync the matching entry in the parent's `branches` JSONB
+    // (populated at setup-wizard time). The admin web's Branch Locations
+    // section renders straight from that JSONB, so if we only touched
+    // the sub-branch's row here the web would keep showing the setup-
+    // wizard value forever. Match order:
+    //   1. by email (the wizard always captures it)
+    //   2. by phone (fallback for branches without an email)
+    //   3. by name (last resort)
+    try {
+      const parentRow = await pool.query(
+        `SELECT branches FROM institutions WHERE id = $1`, [callerInstId],
+      );
+      const arr = Array.isArray(parentRow.rows[0]?.branches)
+        ? parentRow.rows[0].branches
+        : [];
+      if (arr.length > 0) {
+        const oldEmail = (before.rows[0].email || '').toLowerCase();
+        const oldPhone = String(before.rows[0].phone || '').replace(/\D/g, '');
+        const oldName  = (before.rows[0].name  || '').toLowerCase();
+
+        let matched = -1;
+        // 1) email match
+        matched = arr.findIndex((b) =>
+          b && b.email && oldEmail &&
+          String(b.email).toLowerCase() === oldEmail);
+        // 2) phone match
+        if (matched === -1 && oldPhone) {
+          matched = arr.findIndex((b) =>
+            b && String(b.contact_number || b.phone || '').replace(/\D/g, '') === oldPhone);
+        }
+        // 3) name match
+        if (matched === -1 && oldName) {
+          matched = arr.findIndex((b) =>
+            b && b.name && String(b.name).toLowerCase() === oldName);
+        }
+
+        if (matched !== -1) {
+          const nextArr = arr.map((b, i) => i !== matched ? b : {
+            ...b,
+            name:           after.name,
+            address:        after.address,
+            city:           after.city,
+            pincode:        after.pincode,
+            email:          after.email,
+            contact_number: after.phone,
+            latitude:       after.latitude,
+            longitude:      after.longitude,
+          });
+          await pool.query(
+            `UPDATE institutions
+                SET branches = $2::jsonb, updated_at = CURRENT_TIMESTAMP
+              WHERE id = $1`,
+            [callerInstId, JSON.stringify(nextArr)],
+          );
+        }
+      }
+    } catch (err) {
+      console.warn('[sub-branch/update] JSONB sync failed:', err?.message);
+    }
+
+    // Compute diff → notify super admins the sub-branch changed.
+    const DIFFABLE = ['name', 'address', 'city', 'pincode', 'phone', 'email', 'latitude', 'longitude'];
+    const changed = DIFFABLE.filter((k) => {
+      const b = before.rows[0][k]; const a = after[k];
+      return JSON.stringify(b == null ? null : b) !== JSON.stringify(a == null ? null : a);
+    });
+
+    if (changed.length > 0) {
+      try {
+        const parentRow = await pool.query(
+          `SELECT name FROM institutions WHERE id = $1`, [callerInstId],
+        );
+        const parentName = parentRow.rows[0]?.name || 'An institution';
+        const humanFields = changed.map((k) => k.replace(/_/g, ' ')).join(', ');
+        const supers = await pool.query(
+          `SELECT id FROM users
+            WHERE role = 'super_admin' AND COALESCE(is_deleted, false) = false`,
+        );
+        // Snapshot the new values for the fields that changed so the
+        // web admin can render an authoritative "changed to <value>"
+        // hint. Small blobs only — matches the profile-update payload.
+        const changedValues = {};
+        for (const k of changed) {
+          const v = after[k];
+          if (typeof v === 'string' && v.length > 300) continue;
+          changedValues[k] = v == null ? null : v;
+        }
+        for (const s of supers.rows) {
+          await insertNotification({
+            user_id:        s.id,
+            institution_id: callerInstId,
+            category:       'system',
+            title:          'Branch updated',
+            message:        `${parentName} updated sub-branch ${after.name} (${humanFields}).`,
+            data: {
+              kind:             'branch_updated',
+              institution_id:   callerInstId,
+              institution_name: parentName,
+              // branch_id is what the web routes on — this MUST be the
+              // sub-branch's own institutions id so the detail page it
+              // opens shows the changed values, not the parent's.
+              branch_id:        subId,
+              branch_name:      after.name,
+              changed_fields:   changed,
+              changed_values:   changedValues,
+              updated_at:       new Date().toISOString(),
+            },
+            created_by: adminId,
+          });
+        }
+      } catch (err) {
+        console.warn('[sub-branch/update] notify failed:', err?.message);
+      }
+    }
+
+    res.json({ branch: after, changed_fields: changed });
+  } catch (err) {
+    console.error('updateSubBranch error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+exports.updateMyLocation = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const uRow = await pool.query(
+      `SELECT institution_id FROM users WHERE id = $1`,
+      [userId],
+    );
+    const institutionId = uRow.rows[0]?.institution_id;
+    if (!institutionId) {
+      return res.status(400).json({ message: 'No institution linked to this admin.' });
+    }
+
+    const { latitude, longitude, address, city, pincode } = req.body || {};
+
+    const lat = latitude === undefined || latitude === null || latitude === ''
+      ? null : Number(latitude);
+    const lng = longitude === undefined || longitude === null || longitude === ''
+      ? null : Number(longitude);
+    if (lat !== null && (!Number.isFinite(lat) || lat < -90 || lat > 90)) {
+      return res.status(400).json({ field: 'latitude', message: 'Latitude must be between -90 and 90.' });
+    }
+    if (lng !== null && (!Number.isFinite(lng) || lng < -180 || lng > 180)) {
+      return res.status(400).json({ field: 'longitude', message: 'Longitude must be between -180 and 180.' });
+    }
+
+    // COALESCE keeps existing values when a field is null in the payload,
+    // so a partial update only overwrites the columns the caller sent.
+    const r = await pool.query(
+      `UPDATE institutions
+          SET latitude   = COALESCE($2, latitude),
+              longitude  = COALESCE($3, longitude),
+              address    = COALESCE($4, address),
+              city       = COALESCE($5, city),
+              pincode    = COALESCE($6, pincode)
+        WHERE id = $1
+        RETURNING id, name, address, city, pincode, latitude, longitude,
+                  parent_institution_id`,
+      [
+        institutionId,
+        lat,
+        lng,
+        address ? String(address).trim() : null,
+        city    ? String(city).trim()    : null,
+        pincode ? String(pincode).trim() : null,
+      ],
+    );
+
+    if (r.rows.length === 0) {
+      return res.status(404).json({ message: 'Institution not found.' });
+    }
+    res.json({
+      message: 'Location updated.',
+      institution: r.rows[0],
+    });
+  } catch (err) {
+    console.error('updateMyLocation error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────
+// POST /api/institutions/events/:eventId/pay
+//
+// Student / trainer taps "Pay Now" on an event that has payment_required.
+// We mint (or reuse) a Razorpay Payment Link and return its short_url,
+// which the mobile app opens via Linking.openURL — same in-browser flow
+// as the subscription Pay Now.
+//
+// Reuse rule: if the caller already has a still-pending link for this
+// event, we hand back the same short_url so refreshes don't spawn a pile
+// of orphan payment links in Razorpay's dashboard.
+//
+// Idempotency: a 'paid' row wins — we short-circuit with { already_paid }.
+// ─────────────────────────────────────────────────────────────────────────
+exports.payForInstitutionEvent = async (req, res) => {
+  try {
+    const userId  = req.user?.id;
+    const eventId = parseInt(req.params.eventId, 10);
+    if (!userId)                return res.status(401).json({ message: 'Not authenticated' });
+    if (!Number.isFinite(eventId)) return res.status(400).json({ message: 'Bad event id' });
+
+    // Fetch the event with the institution's context — we surface the
+    // academy name in the Razorpay checkout description so the user
+    // knows who they're paying.
+    const eventRow = await pool.query(
+      `SELECT e.id, e.title, e.payment_required, e.payment_amount,
+              e.institution_id,
+              i.name AS institution_name
+         FROM mobile_events e
+         LEFT JOIN institutions i ON i.id = e.institution_id
+        WHERE e.id = $1
+          AND e.is_active = TRUE`,
+      [eventId],
+    );
+    const event = eventRow.rows[0];
+    if (!event) return res.status(404).json({ message: 'Event not found.' });
+    if (!event.payment_required) {
+      return res.status(400).json({ message: 'This event is free — no payment needed.' });
+    }
+    const amountRupees = Number(event.payment_amount);
+    if (!Number.isFinite(amountRupees) || amountRupees <= 0) {
+      return res.status(500).json({ message: 'Event fee is misconfigured.' });
+    }
+
+    // Already paid → tell the client so it can lock the button.
+    const paidCheck = await pool.query(
+      `SELECT id FROM event_payments
+        WHERE event_id = $1 AND user_id = $2 AND status = 'paid'
+        LIMIT 1`,
+      [eventId, userId],
+    );
+    if (paidCheck.rows.length) {
+      return res.json({ ok: true, already_paid: true });
+    }
+
+    // Reuse a still-pending link if there is one — avoids racking up
+    // dozens of pending links on repeat taps.
+    const pendingRow = await pool.query(
+      `SELECT id, razorpay_short_url
+         FROM event_payments
+        WHERE event_id = $1 AND user_id = $2 AND status = 'pending'
+          AND razorpay_short_url IS NOT NULL
+          AND created_at > NOW() - INTERVAL '1 hour'
+        ORDER BY created_at DESC
+        LIMIT 1`,
+      [eventId, userId],
+    );
+    if (pendingRow.rows[0]?.razorpay_short_url) {
+      return res.json({
+        ok: true,
+        short_url: pendingRow.rows[0].razorpay_short_url,
+        reused: true,
+      });
+    }
+
+    // Mint a fresh link via Razorpay.
+    const client = rzp();
+    if (!client) {
+      return res.status(503).json({ message: 'Payments not configured.' });
+    }
+
+    // Grab the payer's contact bits so Razorpay's hosted page pre-fills.
+    const payer = await pool.query(
+      `SELECT name, email, phone FROM users WHERE id = $1`,
+      [userId],
+    );
+    const p = payer.rows[0] || {};
+
+    const amountPaise = Math.round(amountRupees * 100);
+    const referenceId = `evt_${eventId}_u${userId}_${Date.now()}`;
+    let link;
+    try {
+      link = await client.paymentLink.create({
+        amount: amountPaise,
+        currency: 'INR',
+        accept_partial: false,
+        notify: { email: false, sms: false },
+        reminder_enable: false,
+        description: `${event.title} — ${event.institution_name || 'Event fee'}`,
+        reference_id: referenceId,
+        customer: {
+          name:    p.name || undefined,
+          email:   p.email || undefined,
+          contact: p.phone || undefined,
+        },
+        notes: {
+          // Webhook uses these to route back to the correct row.
+          event_payment: '1',
+          event_id: String(eventId),
+          user_id:  String(userId),
+        },
+      });
+    } catch (err) {
+      const desc = err?.error?.description || err.message || 'Razorpay error';
+      console.error('[event-pay] createPaymentLink failed:', desc);
+      return res.status(502).json({ message: `Payment gateway: ${desc}` });
+    }
+
+    // Record the attempt so the webhook can flip it to 'paid'.
+    await pool.query(
+      `INSERT INTO event_payments
+         (event_id, user_id, amount_paise, razorpay_link_id, razorpay_short_url, status)
+       VALUES ($1, $2, $3, $4, $5, 'pending')`,
+      [eventId, userId, amountPaise, link.id, link.short_url],
+    );
+
+    return res.json({ ok: true, short_url: link.short_url });
+  } catch (err) {
+    console.error('payForInstitutionEvent error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
@@ -462,17 +1314,206 @@ exports.listMyInstitutionEvents = async (req, res) => {
       `SELECT
          id, title, subtitle, description, image_url, event_date,
          registration_closing_date, location, link, is_active, sort_order,
+         payment_required, payment_amount, publish_at,
+         approval_status, approval_reason, approval_decided_at,
          institution_id, created_at,
-         CASE WHEN event_date >= CURRENT_DATE THEN 'upcoming' ELSE 'past' END AS status
+         -- Four-way status so the admin's EventsList can badge each row.
+         -- Approval outcomes win over publish/date state — a rejected
+         -- event is rejected regardless of when it was scheduled.
+         CASE
+           WHEN approval_status = 'pending'                    THEN 'pending'
+           WHEN approval_status = 'rejected'                   THEN 'rejected'
+           WHEN publish_at IS NOT NULL AND publish_at > NOW()  THEN 'scheduled'
+           WHEN event_date <  CURRENT_DATE                     THEN 'past'
+           ELSE                                                     'upcoming'
+         END AS status
        FROM mobile_events
        WHERE institution_id = $1
-       ORDER BY event_date DESC
+       ORDER BY
+         CASE
+           WHEN publish_at IS NOT NULL AND publish_at > NOW() THEN 0
+           ELSE 1
+         END,
+         event_date DESC
        LIMIT 200`,
       [institutionId],
     );
     res.json({ count: result.rows.length, events: result.rows });
   } catch (err) {
     console.error('listMyInstitutionEvents error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────
+// Branch → Parent event approval flow
+// ─────────────────────────────────────────────────────────────────────────
+// Sub-branch events land as approval_status='pending'. The parent's admin
+// reviews them here.
+
+// GET /api/institutions/me/events/pending
+// Parent admin lists every pending event from any of their sub-branches.
+exports.listPendingBranchEvents = async (req, res) => {
+  try {
+    const adminId = req.user.id;
+    const u = await pool.query(
+      `SELECT institution_id FROM users WHERE id = $1`, [adminId],
+    );
+    const homeId = u.rows[0]?.institution_id;
+    if (!homeId) return res.status(403).json({ message: 'No institution linked.' });
+
+    // The parent admin's own institutions row has parent_institution_id = NULL.
+    // Sub-branch admins can't call this — reject if they're not at the root.
+    const meRow = await pool.query(
+      `SELECT parent_institution_id FROM institutions WHERE id = $1`,
+      [homeId],
+    );
+    if (meRow.rows[0]?.parent_institution_id) {
+      return res.status(403).json({ message: 'Only the main institution admin can approve branch events.' });
+    }
+
+    // Pending events from any institution whose parent is our home id.
+    const result = await pool.query(
+      `SELECT e.id, e.title, e.subtitle, e.description, e.image_url,
+              e.event_date, e.registration_closing_date, e.location, e.link,
+              e.payment_required, e.payment_amount, e.publish_at,
+              e.approval_status, e.institution_id, e.created_at,
+              i.name AS branch_name
+         FROM mobile_events e
+         JOIN institutions i ON i.id = e.institution_id
+        WHERE i.parent_institution_id = $1
+          AND e.approval_status = 'pending'
+          AND e.is_active = TRUE
+        ORDER BY e.created_at DESC
+        LIMIT 200`,
+      [homeId],
+    );
+    res.json({ count: result.rows.length, events: result.rows });
+  } catch (err) {
+    console.error('listPendingBranchEvents error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// Shared decide helper — DRY for approve/reject. Enforces:
+//   • caller is main-branch admin
+//   • event belongs to a sub-branch under caller's institution
+//   • event is currently 'pending'
+async function decideBranchEvent({ res, decidingUserId, eventId, decision, reason }) {
+  // Look up caller's institution + confirm they're a main-branch admin.
+  const u = await pool.query(
+    `SELECT institution_id FROM users WHERE id = $1`, [decidingUserId],
+  );
+  const homeId = u.rows[0]?.institution_id;
+  if (!homeId) return res.status(403).json({ message: 'No institution linked.' });
+  const meRow = await pool.query(
+    `SELECT parent_institution_id FROM institutions WHERE id = $1`, [homeId],
+  );
+  if (meRow.rows[0]?.parent_institution_id) {
+    return res.status(403).json({ message: 'Only the main institution admin can approve branch events.' });
+  }
+
+  // Load event + verify its branch is one of our sub-branches.
+  const ev = await pool.query(
+    `SELECT e.id, e.title, e.institution_id, e.approval_status,
+            e.created_by, i.parent_institution_id, i.name AS branch_name
+       FROM mobile_events e
+       JOIN institutions i ON i.id = e.institution_id
+      WHERE e.id = $1`,
+    [eventId],
+  );
+  const row = ev.rows[0];
+  if (!row) return res.status(404).json({ message: 'Event not found.' });
+  if (row.parent_institution_id !== homeId) {
+    return res.status(403).json({ message: 'This event does not belong to your branches.' });
+  }
+  if (row.approval_status !== 'pending') {
+    return res.status(409).json({
+      message: `Event is already ${row.approval_status}.`,
+      approval_status: row.approval_status,
+    });
+  }
+
+  const updated = await pool.query(
+    `UPDATE mobile_events
+        SET approval_status     = $2,
+            approval_reason     = $3,
+            approval_decided_by = $4,
+            approval_decided_at = NOW()
+      WHERE id = $1
+      RETURNING *`,
+    [eventId, decision, decision === 'rejected' ? (reason || null) : null, decidingUserId],
+  );
+
+  // Notify the sub-branch admin so their EventsList row updates fast.
+  try {
+    if (row.created_by) {
+      const isApproval = decision === 'approved';
+      await insertNotification({
+        user_id:        row.created_by,
+        institution_id: row.institution_id,
+        category:       'system',
+        title:          isApproval ? 'Event approved' : 'Event rejected',
+        message:        isApproval
+          ? `"${row.title}" is now live for your students and trainers.`
+          : `"${row.title}" was not approved${reason ? `: ${reason}` : '.'}`,
+        data: {
+          // Same deep-link mechanism as the pending notification — tap
+          // takes the branch admin to their own EventsList, where the
+          // row is now badged as Live (green) or Rejected (red).
+          screen:   'EventsList',
+          kind:     isApproval ? 'branch_event_approved' : 'branch_event_rejected',
+          event_id: row.id,
+          reason:   reason || null,
+        },
+        created_by: decidingUserId,
+      });
+    }
+  } catch (err) {
+    console.warn('[event/decide] branch notify failed:', err?.message);
+  }
+
+  return res.json({
+    message: decision === 'approved'
+      ? 'Event approved — it is now visible to students and trainers.'
+      : 'Event rejected — the branch admin has been notified.',
+    event: updated.rows[0],
+  });
+}
+
+// PATCH /api/institutions/events/:eventId/approve
+exports.approveBranchEvent = async (req, res) => {
+  try {
+    const eventId = parseInt(req.params.eventId, 10);
+    if (!Number.isFinite(eventId)) return res.status(400).json({ message: 'Bad event id.' });
+    return decideBranchEvent({
+      res,
+      decidingUserId: req.user.id,
+      eventId,
+      decision: 'approved',
+    });
+  } catch (err) {
+    console.error('approveBranchEvent error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// PATCH /api/institutions/events/:eventId/reject
+// Body: { reason?: string }
+exports.rejectBranchEvent = async (req, res) => {
+  try {
+    const eventId = parseInt(req.params.eventId, 10);
+    if (!Number.isFinite(eventId)) return res.status(400).json({ message: 'Bad event id.' });
+    const reason = req.body?.reason ? String(req.body.reason).trim().slice(0, 500) : null;
+    return decideBranchEvent({
+      res,
+      decidingUserId: req.user.id,
+      eventId,
+      decision: 'rejected',
+      reason,
+    });
+  } catch (err) {
+    console.error('rejectBranchEvent error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
@@ -486,28 +1527,56 @@ exports.listMyInstitutionEvents = async (req, res) => {
 // institution id up front.
 exports.getMyEvents = async (req, res) => {
   try {
+    const callerUserId = req.user.id;
     const u = await pool.query(
-      `SELECT institution_id FROM users WHERE id = $1`,
-      [req.user.id],
+      `SELECT u.institution_id,
+              COALESCE(i.parent_institution_id, i.id) AS root_id
+         FROM users u
+         LEFT JOIN institutions i ON i.id = u.institution_id
+        WHERE u.id = $1`,
+      [callerUserId],
     );
-    const institutionId = u.rows[0]?.institution_id;
+    const rootId = u.rows[0]?.root_id || null;
 
-    // Even guests / un-linked users can fetch — they just get globals only.
-    const params = institutionId ? [institutionId] : [];
-    const where  = institutionId
-      ? `(institution_id = $1 OR institution_id IS NULL)`
-      : `institution_id IS NULL`;
+    // Guests / un-linked users → globals only. Linked users see events
+    // from anywhere in their academy GROUP (root + every sub-branch),
+    // so an event a sub-branch created and the parent approved shows
+    // up for students at any branch of the same academy.
+    let where, params;
+    if (rootId) {
+      where = `(
+        e.institution_id IS NULL
+        OR e.institution_id IN (
+          SELECT id FROM institutions
+          WHERE id = $2 OR parent_institution_id = $2
+        )
+      )`;
+      params = [callerUserId, rootId];
+    } else {
+      where  = `e.institution_id IS NULL`;
+      params = [callerUserId];
+    }
 
     const result = await pool.query(
       `SELECT
-         id, title, subtitle, description, image_url, event_date,
-         location, link, sort_order, institution_id,
-         CASE WHEN institution_id IS NULL THEN 'global' ELSE 'institution' END AS source
-       FROM mobile_events
-       WHERE is_active = TRUE
-         AND event_date >= CURRENT_DATE
+         e.id, e.title, e.subtitle, e.description, e.image_url, e.event_date,
+         e.registration_closing_date, e.location, e.link,
+         e.payment_required, e.payment_amount, e.publish_at,
+         e.sort_order, e.institution_id,
+         CASE WHEN e.institution_id IS NULL THEN 'global' ELSE 'institution' END AS source,
+         EXISTS (
+           SELECT 1 FROM event_payments ep
+            WHERE ep.event_id = e.id
+              AND ep.user_id  = $1
+              AND ep.status   = 'paid'
+         ) AS has_paid
+       FROM mobile_events e
+       WHERE e.is_active = TRUE
+         AND e.event_date >= CURRENT_DATE
+         AND (e.publish_at IS NULL OR e.publish_at <= NOW())
+         AND e.approval_status = 'approved'
          AND ${where}
-       ORDER BY event_date ASC
+       ORDER BY e.event_date ASC
        LIMIT 50`,
       params,
     );

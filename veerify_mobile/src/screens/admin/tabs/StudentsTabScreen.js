@@ -19,13 +19,14 @@ import {
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import {
-  Search, SlidersHorizontal, ChevronRight, Users, UserPlus,
+  Search, SlidersHorizontal, ChevronRight, Users, UserPlus, Trash2,
 } from 'lucide-react-native';
 
 import apiClient from '../../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../../theme';
 import FAB from '../../../components/FAB';
 import PlanLimitModal from '../../../components/PlanLimitModal';
+import { confirm } from '../../../components/ConfirmDialog';
 
 const TABS = ['All', 'Active', 'Inactive'];
 
@@ -156,6 +157,59 @@ export default function StudentsTabScreen({ navigation }) {
     return arr;
   }, [search, tab, students]);
 
+  // ── Delete student (institution + branch login) ──
+  //
+  // Opens the branded destructive confirm. On Remove, fires DELETE
+  // /enrollments/student/:userId which soft-deletes the user (same
+  // pattern as the trainer delete). We drop the row from local state
+  // immediately for instant feedback, then show a success dialog.
+  // Any confirm() opened from within another confirm's onConfirm is
+  // delayed by ~260ms so Android's Modal animation doesn't swallow it.
+  const handleDeleteStudent = (student) => {
+    confirm({
+      title: 'Remove student?',
+      message: `${student.name} will lose access to your academy. Their enrolment history stays intact, and their email/phone become free for reuse.`,
+      variant: 'destructive',
+      confirmText: 'Remove',
+      cancelText: 'Keep student',
+      onConfirm: () => {
+        (async () => {
+          try {
+            await apiClient.delete(`/enrollments/student/${student.id}`);
+            setStudents((prev) => prev.filter((s) => s.id !== student.id));
+            // Free up a plan-slot on the cap counter.
+            refreshUsage();
+            setTimeout(() => {
+              confirm({
+                title: 'Student removed',
+                message: `${student.name} no longer has access to your academy.`,
+                variant: 'success',
+                confirmText: 'Done',
+                hideCancel: true,
+              });
+            }, 260);
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.log('[StudentsTab] delete failed:',
+              err?.response?.status, err?.response?.data);
+            setTimeout(() => {
+              confirm({
+                title: 'Could not remove',
+                message:
+                  err?.response?.data?.message ||
+                  err?.message ||
+                  'Something went wrong. Try again.',
+                variant: 'warning',
+                confirmText: 'OK',
+                hideCancel: true,
+              });
+            }, 260);
+          }
+        })();
+      },
+    });
+  };
+
   const placeholder = (msg) => Alert.alert(msg, "We'll wire this up next.");
 
   return (
@@ -256,6 +310,7 @@ export default function StudentsTabScreen({ navigation }) {
             <StudentRow
               item={item}
               onPress={() => navigation.navigate('StudentDetail', { student: item })}
+              onDelete={() => handleDeleteStudent(item)}
             />
           )}
           showsVerticalScrollIndicator={false}
@@ -297,7 +352,7 @@ export default function StudentsTabScreen({ navigation }) {
 }
 
 // ─── Row ─────────────────────────────────────────────────────────────────────
-function StudentRow({ item, onPress }) {
+function StudentRow({ item, onPress, onDelete }) {
   return (
     <TouchableOpacity style={styles.row} onPress={onPress} activeOpacity={0.85}>
       <Avatar photoUrl={item.photo_url} name={item.name} accent={item.accent} />
@@ -325,7 +380,20 @@ function StudentRow({ item, onPress }) {
           ) : null}
         </View>
       </View>
-      <ChevronRight size={18} color={palette.textLight} strokeWidth={2} />
+      {/* Right-side actions. Delete stops propagation so tapping it
+          doesn't drill into the profile. The chevron stays as the
+          "tap the row to open" affordance for the rest of the card. */}
+      <View style={styles.rowActions}>
+        <TouchableOpacity
+          onPress={(e) => { e.stopPropagation?.(); onDelete && onDelete(); }}
+          hitSlop={6}
+          activeOpacity={0.75}
+          style={styles.rowDeleteBtn}
+        >
+          <Trash2 size={14} color={palette.rose.vivid} strokeWidth={2.4} />
+        </TouchableOpacity>
+        <ChevronRight size={18} color={palette.textLight} strokeWidth={2} />
+      </View>
     </TouchableOpacity>
   );
 }
@@ -450,6 +518,20 @@ const styles = StyleSheet.create({
     width: 8, height: 8, borderRadius: 4,
   },
   studentId: { ...type.caption, color: palette.textMuted, marginTop: 2 },
+
+  // Right side of the card — trash button + chevron. Stacked with a
+  // small gap so the trash target stays comfortably far from the tap-
+  // to-open row target.
+  rowActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  rowDeleteBtn: {
+    width: 30, height: 30, borderRadius: 15,
+    backgroundColor: palette.rose.soft,
+    alignItems: 'center', justifyContent: 'center',
+  },
   metaRow: {
     flexDirection: 'row',
     alignItems: 'center',

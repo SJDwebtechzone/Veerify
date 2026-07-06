@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import { useTheme } from '../../lib/theme';
 import { useAuth } from '../../lib/auth';
-import { useNotifications, type RecentPending } from '../../lib/notifications';
+import { useNotifications, type RecentPending, type InboxItem } from '../../lib/notifications';
 import { resolveImageUrl } from '../../lib/api';
 import { cn } from '../../lib/utils';
 
@@ -17,6 +17,9 @@ export function Navbar({ onMenuClick }: NavbarProps) {
   const { theme, toggle } = useTheme();
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  // Overload so bell clicks can attach router state (highlightFields,
+  // refreshedAt) when deep-linking into the institution detail page.
+  const navigateWithState = (path: string, state?: any) => navigate(path, { state });
 
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -35,6 +38,12 @@ export function Navbar({ onMenuClick }: NavbarProps) {
   const initials = user?.name
     ? user.name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase()
     : 'SA';
+  // Profile logo uploaded via My Profile. When present we render it
+  // inside the avatar tile in place of the initials so the navbar
+  // matches whatever brand mark the admin set on themself.
+  const profileLogoUrl = user?.org_logo_url
+    ? resolveImageUrl(user.org_logo_url)
+    : '';
 
   const handleLogout = () => {
     setMenuOpen(false);
@@ -79,7 +88,7 @@ export function Navbar({ onMenuClick }: NavbarProps) {
             open={bellOpen}
             setOpen={setBellOpen}
             bellRef={bellRef}
-            onView={(path) => { setBellOpen(false); navigate(path); }}
+            onView={(path, state) => { setBellOpen(false); navigateWithState(path, state); }}
           />
 
           <div className="relative ml-2 pl-3 border-l border-slate-200 dark:border-slate-700" ref={menuRef}>
@@ -88,9 +97,17 @@ export function Navbar({ onMenuClick }: NavbarProps) {
                 <div className="text-sm font-semibold text-slate-900 dark:text-white leading-tight">{user?.name ?? 'Admin'}</div>
                 <div className="text-xs text-slate-500 dark:text-slate-400">Super Admin</div>
               </div>
-              <div className="w-9 h-9 rounded-full bg-gradient-to-br from-brand-400 to-brand-700 flex items-center justify-center text-white font-semibold text-sm shadow-glow">
-                {initials}
-              </div>
+              {profileLogoUrl ? (
+                <img
+                  src={profileLogoUrl}
+                  alt={user?.name || 'Profile logo'}
+                  className="w-9 h-9 rounded-full object-cover border border-slate-200 dark:border-slate-700 shadow-glow bg-white"
+                />
+              ) : (
+                <div className="w-9 h-9 rounded-full bg-gradient-to-br from-brand-400 to-brand-700 flex items-center justify-center text-white font-semibold text-sm shadow-glow">
+                  {initials}
+                </div>
+              )}
               <ChevronDown
                 className={cn(
                   'w-4 h-4 text-slate-400 transition-transform hidden md:block',
@@ -106,7 +123,11 @@ export function Navbar({ onMenuClick }: NavbarProps) {
                   <div className="text-xs text-slate-500 dark:text-slate-400 truncate">{user?.email}</div>
                 </div>
                 <div className="py-1">
-                  <MenuItem icon={User} label="My profile" onClick={() => setMenuOpen(false)} />
+                  <MenuItem
+                    icon={User}
+                    label="My profile"
+                    onClick={() => { setMenuOpen(false); navigate('/profile'); }}
+                  />
                   <MenuItem
                     icon={Settings}
                     label="Account settings"
@@ -126,16 +147,88 @@ export function Navbar({ onMenuClick }: NavbarProps) {
 }
 
 // ─────────── Notification bell + dropdown ───────────
+// The bell surfaces TWO streams:
+//   1. Pending institution approvals   → onboarding/counts.recent_pending
+//   2. Inbox notifications             → /notifications (system events like
+//      "Institution profile updated", branch event approval requests, etc.)
+// Badge count is unread inbox + pending approvals combined.
 function NotificationBell({
   open, setOpen, bellRef, onView,
 }: {
   open: boolean;
   setOpen: (v: boolean) => void;
   bellRef: React.RefObject<HTMLDivElement>;
-  onView: (path: string) => void;
+  onView: (path: string, state?: any) => void;
 }) {
-  const { counts, recentPending, refresh } = useNotifications();
+  const {
+    counts, recentPending, inbox, unreadInbox,
+    markInboxRead, markAllInboxRead, refresh,
+  } = useNotifications();
   const pending = counts.pending_approval;
+  const totalBadge = pending + unreadInbox;
+
+  // Deep-link helper — picks the correct /institutions/:id to open for
+  // each notification kind. Key rule: use the id that OWNS the changed
+  // data, not the reporting-context id. For branch updates that means
+  // the branch's own id (which IS an institutions row for sub-branches),
+  // not the parent — otherwise the amber highlight lands on the parent's
+  // untouched fields and looks wrong.
+  const routeForInboxItem = (n: InboxItem): string | null => {
+    const d = n.data || {};
+    if (d.kind === 'institution_profile_updated' && d.institution_id) {
+      return `/institutions/${d.institution_id}`;
+    }
+    // Branch add / update — the row whose fields actually changed is the
+    // branch's own institutions row (sub-branch) or its institution_branches
+    // row (satellite). Both live under /institutions/:branch_id when the
+    // branch is a sub-branch. For satellite locations we fall back to the
+    // parent since there's no separate detail page for them.
+    if ((d.kind === 'branch_added' || d.kind === 'branch_updated')
+        && d.branch_id) {
+      return `/institutions/${d.branch_id}`;
+    }
+    // Event approval flow — the branch's admin is the audience for
+    // approve/reject; the parent's admin is the audience for pending.
+    // Either way route to the branch's page which surfaces its EventsList.
+    if ((d.kind === 'branch_event_pending' || d.kind === 'branch_event_approved' || d.kind === 'branch_event_rejected')
+        && d.branch_id) {
+      return `/institutions/${d.branch_id}`;
+    }
+    if (n.institution_id) return `/institutions/${n.institution_id}`;
+    return null;
+  };
+
+  const onInboxClick = (n: InboxItem) => {
+    if (!n.read_at) markInboxRead(n.id);
+    const path = routeForInboxItem(n);
+    if (!path) { setOpen(false); return; }
+
+    // Package the notification's diff so the detail page can (a) refetch
+    // even when the URL id matches the current one — refreshedAt bumps
+    // the effect's dependency — and (b) highlight exactly the fields
+    // this notification says changed. Handles both institution profile
+    // updates and branch updates; each backend payload puts the diff
+    // under different keys (updated_fields vs changed_fields).
+    const d = n.data || {};
+    const highlightFields: string[] = Array.isArray(d.updated_fields)
+      ? d.updated_fields
+      : Array.isArray(d.changed_fields) ? d.changed_fields : [];
+    // changed_values is the values-after snapshot the backend attaches
+    // to profile-update notifications. When present, the detail page
+    // renders it inline so the reviewer sees the truthful new value
+    // even before the /onboarding/:id refetch resolves.
+    const changedValues: Record<string, any> =
+      d.changed_values && typeof d.changed_values === 'object' ? d.changed_values : {};
+    const highlightBranchId: number | null = typeof d.branch_id === 'number'
+      ? d.branch_id : null;
+    onView(path, {
+      highlightFields,
+      highlightBranchId,
+      changedValues,
+      refreshedAt: Date.now(),
+      notificationTitle: n.title,
+    });
+  };
 
   return (
     <div className="relative" ref={bellRef}>
@@ -145,34 +238,67 @@ function NotificationBell({
         aria-label="Notifications"
       >
         <Bell className="w-[18px] h-[18px]" />
-        {pending > 0 && (
+        {totalBadge > 0 && (
           <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] inline-flex items-center justify-center rounded-full bg-rose-500 text-white text-[10px] font-bold px-1 ring-2 ring-white dark:ring-slate-900">
-            {pending > 99 ? '99+' : pending}
+            {totalBadge > 99 ? '99+' : totalBadge}
           </span>
         )}
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full mt-2 w-80 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden animate-fade-in">
+        <div className="absolute right-0 top-full mt-2 w-96 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden animate-fade-in">
           <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
             <div>
               <div className="text-sm font-semibold text-slate-900 dark:text-white">Notifications</div>
               <div className="text-xs text-slate-500 dark:text-slate-400">
-                {pending === 0 ? 'You\'re all caught up.' : `${pending} pending approval${pending === 1 ? '' : 's'}`}
+                {totalBadge === 0
+                  ? 'You\'re all caught up.'
+                  : `${pending} pending approval${pending === 1 ? '' : 's'}, ${unreadInbox} unread`}
               </div>
             </div>
+            {unreadInbox > 0 && (
+              <button
+                onClick={() => markAllInboxRead()}
+                className="text-[11px] font-semibold text-brand-600 dark:text-brand-400 hover:underline"
+              >
+                Mark all read
+              </button>
+            )}
           </div>
 
-          {recentPending.length === 0 ? (
+          {/* Pending approvals section */}
+          {recentPending.length > 0 && (
+            <>
+              <div className="px-4 pt-3 pb-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                Pending institution approvals
+              </div>
+              <div className="max-h-56 overflow-y-auto">
+                {recentPending.map((p) => (
+                  <PendingItem key={p.id} item={p} onClick={() => onView(`/institutions/${p.id}`)} />
+                ))}
+              </div>
+            </>
+          )}
+
+          {/* Inbox section — this is where the "Institution profile updated"
+              rows land once a mobile admin edits their academy profile. */}
+          {inbox.length > 0 && (
+            <>
+              <div className="px-4 pt-3 pb-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                Recent activity
+              </div>
+              <div className="max-h-64 overflow-y-auto">
+                {inbox.slice(0, 12).map((n) => (
+                  <InboxRow key={n.id} item={n} onClick={() => onInboxClick(n)} />
+                ))}
+              </div>
+            </>
+          )}
+
+          {recentPending.length === 0 && inbox.length === 0 && (
             <div className="px-4 py-8 text-center">
               <Building2 className="w-8 h-8 mx-auto text-slate-300 dark:text-slate-700 mb-2" />
-              <div className="text-sm text-slate-500 dark:text-slate-400">No new requests</div>
-            </div>
-          ) : (
-            <div className="max-h-80 overflow-y-auto">
-              {recentPending.map((p) => (
-                <PendingItem key={p.id} item={p} onClick={() => onView(`/institutions/${p.id}`)} />
-              ))}
+              <div className="text-sm text-slate-500 dark:text-slate-400">No new activity</div>
             </div>
           )}
 
@@ -185,6 +311,42 @@ function NotificationBell({
         </div>
       )}
     </div>
+  );
+}
+
+function InboxRow({ item, onClick }: { item: InboxItem; onClick: () => void }) {
+  const unread = !item.read_at;
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        'w-full text-left px-4 py-3 flex items-start gap-3 transition-colors border-b border-slate-100 dark:border-slate-800 last:border-b-0',
+        unread
+          ? 'bg-brand-50/60 dark:bg-brand-500/5 hover:bg-brand-50 dark:hover:bg-brand-500/10'
+          : 'hover:bg-slate-50 dark:hover:bg-slate-800',
+      )}
+    >
+      <div className={cn(
+        'w-2 h-2 rounded-full mt-2 shrink-0',
+        unread ? 'bg-rose-500' : 'bg-transparent',
+      )} />
+      <div className="flex-1 min-w-0">
+        <div className={cn(
+          'text-sm truncate',
+          unread ? 'font-semibold text-slate-900 dark:text-white' : 'text-slate-700 dark:text-slate-300',
+        )}>
+          {item.title}
+        </div>
+        {item.message ? (
+          <div className="text-xs text-slate-500 dark:text-slate-400 line-clamp-2 mt-0.5">
+            {item.message}
+          </div>
+        ) : null}
+        <div className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">
+          {timeAgo(item.created_at)}
+        </div>
+      </div>
+    </button>
   );
 }
 

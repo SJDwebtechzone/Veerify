@@ -6,7 +6,7 @@
 //   1. Header with institution selector + bell
 //   2. Banner carousel (CMS)
 //   3. Categories quick chips (CMS)
-//   4. Featured Programs (institution-scoped)
+//   4. Featured Courses (institution-scoped)
 //   5. Upcoming Live Classes
 //   6. Nearby Branches (link to picker)
 //   7. Continue Learning (paid users only — placeholder for now)
@@ -16,15 +16,15 @@
 // Guests can browse everything. Premium actions (Enroll, Join Live, full
 // course playback) will trigger login/subscription popups in a later step.
 
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, RefreshControl,
-  ActivityIndicator, StyleSheet, Dimensions, Image,
+  ActivityIndicator, StyleSheet, Dimensions, Image, Linking,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import {
   Bell, ChevronDown, MapPin, ChevronRight, Sparkles, Building2,
-  Calendar, PlayCircle, Lock, Radio, GraduationCap,
+  Calendar, PlayCircle, Lock, Radio, GraduationCap, Navigation2,
 } from 'lucide-react-native';
 
 import apiClient from '../../../api/client';
@@ -108,7 +108,7 @@ export default function HomeTabScreen({ navigation }) {
       // ── Global content (always loads, even without an institution) ──
       // mobile_events is currently a global table so we surface its rows
       // regardless of selection. Nearby academies is naturally guest-friendly.
-      const [bannersRes, catsRes, evtRes, nearbyRes] = await Promise.all([
+      const [bannersRes, catsRes, evtRes, nearbyRes, instBannersRes] = await Promise.all([
         apiClient.get('/cms/banners?active=true').catch(() => ({ data: { items: [] } })),
         apiClient.get('/cms/categories?active=true').catch(() => ({ data: { items: [] } })),
         // Events:
@@ -131,8 +131,26 @@ export default function HomeTabScreen({ navigation }) {
                 : { lat: nearbyOrigin.lat, lng: nearbyOrigin.lng, limit: 8 })
             : { limit: 8 },
         ).toString()).catch(() => ({ data: { results: [] } })),
+        // Institution-specific banners — only for logged-in students.
+        // Guests don't have an institution_id on their token yet, so we
+        // pass the currently-picked academy via ?institution_id=.
+        user
+          ? apiClient.get('/institution-banners/for-me').catch(() => ({ data: { banners: [] } }))
+          : selectedInstitution?.id
+            ? apiClient.get(`/institution-banners/for-me?institution_id=${selectedInstitution.id}`).catch(() => ({ data: { banners: [] } }))
+            : Promise.resolve({ data: { banners: [] } }),
       ]);
-      setBanners(bannersRes.data.items || []);
+      // Merge institution-specific banners in front of the global CMS
+      // banners so the academy's own promos lead the carousel.
+      const instBanners = (instBannersRes?.data?.banners || []).map((b) => ({
+        id:       `inst-${b.id}`,
+        image_url: b.image_url,
+        title:    b.title,
+        subtitle: b.subtitle,
+        cta:      null,
+        label:    null,
+      }));
+      setBanners([...instBanners, ...(bannersRes.data.items || [])]);
       setCategories(catsRes.data.items || []);
       setEvents(evtRes.data.events || []);
       // /academies/nearby returns { results: [{ id, name, kind,
@@ -180,7 +198,7 @@ export default function HomeTabScreen({ navigation }) {
 
   // We no longer block the entire Home tab when no institution is picked.
   // The user can still browse banners, categories and nearby academies; only
-  // the institution-scoped sections (Featured Programs, Events) hide themselves
+  // the institution-scoped sections (Featured Courses, Events) hide themselves
   // and a soft inline banner near the top nudges them to pick one.
   const noInstitution = !instLoading && !selectedInstitution;
 
@@ -240,17 +258,7 @@ export default function HomeTabScreen({ navigation }) {
 
         {/* ── Banner carousel ─────────────────────────────────── */}
         {banners.length > 0 && (
-          <ScrollView
-            horizontal
-            pagingEnabled
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={{ paddingHorizontal: spacing.xl, gap: spacing.md }}
-            style={{ marginBottom: spacing.lg }}
-          >
-            {banners.map((b) => (
-              <BannerCard key={b.id} banner={b} />
-            ))}
-          </ScrollView>
+          <BannerCarousel banners={banners} />
         )}
 
         {/* ── Categories ──────────────────────────────────────── */}
@@ -266,7 +274,9 @@ export default function HomeTabScreen({ navigation }) {
                   key={c.id}
                   category={c}
                   accent={cycleAccent(i)}
-                  onPress={() => navigation.navigate('Programs')}
+                  onPress={() =>
+                    navigation.navigate('CategoryAcademies', { category: c })
+                  }
                 />
               ))}
             </ScrollView>
@@ -293,10 +303,10 @@ export default function HomeTabScreen({ navigation }) {
           </TouchableOpacity>
         ) : null}
 
-        {/* ── Featured Programs (institution-scoped — hides when none picked) ── */}
+        {/* ── Featured Courses (institution-scoped — hides when none picked) ── */}
         {selectedInstitution?.id ? (
           <Section
-            title="Featured Programs"
+            title="Featured Courses"
             subtitle={selectedInstitution?.name}
             actionLabel="See all"
             onAction={() => {
@@ -393,19 +403,18 @@ export default function HomeTabScreen({ navigation }) {
           </Section>
         )}
 
-        {/* ── Subscription banner (non-paid only) ─────────────── */}
-        {!isPaid && (
+        {/* ── Subscription banner ─────────────────────────────
+            Hidden for guests entirely — the "Unlock premium" pitch
+            doesn't belong on the guest home; it's now reserved for
+            signed-in students who haven't subscribed yet. */}
+        {!isGuest && !isPaid && (
           <View style={{ paddingHorizontal: spacing.xl, marginTop: spacing.xl }}>
             <SubscriptionBanner
               onPress={() => {
-                if (isGuest) {
-                  navigation.getParent()?.navigate('Login');
-                } else {
-                  // Wired to plan selection / paywall in Phase 2
-                  navigation.navigate('Profile');
-                }
+                // Wired to plan selection / paywall in Phase 2
+                navigation.navigate('Profile');
               }}
-              isGuest={isGuest}
+              isGuest={false}
             />
           </View>
         )}
@@ -456,6 +465,57 @@ function Section({ title, subtitle, actionLabel, onAction, children }) {
   );
 }
 
+// BannerCarousel — auto-advances through CMS banner cards every few seconds.
+//
+// Behaviour:
+//   • Snaps page-by-page (pagingEnabled) so each banner fully fills the slot.
+//   • Every AUTO_MS the current index is bumped forward (with wrap-around)
+//     and scrollTo() animates to it.
+//   • If the user drags the carousel manually, onMomentumScrollEnd writes
+//     the new index back into our ref so the next auto-tick starts from
+//     where they stopped rather than yanking them back.
+//   • Single-banner case skips the timer entirely.
+//   • The interval is cleared on unmount so nothing fires on a stale ref.
+function BannerCarousel({ banners }) {
+  const scrollRef = useRef(null);
+  const indexRef  = useRef(0);
+  // Page step = card width + the gap between cards. Matches BannerCard's
+  // width formula so scrollTo() lands cleanly on each card.
+  const PAGE = (SCREEN_WIDTH - spacing.xl * 2) + spacing.md;
+  const AUTO_MS = 4000;
+
+  useEffect(() => {
+    if (!banners || banners.length < 2) return undefined;
+    const id = setInterval(() => {
+      const next = (indexRef.current + 1) % banners.length;
+      indexRef.current = next;
+      scrollRef.current?.scrollTo({ x: next * PAGE, animated: true });
+    }, AUTO_MS);
+    return () => clearInterval(id);
+  }, [banners, PAGE]);
+
+  const onMomentumScrollEnd = (e) => {
+    const x = e.nativeEvent.contentOffset.x;
+    indexRef.current = Math.round(x / PAGE);
+  };
+
+  return (
+    <ScrollView
+      ref={scrollRef}
+      horizontal
+      pagingEnabled
+      showsHorizontalScrollIndicator={false}
+      contentContainerStyle={{ paddingHorizontal: spacing.xl, gap: spacing.md }}
+      style={{ marginBottom: spacing.lg }}
+      onMomentumScrollEnd={onMomentumScrollEnd}
+    >
+      {banners.map((b) => (
+        <BannerCard key={b.id} banner={b} />
+      ))}
+    </ScrollView>
+  );
+}
+
 function BannerCard({ banner }) {
   const img = resolveAssetUrl(banner.image_url);
   return (
@@ -482,9 +542,25 @@ function BannerCard({ banner }) {
 }
 
 function CategoryChip({ category, accent, onPress }) {
+  // The web admin uploads a category image (mobile_categories.image_url) via
+  // POST /uploads and the backend stores the returned relative path. The
+  // /cms/categories endpoint hands that path back as `image_url`, which
+  // resolveAssetUrl expands to a full URL the mobile can render. Preference:
+  //   1. uploaded image
+  //   2. emoji if the row happens to carry one (future-proof)
+  //   3. default 🥋 fallback so the chip is never empty
+  const img = resolveAssetUrl(category.image_url);
   return (
     <TouchableOpacity onPress={onPress} activeOpacity={0.85} style={[styles.catChip, { backgroundColor: accent.soft }]}>
-      <Text style={{ fontSize: 18 }}>{category.emoji || '🥋'}</Text>
+      {img ? (
+        <Image
+          source={{ uri: img }}
+          style={styles.catImage}
+          resizeMode="cover"
+        />
+      ) : (
+        <Text style={{ fontSize: 18 }}>{category.emoji || '🥋'}</Text>
+      )}
       <Text style={[styles.catText, { color: accent.on }]}>{category.name}</Text>
     </TouchableOpacity>
   );
@@ -530,16 +606,40 @@ function ProgramCard({ program, accent, onPress }) {
 
 function NearbyAcademyRow({ academy, accent, onPress }) {
   const logo = resolveAssetUrl(academy.logo_url);
-  const isBranch = academy.kind === 'branch';
-  // For a branch row, the user-facing card title reads "Parent Academy
-  // · Branch Name", which is more useful than the bare branch name.
-  const titleLine = isBranch && academy.institution_name
+  // Three flavors coexist in results:
+  //   'institution' — main head office
+  //   'branch'      — institution_branches satellite location
+  //   'sub_branch'  — child institution with own admin login
+  const isSatellite = academy.kind === 'branch';
+  const isSubBranch = academy.kind === 'sub_branch';
+  const isBranchy   = isSatellite || isSubBranch;
+  // For both branch shapes, the card title reads "Parent Academy · Branch",
+  // which lets the student see who owns this pin at a glance.
+  const titleLine = isBranchy && academy.institution_name
     ? `${academy.institution_name} · ${academy.name}`
     : academy.name;
   // Backend returns seats_available: false when the parent institution
   // has hit its plan's max_students cap. We render the row dimmed and
   // show a red "No seats" pill so students know not to bother enrolling.
   const isFull = academy.seats_available === false;
+
+  // Directions — hand off to Google Maps if we have coords, otherwise
+  // to a text search. Doesn't require the Maps app to be installed;
+  // the OS resolves it.
+  const openDirections = () => {
+    if (academy.latitude != null && academy.longitude != null) {
+      Linking.openURL(
+        `https://www.google.com/maps/dir/?api=1&destination=${academy.latitude},${academy.longitude}`,
+      ).catch(() => {});
+    } else {
+      const q = encodeURIComponent(
+        [academy.name, academy.address, academy.city, academy.pincode]
+          .filter(Boolean).join(' '),
+      );
+      Linking.openURL(`https://www.google.com/maps/search/?api=1&query=${q}`).catch(() => {});
+    }
+  };
+
   return (
     <TouchableOpacity onPress={onPress} activeOpacity={0.85} style={styles.nearbyRow}>
       {logo ? (
@@ -552,13 +652,23 @@ function NearbyAcademyRow({ academy, accent, onPress }) {
       <View style={{ flex: 1 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
           <Text style={styles.nearbyName} numberOfLines={1}>{titleLine}</Text>
-          {isBranch ? (
+          {isSatellite ? (
             <View style={{
               paddingHorizontal: 6, paddingVertical: 1,
               borderRadius: 999, backgroundColor: '#FFE4E6',
             }}>
               <Text style={{ fontSize: 9, fontWeight: '800', color: '#E63946', letterSpacing: 0.4 }}>
                 BRANCH
+              </Text>
+            </View>
+          ) : null}
+          {isSubBranch ? (
+            <View style={{
+              paddingHorizontal: 6, paddingVertical: 1,
+              borderRadius: 999, backgroundColor: '#E0E7FF',
+            }}>
+              <Text style={{ fontSize: 9, fontWeight: '800', color: '#3730A3', letterSpacing: 0.4 }}>
+                SUB-BRANCH
               </Text>
             </View>
           ) : null}
@@ -576,11 +686,27 @@ function NearbyAcademyRow({ academy, accent, onPress }) {
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 }}>
           <MapPin size={12} color={palette.textMuted} strokeWidth={2.2} />
           <Text style={styles.nearbyMeta} numberOfLines={1}>
-            {academy.city || academy.pincode || 'India'}
+            {academy.address || academy.city || academy.pincode || 'India'}
             {Number.isFinite(Number(academy.distance_km)) ? ` • ${Number(academy.distance_km).toFixed(1)} km` : ''}
           </Text>
         </View>
       </View>
+      {/* Directions — jumps to Google Maps with the branch as the
+          destination so the student can navigate without extra taps.
+          Kept as a distinct touch target so tapping it doesn't open
+          the academy detail page. */}
+      <TouchableOpacity
+        onPress={(e) => { e.stopPropagation?.(); openDirections(); }}
+        hitSlop={8}
+        style={{
+          width: 32, height: 32, borderRadius: 16,
+          backgroundColor: '#EFF6FF',
+          alignItems: 'center', justifyContent: 'center',
+          marginRight: 6,
+        }}
+      >
+        <Navigation2 size={14} color="#2563EB" strokeWidth={2.4} />
+      </TouchableOpacity>
       <ChevronRight size={16} color={palette.textLight} strokeWidth={2} />
     </TouchableOpacity>
   );
@@ -588,6 +714,10 @@ function NearbyAcademyRow({ academy, accent, onPress }) {
 
 function EventRow({ event }) {
   const d = formatEventDate(event.event_date);
+  // Small pay hint on the right side of the row so a student sees the
+  // fee before tapping into the detail screen.
+  const showFee = event.payment_required && !event.has_paid;
+  const paid    = event.payment_required && event.has_paid;
   return (
     <View style={styles.eventCard}>
       <View style={styles.eventDate}>
@@ -603,6 +733,25 @@ function EventRow({ event }) {
           </View>
         ) : null}
       </View>
+      {showFee ? (
+        <View style={{
+          paddingHorizontal: 8, paddingVertical: 3,
+          borderRadius: 999, backgroundColor: '#10B98122',
+        }}>
+          <Text style={{ fontSize: 11, fontWeight: '800', color: '#10B981' }}>
+            ₹{Number(event.payment_amount || 0).toLocaleString('en-IN')}
+          </Text>
+        </View>
+      ) : paid ? (
+        <View style={{
+          paddingHorizontal: 8, paddingVertical: 3,
+          borderRadius: 999, backgroundColor: '#10B98122',
+        }}>
+          <Text style={{ fontSize: 10, fontWeight: '800', color: '#10B981', letterSpacing: 0.4 }}>
+            PAID
+          </Text>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -733,8 +882,16 @@ const styles = StyleSheet.create({
   // Category chip
   catChip: {
     flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
-    paddingHorizontal: spacing.md, paddingVertical: spacing.sm,
+    // Slightly less padding on the left when we're rendering an image
+    // — the image itself already carries visual weight; the pill sat
+    // too wide before.
+    paddingLeft: 6, paddingRight: spacing.md,
+    paddingVertical: 5,
     borderRadius: radius.pill,
+  },
+  catImage: {
+    width: 32, height: 32, borderRadius: 16,
+    backgroundColor: 'rgba(255,255,255,0.6)',   // shows through if the PNG has alpha
   },
   catText: { ...type.bodyBold, fontWeight: '700' },
 

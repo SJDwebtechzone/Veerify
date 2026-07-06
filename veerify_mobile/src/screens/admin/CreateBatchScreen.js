@@ -7,16 +7,83 @@
 // version — backend wiring is untouched per the user's instruction
 // ("first do UI and finally we will backend").
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView, Alert,
   ActivityIndicator, StyleSheet, StatusBar, Modal, FlatList, Platform,
 } from 'react-native';
 import {
   ArrowLeft, BookOpen, Users, Calendar, Clock,
-  IndianRupee, MapPin, ChevronDown, Check, X,
+  IndianRupee, MapPin, ChevronDown, Check, X, Building2, Search, AlertCircle,
 } from 'lucide-react-native';
 import apiClient from '../../api/client';
+import { confirm } from '../../components/ConfirmDialog';
+
+// ─── Trainer ↔ Course skill matching ───────────────────────────────────
+// A trainer is "eligible" for a course when at least one of their skills
+// (or their legacy specialization tokens) matches the course's category.
+// We normalise both sides — lowercase, trim, ignore punctuation — so
+// "Karate", " karate ", and "KARATE" all collapse to the same token.
+const normaliseSkillToken = (raw) =>
+  String(raw || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .join(' ');
+
+// Extract every skill token a trainer has, drawing from both the
+// structured `skills` JSONB array (new schema) and the legacy
+// `specialization` comma-separated string so older trainers still
+// resolve correctly.
+function trainerSkillTokens(trainer) {
+  const set = new Set();
+  const skillsArr = Array.isArray(trainer?.skills) ? trainer.skills : [];
+  skillsArr.forEach((s) => {
+    const t = normaliseSkillToken(s?.name);
+    if (t) set.add(t);
+  });
+  String(trainer?.specialization || '')
+    .split(',')
+    .forEach((raw) => {
+      const t = normaliseSkillToken(raw);
+      if (t) set.add(t);
+    });
+  return set;
+}
+
+// Course → the tokens we compare against. We use the course's `category`
+// first; if a course has no category, we fall back to matching by its
+// own name so the picker doesn't blank out entirely.
+function courseSkillTokens(course) {
+  const set = new Set();
+  const cat = normaliseSkillToken(course?.category);
+  if (cat) set.add(cat);
+  // Fall back to name tokens when there's no explicit category on the
+  // course. Splits on whitespace so multi-word course names still land.
+  if (!cat) {
+    normaliseSkillToken(course?.name)
+      .split(' ')
+      .forEach((tok) => tok && set.add(tok));
+  }
+  return set;
+}
+
+// Returns true when the trainer has at least one skill that matches
+// one of the course's tokens. Partial substring match (either way) is
+// allowed so "Karate" matches "Karate Beginner" and vice versa.
+function trainerMatchesCourse(trainer, course) {
+  if (!course) return true; // no course picked yet — show everyone
+  const tSkills = trainerSkillTokens(trainer);
+  const cTokens = courseSkillTokens(course);
+  if (tSkills.size === 0 || cTokens.size === 0) return false;
+  for (const c of cTokens) {
+    for (const t of tSkills) {
+      if (t === c || t.includes(c) || c.includes(t)) return true;
+    }
+  }
+  return false;
+}
 
 const BRAND       = '#E63946';
 const BRAND_SOFT  = '#FFE4E6';
@@ -108,34 +175,68 @@ function formatTime12(time24) {
 const HOURS_12 = Array.from({ length: 12 }, (_, i) => i + 1);
 const MINUTES_STEP = Array.from({ length: 12 }, (_, i) => i * 5); // 0,5,…,55
 
-export default function CreateBatchScreen({ navigation }) {
+export default function CreateBatchScreen({ navigation, route }) {
+  // Route may carry an existing batch when opened from the "Edit" action
+  // on BatchesListScreen. When present, we pre-fill the form and submit
+  // via PUT /batches/:id instead of POST /batches.
+  const editingBatch = route?.params?.batch || null;
+  const isEditing    = !!editingBatch;
+
   const [courses,  setCourses]  = useState([]);
   const [trainers, setTrainers] = useState([]);
   const [loadingLists, setLoadingLists] = useState(true);
+  // Search text for filtering the trainer picker (matches on name +
+  // skill labels). Empty string = no filter beyond the course match.
+  const [trainerSearch, setTrainerSearch] = useState('');
 
   const [form, setForm] = useState({
-    course_id:    null,
-    trainer_id:   null,
-    name:         '',
-    days_of_week: 'Mon,Wed,Fri',  // derived from `schedule` on submit
-    start_time:   '06:00',         // derived (earliest selected start)
-    end_time:     '07:00',         // derived (latest  selected end)
-    capacity:     '20',
-    mode:         'offline',
+    course_id:    editingBatch?.course_id ?? null,
+    trainer_id:   editingBatch?.trainer_id ?? null,
+    name:         editingBatch?.name ?? '',
+    days_of_week: editingBatch?.days_of_week || 'Mon,Wed,Fri',
+    start_time:   editingBatch?.start_time?.slice(0, 5) || '06:00',
+    end_time:     editingBatch?.end_time?.slice(0, 5)   || '07:00',
+    capacity:     String(editingBatch?.capacity ?? '20'),
+    mode:         editingBatch?.mode || 'offline',
+    // Branch scope: null = main institution (the default the dropdown
+    // starts on). Non-null = a sub-branch's institution_id.
+    branch_id:    editingBatch?.branch_id ?? null,
   });
+
+  // Populated from GET /branches — union of the main institution's
+  // sub-branches (institutions rows with parent_institution_id) and
+  // any satellite locations. Only sub-branches make sense as batch
+  // hosts, so we filter to branch_kind === 'sub_branch' before
+  // rendering the dropdown.
+  const [branches, setBranches] = useState([]);
+  const [mainInstitutionName, setMainInstitutionName] = useState('Main Institution');
+  const [isSubBranchAdmin, setIsSubBranchAdmin] = useState(false);
+  const [branchOpen, setBranchOpen] = useState(false);
 
   // Per-day schedule. Each weekday holds { enabled, start, end }. Only
   // enabled days are rolled into the legacy days_of_week / start_time /
-  // end_time fields when submitting. Defaults preserve the old behaviour
-  // (Mon + Wed + Fri at 06:00 – 07:00) so existing tests still work.
+  // end_time fields when submitting. When editing, we hydrate from the
+  // batch's `schedule` JSONB map if present, otherwise fall back to the
+  // legacy `days_of_week` + `start_time`/`end_time` triple.
   const [schedule, setSchedule] = useState(() => {
     const initial = {};
+    const activeDays = new Set(
+      (editingBatch?.days_of_week || 'Mon,Wed,Fri').split(',').map((d) => d.trim()),
+    );
+    const scheduleMap = editingBatch?.schedule && typeof editingBatch.schedule === 'object'
+      ? editingBatch.schedule
+      : null;
+    const fallbackStart = editingBatch?.start_time?.slice(0, 5) || '06:00';
+    const fallbackEnd   = editingBatch?.end_time?.slice(0, 5)   || '07:00';
     WEEKDAYS.forEach((d) => {
-      const preset = ['Mon', 'Wed', 'Fri'].includes(d.key);
+      const dayEntry = scheduleMap?.[d.key];
+      const preset = editingBatch
+        ? activeDays.has(d.key)
+        : ['Mon', 'Wed', 'Fri'].includes(d.key);
       initial[d.key] = {
         enabled: preset,
-        start: '06:00',
-        end:   '07:00',
+        start: dayEntry?.start || fallbackStart,
+        end:   dayEntry?.end   || fallbackEnd,
       };
     });
     return initial;
@@ -158,12 +259,53 @@ export default function CreateBatchScreen({ navigation }) {
   useEffect(() => {
     (async () => {
       try {
-        const [c, t] = await Promise.all([
+        // Four parallel fetches:
+        //   /courses          → the course picker
+        //   /trainers         → the trainer picker
+        //   /branches         → the Branch dropdown (union of sub-branches
+        //                       + satellite locations; we filter to
+        //                       sub-branches for batch scoping)
+        //   /me/details       → the main institution's own name for the
+        //                       "Main Institution" row label + to know
+        //                       whether the caller is a sub-branch admin.
+        const [c, t, b, me] = await Promise.all([
           apiClient.get('/courses'),
           apiClient.get('/trainers'),
+          apiClient.get('/branches').catch(() => ({ data: { branches: [] } })),
+          apiClient.get('/institutions/me/details').catch(() => ({ data: { institution: null } })),
         ]);
         setCourses(c?.data?.courses || []);
         setTrainers(t?.data?.trainers || []);
+
+        // Only sub-branch academies show up in the picker — satellite
+        // locations don't hold their own batches.
+        const subBranches = (b?.data?.branches || []).filter(
+          (row) => row.branch_kind === 'sub_branch',
+        );
+        setBranches(subBranches);
+
+        const inst = me?.data?.institution;
+        if (inst) {
+          const parentId = inst.parent_institution_id;
+          setIsSubBranchAdmin(!!parentId);
+          if (parentId) {
+            // Sub-branch admin — pin the form to their own branch id so
+            // the locked dropdown displays their branch's name, not
+            // "Main Institution", and the payload is correct on save.
+            // (Backend also force-normalises this — belt + braces.)
+            setForm((p) => ({ ...p, branch_id: inst.id }));
+            // Ensure this branch appears in the dropdown row list even
+            // though sub-branch admins can't change it — the picker
+            // needs to be able to look up the name.
+            setBranches((prev) =>
+              prev.some((r) => r.id === inst.id)
+                ? prev
+                : [{ id: inst.id, name: inst.name || 'This branch', branch_kind: 'sub_branch', city: inst.city }, ...prev],
+            );
+          } else {
+            setMainInstitutionName(inst.name || 'Main Institution');
+          }
+        }
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn('[CreateBatch] failed to load lists:', err?.message);
@@ -178,13 +320,58 @@ export default function CreateBatchScreen({ navigation }) {
   const selectedCourse  = courses.find((c) => c.id === form.course_id) || null;
   const selectedTrainer = trainers.find((t) => t.id === form.trainer_id) || null;
 
+  // Trainers eligible for the currently-selected course — only those
+  // whose skills / specialization match the course's category.
+  // Falls through to the full trainer list when no course is picked yet.
+  const eligibleTrainers = useMemo(() => {
+    if (!selectedCourse) return trainers;
+    return trainers.filter((t) => trainerMatchesCourse(t, selectedCourse));
+  }, [trainers, selectedCourse]);
+
+  // Then narrow down further by the search box — matches trainer name +
+  // any of their skill names (case-insensitive substring).
+  const filteredTrainers = useMemo(() => {
+    const q = normaliseSkillToken(trainerSearch);
+    if (!q) return eligibleTrainers;
+    return eligibleTrainers.filter((t) => {
+      const nameHit = normaliseSkillToken(t.name).includes(q);
+      if (nameHit) return true;
+      const skillNames = (Array.isArray(t.skills) ? t.skills : [])
+        .map((s) => normaliseSkillToken(s?.name))
+        .join(' ');
+      if (skillNames.includes(q)) return true;
+      const spec = normaliseSkillToken(t.specialization);
+      return spec.includes(q);
+    });
+  }, [eligibleTrainers, trainerSearch]);
+
+  // When the admin swaps to a course the currently-picked trainer no
+  // longer qualifies for, silently clear the trainer so we don't submit
+  // a mismatched pairing.
+  useEffect(() => {
+    if (!selectedTrainer || !selectedCourse) return;
+    if (!trainerMatchesCourse(selectedTrainer, selectedCourse)) {
+      update('trainer_id', null);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.course_id]);
+
+  // Styled dialog helper so every validation popup on this screen uses
+  // the same amber-warning card that the rest of the app does.
+  const showWarn = (title, message) => confirm({
+    title, message,
+    variant:     'warning',
+    confirmText: 'Got it',
+    hideCancel:  true,
+  });
+
   const submit = async () => {
     if (!form.course_id) {
-      Alert.alert('Required', 'Please pick a course.');
+      showWarn('Check this detail', 'Please pick a course.');
       return;
     }
     if (!form.name.trim()) {
-      Alert.alert('Required', 'Batch name is required.');
+      showWarn('Check this detail', 'Batch name is required.');
       return;
     }
 
@@ -196,7 +383,7 @@ export default function CreateBatchScreen({ navigation }) {
     // honour different times per day without another migration churn.
     const activeDays = WEEKDAYS.filter((d) => schedule[d.key]?.enabled);
     if (activeDays.length === 0) {
-      Alert.alert('Pick at least one day', 'Choose the days the batch runs and set their times.');
+      showWarn('Pick at least one day', 'Choose the days the batch runs and set their times.');
       return;
     }
 
@@ -208,7 +395,7 @@ export default function CreateBatchScreen({ navigation }) {
       if (Number.isNaN(a) || Number.isNaN(b) || b <= a) invalidDay = d;
     });
     if (invalidDay) {
-      Alert.alert(
+      showWarn(
         'Check the times',
         `${invalidDay.full} needs a valid start and end time (end must be after start, format HH:MM).`,
       );
@@ -231,19 +418,38 @@ export default function CreateBatchScreen({ navigation }) {
 
     setLoading(true);
     try {
-      await apiClient.post('/batches', {
+      const payload = {
         ...form,
         days_of_week: daysCsv,
         start_time:   fmt(startMin),
         end_time:     fmt(endMin),
         schedule:     scheduleByDay,
         capacity:     parseInt(form.capacity, 10) || 20,
+        // Branch scope — null means "at the main institution". The
+        // backend also accepts a truthy id whose parent_institution_id
+        // matches the caller's root; anything else is 403'd.
+        branch_id:    form.branch_id,
+      };
+      if (isEditing) {
+        await apiClient.put(`/batches/${editingBatch.id}`, payload);
+      } else {
+        await apiClient.post('/batches', payload);
+      }
+      confirm({
+        title:       isEditing ? 'Batch updated' : 'Batch created',
+        message:     isEditing
+          ? `${form.name.trim()} has been updated.`
+          : `${form.name.trim()} is ready. Students can now enrol into it.`,
+        variant:     'success',
+        confirmText: 'Done',
+        hideCancel:  true,
+        onConfirm:   () => navigation.goBack(),
       });
-      Alert.alert('Success', 'Batch created!', [
-        { text: 'OK', onPress: () => navigation.goBack() },
-      ]);
     } catch (err) {
-      Alert.alert('Error', err.response?.data?.message || 'Failed');
+      showWarn(
+        isEditing ? 'Could not update batch' : 'Could not create batch',
+        err.response?.data?.message || 'Something went wrong. Please try again.',
+      );
     } finally {
       setLoading(false);
     }
@@ -264,12 +470,45 @@ export default function CreateBatchScreen({ navigation }) {
           <ArrowLeft size={20} color={TEXT} strokeWidth={2.4} />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
-          <Text style={styles.headerTitle}>New Batch</Text>
-          <Text style={styles.headerSub}>Schedule a class under one of your courses</Text>
+          <Text style={styles.headerTitle}>{isEditing ? 'Edit Batch' : 'New Batch'}</Text>
+          <Text style={styles.headerSub}>
+            {isEditing
+              ? 'Update this batch’s course, trainer, or schedule'
+              : 'Schedule a class under one of your courses'}
+          </Text>
         </View>
       </View>
 
       <ScrollView contentContainerStyle={{ padding: 18, paddingBottom: 120 }}>
+        {/* ── Branch dropdown (mandatory) ─────────────────────────────
+            Main Institution is always the first row and the default
+            selection. Sub-branches follow. Locked for sub-branch admins
+            since they can only create batches at their own branch. */}
+        <Section title="Branch" icon={Building2}>
+          <Text style={styles.label}>Which branch is this batch at? *</Text>
+          <BranchDropdown
+            open={branchOpen}
+            onToggle={() => {
+              setBranchOpen((o) => !o);
+              setCourseOpen(false);
+              setTrainerOpen(false);
+            }}
+            disabled={loadingLists || isSubBranchAdmin}
+            selectedId={form.branch_id}
+            mainInstitutionName={mainInstitutionName}
+            branches={branches}
+            onSelect={(id) => {
+              update('branch_id', id);
+              setBranchOpen(false);
+            }}
+          />
+          {isSubBranchAdmin ? (
+            <Text style={styles.helperMuted}>
+              Batches created from your sub-branch login are pinned to your own branch.
+            </Text>
+          ) : null}
+        </Section>
+
         {/* ── Course dropdown (inline) ───────────────────────────────── */}
         <Section title="Course" icon={BookOpen}>
           <Text style={styles.label}>Pick a course *</Text>
@@ -305,8 +544,33 @@ export default function CreateBatchScreen({ navigation }) {
         </Section>
 
         {/* ── Trainer dropdown (inline, optional) ────────────────────── */}
+        {/*
+            Trainers are now filtered by the selected course's category —
+            only those whose skills / qualifications overlap with the
+            course's skill token show up. A search box narrows further
+            by trainer name or skill label. When nothing matches, we
+            surface a friendly "No eligible trainers found" empty state.
+        */}
         <Section title="Trainer" icon={Users}>
           <Text style={styles.label}>Assign a trainer (optional)</Text>
+          {selectedCourse ? (
+            <View style={styles.matchHint}>
+              <Users size={11} color={BRAND} strokeWidth={2.6} />
+              <Text style={styles.matchHintText}>
+                Showing trainers skilled in{' '}
+                <Text style={{ fontWeight: '800', color: BRAND }}>
+                  {selectedCourse.category || selectedCourse.name}
+                </Text>
+              </Text>
+            </View>
+          ) : (
+            <View style={styles.matchHint}>
+              <BookOpen size={11} color={TEXT_MUTED} strokeWidth={2.6} />
+              <Text style={[styles.matchHintText, { color: TEXT_MUTED }]}>
+                Pick a course first to filter trainers by matching skills.
+              </Text>
+            </View>
+          )}
           <InlineDropdown
             icon={Users}
             placeholder={
@@ -314,7 +578,9 @@ export default function CreateBatchScreen({ navigation }) {
                 ? 'Loading your trainers…'
                 : trainers.length === 0
                   ? 'No trainers yet — leave unassigned'
-                  : 'Select a trainer'
+                  : eligibleTrainers.length === 0
+                    ? 'No eligible trainers for this course'
+                    : 'Select a trainer'
             }
             value={selectedTrainer?.name || ''}
             cleared={form.trainer_id == null && !loadingLists}
@@ -325,7 +591,7 @@ export default function CreateBatchScreen({ navigation }) {
               setTrainerOpen((o) => !o);
               setCourseOpen(false);
             }}
-            items={trainers}
+            items={filteredTrainers}
             selectedId={form.trainer_id}
             leadingNone={{
               label: 'No trainer assigned',
@@ -338,6 +604,25 @@ export default function CreateBatchScreen({ navigation }) {
             onSelect={(item) => {
               update('trainer_id', item.id);
               setTrainerOpen(false);
+            }}
+            searchable
+            searchValue={trainerSearch}
+            onSearchChange={setTrainerSearch}
+            searchPlaceholder="Search by name or skill"
+            emptyText={
+              selectedCourse && eligibleTrainers.length === 0
+                ? 'No eligible trainers found for this course.'
+                : trainerSearch
+                  ? 'No trainers match this search.'
+                  : 'Nothing here yet.'
+            }
+            renderItemMeta={(item) => {
+              const skills = (Array.isArray(item.skills) ? item.skills : [])
+                .map((s) => s?.name).filter(Boolean);
+              const legacy = String(item.specialization || '')
+                .split(',').map((s) => s.trim()).filter(Boolean);
+              const labels = (skills.length ? skills : legacy).slice(0, 3);
+              return labels.length ? labels.join(' · ') : null;
             }}
           />
         </Section>
@@ -491,7 +776,9 @@ export default function CreateBatchScreen({ navigation }) {
           {loading ? (
             <ActivityIndicator color="#fff" />
           ) : (
-            <Text style={styles.submitBtnText}>Create Batch</Text>
+            <Text style={styles.submitBtnText}>
+              {isEditing ? 'Save changes' : 'Create Batch'}
+            </Text>
           )}
         </TouchableOpacity>
       </ScrollView>
@@ -673,8 +960,19 @@ function Section({ title, icon: Icon, children }) {
 function InlineDropdown({
   icon: Icon, placeholder, value, disabled, cleared, clearedLabel,
   open, onToggle, items, selectedId, onSelect, leadingNone,
+  // Search bar (optional) — shown inside the menu when `searchable` is
+  // set. Value + change handler are lifted so the parent owns the query
+  // and any filtered `items` derived from it.
+  searchable, searchValue, onSearchChange, searchPlaceholder,
+  // Custom empty state text — falls back to "Nothing here yet." for
+  // pickers that don't want the branded copy.
+  emptyText,
+  // Optional per-item meta text (rendered under the item's name in a
+  // dimmer font) — e.g. a trainer's skill chip summary.
+  renderItemMeta,
 }) {
   const hasValue = !!value;
+  const list = items || [];
   return (
     <View>
       <TouchableOpacity
@@ -708,6 +1006,29 @@ function InlineDropdown({
 
       {open ? (
         <View style={styles.inlineMenu}>
+          {searchable ? (
+            <View style={styles.searchWrap}>
+              <Search size={14} color={TEXT_MUTED} strokeWidth={2.4} />
+              <TextInput
+                style={styles.searchInput}
+                value={searchValue}
+                onChangeText={onSearchChange}
+                placeholder={searchPlaceholder || 'Search…'}
+                placeholderTextColor={TEXT_LIGHT}
+                autoCorrect={false}
+                autoCapitalize="none"
+              />
+              {searchValue ? (
+                <TouchableOpacity
+                  onPress={() => onSearchChange && onSearchChange('')}
+                  hitSlop={8}
+                  activeOpacity={0.7}
+                >
+                  <X size={13} color={TEXT_MUTED} strokeWidth={2.4} />
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          ) : null}
           {leadingNone ? (
             <TouchableOpacity
               style={[styles.inlineRow, leadingNone.selected && styles.inlineRowSelected]}
@@ -722,11 +1043,17 @@ function InlineDropdown({
               ) : null}
             </TouchableOpacity>
           ) : null}
-          {(items || []).length === 0 && !leadingNone ? (
-            <Text style={styles.inlineEmpty}>Nothing here yet.</Text>
+          {list.length === 0 ? (
+            <View style={styles.inlineEmptyWrap}>
+              <AlertCircle size={14} color={TEXT_MUTED} strokeWidth={2.4} />
+              <Text style={styles.inlineEmpty}>
+                {emptyText || 'Nothing here yet.'}
+              </Text>
+            </View>
           ) : null}
-          {(items || []).map((item) => {
+          {list.map((item) => {
             const sel = item.id === selectedId;
+            const meta = renderItemMeta ? renderItemMeta(item) : null;
             return (
               <TouchableOpacity
                 key={item.id}
@@ -734,9 +1061,16 @@ function InlineDropdown({
                 onPress={() => onSelect(item)}
                 activeOpacity={0.85}
               >
-                <Text style={styles.inlineRowText} numberOfLines={1}>
-                  {item.name}
-                </Text>
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={styles.inlineRowText} numberOfLines={1}>
+                    {item.name}
+                  </Text>
+                  {meta ? (
+                    <Text style={styles.inlineRowMeta} numberOfLines={1}>
+                      {meta}
+                    </Text>
+                  ) : null}
+                </View>
                 {sel ? <Check size={14} color={BRAND} strokeWidth={2.6} /> : null}
               </TouchableOpacity>
             );
@@ -845,6 +1179,81 @@ function PickerModal({
         </View>
       </View>
     </Modal>
+  );
+}
+
+// ─── Branch dropdown ───────────────────────────────────────────────────
+// Compact inline dropdown that always lists Main Institution as the
+// first row and every sub-branch after. Uses `null` for the main option
+// so the backend payload maps cleanly (branch_id: null = at main).
+function BranchDropdown({
+  open, onToggle, disabled,
+  selectedId, mainInstitutionName, branches, onSelect,
+}) {
+  const rows = [
+    { id: null, name: `${mainInstitutionName || 'Main Institution'}`, meta: 'Main Institution', isMain: true },
+    ...branches.map((b) => ({ id: b.id, name: b.name, meta: b.city || '', isMain: false })),
+  ];
+  const active = rows.find((r) => r.id === selectedId) || rows[0];
+  return (
+    <View style={styles.dropdownWrap}>
+      <TouchableOpacity
+        style={[styles.dropdownButton, disabled && { opacity: 0.6 }]}
+        onPress={onToggle}
+        disabled={disabled}
+        activeOpacity={0.85}
+      >
+        <View style={styles.dropdownIconWrap}>
+          <Building2 size={16} color={BRAND} strokeWidth={2.4} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.dropdownValue} numberOfLines={1}>{active.name}</Text>
+          {active.isMain ? (
+            <Text style={styles.dropdownMeta} numberOfLines={1}>Main Institution</Text>
+          ) : active.meta ? (
+            <Text style={styles.dropdownMeta} numberOfLines={1}>{active.meta}</Text>
+          ) : null}
+        </View>
+        <ChevronDown
+          size={16}
+          color={TEXT_MUTED}
+          strokeWidth={2.2}
+          style={{ transform: [{ rotate: open ? '180deg' : '0deg' }] }}
+        />
+      </TouchableOpacity>
+
+      {open ? (
+        <View style={styles.dropdownList}>
+          {rows.map((r, idx) => {
+            const selected = r.id === selectedId;
+            return (
+              <TouchableOpacity
+                key={String(r.id ?? 'main')}
+                style={[
+                  styles.dropdownRow,
+                  idx !== rows.length - 1 && styles.dropdownRowDivider,
+                  selected && { backgroundColor: BRAND_SOFT },
+                ]}
+                onPress={() => onSelect(r.id)}
+                activeOpacity={0.8}
+              >
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.dropdownRowTitle} numberOfLines={1}>{r.name}</Text>
+                  {r.isMain ? (
+                    <Text style={styles.dropdownRowSub}>Default — batch belongs to the main institution</Text>
+                  ) : r.meta ? (
+                    <Text style={styles.dropdownRowSub} numberOfLines={1}>{r.meta}</Text>
+                  ) : null}
+                </View>
+                {selected ? (
+                  <Check size={14} color={BRAND} strokeWidth={2.6} />
+                ) : null}
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      ) : null}
+    </View>
   );
 }
 
@@ -1130,18 +1539,77 @@ const styles = StyleSheet.create({
   },
   inlineRowSelected: { backgroundColor: BRAND_SOFT },
   inlineRowText: {
-    flex: 1,
     fontSize: 14,
     fontWeight: '700',
     color: TEXT,
   },
+  // Small dimmer meta line rendered under the trainer name — shows the
+  // trainer's skill labels so the admin can eyeball the match.
+  inlineRowMeta: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: TEXT_MUTED,
+    marginTop: 2,
+  },
   inlineEmpty: {
-    paddingHorizontal: 14,
-    paddingVertical: 16,
     fontSize: 12,
     color: TEXT_LIGHT,
     fontStyle: 'italic',
     textAlign: 'center',
+    flexShrink: 1,
+  },
+  // Container around the empty text so we can pair it with a soft icon
+  // for a friendlier "No eligible trainers found" state.
+  inlineEmptyWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 16,
+    backgroundColor: '#FAFAFB',
+  },
+
+  // Search bar at the top of the inline menu — used by the trainer
+  // picker so the admin can narrow the eligible list quickly.
+  searchWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: BORDER,
+    backgroundColor: '#FAFAFB',
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '600',
+    color: TEXT,
+    padding: 0,
+  },
+
+  // Little hint under the "Assign a trainer" label that tells the admin
+  // WHY the trainer list is filtered (skill match vs the picked course).
+  matchHint: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 4,
+    marginBottom: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: BRAND_SOFT + '99',
+    borderWidth: 1,
+    borderColor: BRAND_SOFT,
+  },
+  matchHintText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: TEXT,
+    flexShrink: 1,
   },
 
   warning: {
@@ -1224,4 +1692,40 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     paddingVertical: 40,
   },
+
+  // ── Branch dropdown ─────────────────────────────────────────────
+  helperMuted: {
+    fontSize: 11, color: TEXT_MUTED, marginTop: 6, fontWeight: '500',
+  },
+  dropdownWrap: { marginTop: 4 },
+  dropdownButton: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    backgroundColor: SURFACE,
+    borderRadius: 12,
+    borderWidth: 1, borderColor: BORDER,
+    paddingHorizontal: 12, paddingVertical: 10,
+  },
+  dropdownIconWrap: {
+    width: 30, height: 30, borderRadius: 8,
+    backgroundColor: BRAND_SOFT,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  dropdownValue: { fontSize: 14, fontWeight: '800', color: TEXT },
+  dropdownMeta: { fontSize: 11, color: TEXT_MUTED, marginTop: 2, fontWeight: '600' },
+  dropdownList: {
+    marginTop: 6,
+    backgroundColor: SURFACE,
+    borderRadius: 12,
+    borderWidth: 1, borderColor: BORDER,
+    overflow: 'hidden',
+  },
+  dropdownRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    paddingHorizontal: 14, paddingVertical: 11,
+  },
+  dropdownRowDivider: {
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: BORDER,
+  },
+  dropdownRowTitle: { fontSize: 13, fontWeight: '800', color: TEXT },
+  dropdownRowSub:   { fontSize: 11, color: TEXT_MUTED, marginTop: 2, fontWeight: '600' },
 });

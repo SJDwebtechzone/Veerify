@@ -10,6 +10,8 @@ import WelcomeScreen from '../screens/WelcomeScreen';
 import LoginScreen from '../screens/LoginScreen';
 import RegisterScreen from '../screens/RegisterScreen';
 import ForgotPasswordScreen from '../screens/ForgotPasswordScreen';
+import ChangePasswordScreen from '../screens/ChangePasswordScreen';
+import SendFeedbackScreen from '../screens/SendFeedbackScreen';
 import SelectInstitutionScreen from '../screens/SelectInstitutionScreen';
 
 // Admin — onboarding
@@ -42,11 +44,18 @@ import PendingAnnouncementDetailScreen from '../screens/PendingAnnouncementDetai
 import AdminTrainerLeavesScreen from '../screens/admin/AdminTrainerLeavesScreen';
 import AdminReferEarnScreen from '../screens/admin/AdminReferEarnScreen';
 import SettingsScreen from '../screens/admin/SettingsScreen';
+import InstitutionBrandingScreen from '../screens/admin/InstitutionBrandingScreen';
+import BranchesListScreen from '../screens/admin/BranchesListScreen';
+import CreateBranchScreen from '../screens/admin/CreateBranchScreen';
+import BranchDashboardScreen from '../screens/admin/BranchDashboardScreen';
+import UpdateLocationScreen from '../screens/admin/UpdateLocationScreen';
+import AcademyProfileScreen from '../screens/admin/AcademyProfileScreen';
 
 // Student
 import StudentTabNavigator from './StudentTabNavigator';
 import InstitutionDetailScreen from '../screens/student/InstitutionDetailScreen';
 import AllInstitutionsScreen from '../screens/student/AllInstitutionsScreen';
+import CategoryAcademiesScreen from '../screens/student/CategoryAcademiesScreen';
 import CourseDetailScreen from '../screens/student/CourseDetailScreen';
 import BatchDetailScreen from '../screens/student/BatchDetailScreen';
 import MyAttendanceScreen from '../screens/student/MyAttendanceScreen';
@@ -144,11 +153,19 @@ export default function AppNavigator() {
             options={{ headerShown: false }} />
           <Stack.Screen name="GuestHome" component={StudentTabNavigator} />
           <Stack.Screen name="SelectInstitution" component={SelectInstitutionScreen}
-            options={{ headerShown: true, title: 'Choose Academy' }} />
+            // No nav header at all — the screen body already has a big
+            // "Choose your academy" heading, and the user can use the
+            // Android hardware back button or iOS swipe-back gesture to
+            // return to the previous screen.
+            options={{ headerShown: false }} />
           <Stack.Screen name="InstitutionDetail" component={InstitutionDetailScreen}
             options={{ headerShown: true, title: '' }} />
           <Stack.Screen name="AllInstitutions" component={AllInstitutionsScreen}
             options={{ headerShown: true, title: 'All Academies' }} />
+          {/* CategoryAcademies — list of academies offering a specific
+              CMS category. Reached from the Home tab's Categories row. */}
+          <Stack.Screen name="CategoryAcademies" component={CategoryAcademiesScreen}
+            options={{ headerShown: false }} />
           <Stack.Screen name="CourseDetail" component={CourseDetailScreen}
             options={{ headerShown: true, title: '' }} />
           <Stack.Screen name="BatchDetail" component={BatchDetailScreen}
@@ -204,6 +221,22 @@ export default function AppNavigator() {
 
           {/* Dashboard screens — accessible only after active */}
           <Stack.Screen name="AdminDashboard" component={AdminTabNavigator} />
+          {/* Self-service password change. Auto-opened on first login
+              for sub-branch admins (users.must_change_password = TRUE),
+              also reachable from More → Account. headerShown=false
+              because the screen has its own header bar. */}
+          <Stack.Screen
+            name="ChangePassword"
+            component={ChangePasswordScreen}
+            options={{ headerShown: false }}
+          />
+          {/* SendFeedback — shared screen every role opens from their
+              More / Profile tab. Renders its own header. */}
+          <Stack.Screen
+            name="SendFeedback"
+            component={SendFeedbackScreen}
+            options={{ headerShown: false }}
+          />
           <Stack.Screen name="StudentDetail" component={StudentDetailScreen} />
           <Stack.Screen name="EditStudent" component={EditStudentScreen} options={{ headerShown: false }} />
           <Stack.Screen name="CoursesList" component={CoursesListScreen} />
@@ -214,13 +247,45 @@ export default function AppNavigator() {
           <Stack.Screen name="AdminCourseDetail" component={AdminCourseDetailScreen}
             options={{ headerShown: false }} />
           <Stack.Screen name="BatchesList" component={BatchesListScreen} />
+          {/* BranchesListScreen renders its own header + FAB. */}
+          <Stack.Screen name="BranchesList" component={BranchesListScreen}
+            options={{ headerShown: false }} />
+          {/* Branch Dashboard — read-only aggregated view of one
+              sub-branch (students / revenue / attendance). Reached by
+              tapping a sub-branch card on the BranchesList. */}
+          <Stack.Screen name="BranchDashboard" component={BranchDashboardScreen}
+            options={{ headerShown: false }} />
+          {/* CreateBranchScreen — add / edit a satellite branch. Renders
+              its own header, so the stack header stays hidden. */}
+          <Stack.Screen name="CreateBranch" component={CreateBranchScreen}
+            options={{ headerShown: false }} />
+          {/* UpdateLocationScreen — sub-branch admin updates their branch's
+              GPS coords + address. Renders its own header. */}
+          <Stack.Screen name="UpdateLocation" component={UpdateLocationScreen}
+            options={{ headerShown: false }} />
+          {/* AcademyProfileScreen — view + edit modes for the institution's
+              full profile. Opened by tapping the name/logo card in More. */}
+          <Stack.Screen name="AcademyProfile" component={AcademyProfileScreen}
+            options={{ headerShown: false }} />
           {/* Drill into a single batch from BatchesList — shows enrolled
               students, contact chips, payment status, and an Add Student
               FAB pre-bound to the batch. */}
           <Stack.Screen name="AdminBatchStudents" component={AdminBatchStudentsScreen}
             options={{ headerShown: false }} />
+          {/* Shared bulk-attendance marking screen. Same component the
+              trainer uses — the backend accepts admin role too (branch
+              admins mark for their own branch's batches), so we reuse
+              it here to avoid duplicating the roster + toggle grid. */}
+          {/* BatchStudentsScreen renders its own polished header + sticky
+              save bar, so we suppress the stack header to avoid two
+              stacked title bars. */}
+          <Stack.Screen name="BatchStudents" component={BatchStudentsScreen}
+            options={{ headerShown: false }} />
           <Stack.Screen name="CreateBatch" component={CreateBatchScreen}
-            options={{ headerShown: true, title: 'New Batch' }} />
+            // CreateBatchScreen renders its own in-page header (back arrow
+            // + "New Batch" + subtitle). Hiding the stack header so the
+            // title doesn't appear twice.
+            options={{ headerShown: false }} />
           {/* CreateEventScreen renders its own header. */}
           <Stack.Screen name="CreateEvent" component={CreateEventScreen}
             options={{ headerShown: false }} />
@@ -266,6 +331,13 @@ export default function AppNavigator() {
             component={SettingsScreen}
             options={{ headerShown: true, title: 'Marketplace Settings' }}
           />
+          {/* More → Branding → manage promo banners shown on the
+              student & trainer mobile dashboards. */}
+          <Stack.Screen
+            name="InstitutionBranding"
+            component={InstitutionBrandingScreen}
+            options={{ headerShown: false }}
+          />
           {/* Admin "Add Student" quick action opens the same enrollment
               form a student fills when buying a course. Both screens
               render their own headers so the native stack bar is hidden
@@ -285,12 +357,36 @@ export default function AppNavigator() {
       <NavigationContainer ref={navigationRef}>
         <Stack.Navigator screenOptions={{ headerShown: false }}>
           <Stack.Screen name="StudentTabs" component={StudentTabNavigator} />
+          {/* First-login password change flow — pops a styled dialog
+              after sign-in when users.must_change_password is true,
+              also reachable from the More/Profile tab "Change Password"
+              row. Same screen across every role's stack. */}
+          <Stack.Screen
+            name="ChangePassword"
+            component={ChangePasswordScreen}
+            options={{ headerShown: false }}
+          />
+          {/* SendFeedback — shared screen every role opens from their
+              More / Profile tab. Renders its own header. */}
+          <Stack.Screen
+            name="SendFeedback"
+            component={SendFeedbackScreen}
+            options={{ headerShown: false }}
+          />
           <Stack.Screen name="SelectInstitution" component={SelectInstitutionScreen}
-            options={{ headerShown: true, title: 'Choose Academy' }} />
+            // No nav header at all — the screen body already has a big
+            // "Choose your academy" heading, and the user can use the
+            // Android hardware back button or iOS swipe-back gesture to
+            // return to the previous screen.
+            options={{ headerShown: false }} />
           <Stack.Screen name="InstitutionDetail" component={InstitutionDetailScreen}
             options={{ headerShown: true, title: '' }} />
           <Stack.Screen name="AllInstitutions" component={AllInstitutionsScreen}
             options={{ headerShown: true, title: 'All Academies' }} />
+          {/* CategoryAcademies — list of academies offering a specific
+              CMS category. Reached from the Home tab's Categories row. */}
+          <Stack.Screen name="CategoryAcademies" component={CategoryAcademiesScreen}
+            options={{ headerShown: false }} />
           <Stack.Screen name="CourseDetail" component={CourseDetailScreen}
             options={{ headerShown: true, title: '' }} />
           <Stack.Screen name="BatchDetail" component={BatchDetailScreen}
@@ -352,6 +448,19 @@ export default function AppNavigator() {
               navigation.navigate('TrainerDashboard') continues to land on
               the tabbed shell. */}
           <Stack.Screen name="TrainerDashboard" component={StaffTabNavigator} />
+          {/* First-login password change — same flow as the admin stack. */}
+          <Stack.Screen
+            name="ChangePassword"
+            component={ChangePasswordScreen}
+            options={{ headerShown: false }}
+          />
+          {/* SendFeedback — shared screen every role opens from their
+              More / Profile tab. Renders its own header. */}
+          <Stack.Screen
+            name="SendFeedback"
+            component={SendFeedbackScreen}
+            options={{ headerShown: false }}
+          />
           {/* Shared event detail — trainers reach this by tapping an event
               card on their dashboard. */}
           <Stack.Screen name="EventDetail" component={EventDetailScreen}
@@ -387,8 +496,11 @@ export default function AppNavigator() {
             options={{ headerShown: false }} />
           <Stack.Screen name="CertificateDetail" component={CertificateDetailScreen}
             options={{ headerShown: false }} />
+          {/* BatchStudentsScreen renders its own polished header + sticky
+              save bar, so we suppress the stack header to avoid two
+              stacked title bars. */}
           <Stack.Screen name="BatchStudents" component={BatchStudentsScreen}
-            options={{ headerShown: true, title: 'Mark Attendance' }} />
+            options={{ headerShown: false }} />
           <Stack.Screen name="AttendanceHistory" component={AttendanceHistoryScreen}
             options={{ headerShown: true, title: 'History' }} />
         </Stack.Navigator>
@@ -409,6 +521,19 @@ export default function AppNavigator() {
           {/* Legacy route — keep so any direct navigate('ParentDashboard')
               still lands on the tabbed shell (which boots into Home). */}
           <Stack.Screen name="ParentDashboard" component={ParentTabNavigator} />
+          {/* First-login password change — same flow as every other role. */}
+          <Stack.Screen
+            name="ChangePassword"
+            component={ChangePasswordScreen}
+            options={{ headerShown: false }}
+          />
+          {/* SendFeedback — shared screen every role opens from their
+              More / Profile tab. Renders its own header. */}
+          <Stack.Screen
+            name="SendFeedback"
+            component={SendFeedbackScreen}
+            options={{ headerShown: false }}
+          />
           <Stack.Screen name="LinkedChildren" component={LinkedChildrenScreen} />
           <Stack.Screen name="LinkChild" component={LinkChildScreen}
             options={{ headerShown: true, title: 'Link Child' }} />

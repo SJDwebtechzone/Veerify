@@ -14,15 +14,20 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   Plus, Pencil, Star, Archive, ArchiveRestore, Sparkles, CheckCircle2,
   Building2, GraduationCap, UserCog, Layers, Crown, Tag, X,
-  Clock, Percent,
+  Clock, Percent, Image as ImageIcon, Upload,
 } from 'lucide-react';
-import { api } from '../../lib/api';
+import { api, uploadImage, resolveImageUrl } from '../../lib/api';
 import { Button } from '../../components/ui/Button';
 import { Badge } from '../../components/ui/Badge';
 import { Modal } from '../../components/ui/Modal';
 import { Input, Textarea, Toggle } from '../../components/ui/Input';
 import { formatCurrency, cn } from '../../lib/utils';
 
+interface PricingTerm {
+  billing_term: 'monthly' | 'quarterly' | 'half_yearly' | 'annual';
+  price:        number;
+  is_enabled:   boolean;
+}
 interface Plan {
   id: number;
   name: string;
@@ -40,12 +45,21 @@ interface Plan {
   discount_enabled?: boolean;
   discount_percent?: number | string;
   created_at?: string;
+  // Per-term pricing (migration 049). Falls back to the legacy singleton
+  // when the backend hasn't been redeployed yet.
+  pricing_terms?: PricingTerm[];
+  // Optional plan image (migration 051). Shown next to the plan name.
+  image_url?: string | null;
 }
+
+// One row per billing term. Prices are strings while editing (empty
+// input allowed) and coerced to numbers on save.
+type TermRow = { price: string; is_enabled: boolean };
 
 type Draft = {
   name: string;
-  price: string;
-  billing_cycle: string;
+  // Per-term pricing replaces the old single `price` + `billing_cycle` pair.
+  pricing: Record<'monthly' | 'quarterly' | 'half_yearly' | 'annual', TermRow>;
   max_branches: string;
   max_students: string;
   max_trainers: string;
@@ -56,12 +70,19 @@ type Draft = {
   grace_days: string;
   discount_enabled: boolean;
   discount_percent: string;
+  // Optional image (migration 051). '' means "no image"; a non-empty
+  // value is a server-returned path like '/uploads/plan-xyz.jpg'.
+  image_url: string;
 };
 
 const BLANK: Draft = {
   name: '',
-  price: '',
-  billing_cycle: 'monthly',
+  pricing: {
+    monthly:     { price: '', is_enabled: true  },
+    quarterly:   { price: '', is_enabled: false },
+    half_yearly: { price: '', is_enabled: false },
+    annual:      { price: '', is_enabled: false },
+  },
   max_branches: '1',
   max_students: '25',
   max_trainers: '2',
@@ -72,6 +93,7 @@ const BLANK: Draft = {
   grace_days: '3',
   discount_enabled: false,
   discount_percent: '',
+  image_url: '',
 };
 
 // Effective price after discount, in rupees.
@@ -87,7 +109,21 @@ const BILLING_CYCLES = [
   { key: 'monthly',     label: 'Monthly',      short: 'mo' },
   { key: 'quarterly',   label: 'Quarterly',    short: 'qtr' },
   { key: 'half_yearly', label: 'Half-Yearly',  short: '6mo' },
-  { key: 'yearly',      label: 'Yearly',       short: 'yr' },
+  { key: 'annual',      label: 'Annual',       short: 'yr' },
+];
+
+// Order matters — the Pricing section renders rows in this sequence.
+// Each entry maps directly to a plan_pricing.billing_term.
+const PRICING_TERMS: Array<{
+  key: 'monthly' | 'quarterly' | 'half_yearly' | 'annual';
+  label: string;
+  hint: string;
+  placeholder: string;
+}> = [
+  { key: 'monthly',     label: 'Monthly',      hint: 'Billed every month',       placeholder: '999'  },
+  { key: 'quarterly',   label: 'Quarterly',    hint: 'Billed every 3 months',    placeholder: '2499' },
+  { key: 'half_yearly', label: 'Half-Yearly',  hint: 'Billed every 6 months',    placeholder: '4499' },
+  { key: 'annual',      label: 'Annual',       hint: 'Billed once per year',     placeholder: '7999' },
 ];
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -199,10 +235,35 @@ export function Plans() {
 
   const openNew = () => { setDraft(BLANK); setEditing('new'); };
   const openEdit = (plan: Plan) => {
+    // Seed the per-term pricing from the plan's pricing_terms array.
+    // Any term the backend didn't return starts disabled with an empty
+    // price so the admin can fill it in.
+    const pricing: Draft['pricing'] = {
+      monthly:     { price: '', is_enabled: false },
+      quarterly:   { price: '', is_enabled: false },
+      half_yearly: { price: '', is_enabled: false },
+      annual:      { price: '', is_enabled: false },
+    };
+    (plan.pricing_terms || []).forEach((t) => {
+      if (pricing[t.billing_term]) {
+        pricing[t.billing_term] = {
+          price:      t.price != null ? String(t.price) : '',
+          is_enabled: !!t.is_enabled,
+        };
+      }
+    });
+    // Legacy fallback: if the plan has no pricing_terms yet (pre-049 backend
+    // still deployed) seed the current billing_cycle from the singleton pair.
+    if (!plan.pricing_terms || plan.pricing_terms.length === 0) {
+      const term = (plan.billing_cycle === 'yearly' ? 'annual' : plan.billing_cycle) as keyof Draft['pricing'];
+      if (pricing[term]) {
+        pricing[term] = { price: String(plan.price ?? ''), is_enabled: true };
+      }
+    }
+
     setDraft({
       name:          plan.name || '',
-      price:         String(plan.price ?? ''),
-      billing_cycle: plan.billing_cycle || 'monthly',
+      pricing,
       max_branches:  String(plan.max_branches ?? 1),
       max_students:  String(plan.max_students ?? 25),
       max_trainers:  String(plan.max_trainers ?? 2),
@@ -213,25 +274,50 @@ export function Plans() {
       grace_days:    String(plan.grace_days ?? 0),
       discount_enabled: !!plan.discount_enabled,
       discount_percent: plan.discount_percent != null ? String(plan.discount_percent) : '',
+      image_url:        plan.image_url || '',
     });
     setEditing(plan);
   };
   const closeModal = () => { setEditing(null); setSaving(false); };
 
   const save = async () => {
-    if (!draft.name.trim() || !draft.price.trim()) {
-      alert('Name and price are required.');
+    if (!draft.name.trim()) {
+      alert('Plan name is required.');
       return;
     }
+    // Build pricing_terms — only enabled rows with a valid price count as
+    // "priced". Reject if none are enabled (a plan must offer something).
+    const pricingTerms = (Object.keys(draft.pricing) as Array<keyof Draft['pricing']>).map((term) => ({
+      billing_term: term,
+      price:        parseFloat(draft.pricing[term].price || '0') || 0,
+      is_enabled:   !!draft.pricing[term].is_enabled,
+    }));
+    const anyEnabled = pricingTerms.some(
+      (t) => t.is_enabled && Number.isFinite(t.price) && t.price >= 0 && (draft.pricing[t.billing_term].price || '').trim() !== '',
+    );
+    if (!anyEnabled) {
+      alert('Enable at least one billing term and set its price.');
+      return;
+    }
+
     setSaving(true);
     try {
       const body = {
         name:          draft.name.trim(),
-        price:         parseFloat(draft.price),
-        billing_cycle: draft.billing_cycle,
-        max_branches:  parseInt(draft.max_branches, 10) || 1,
-        max_students:  parseInt(draft.max_students, 10) || 25,
-        max_trainers:  parseInt(draft.max_trainers, 10) || 2,
+        pricing_terms: pricingTerms,
+        // Preserve exactly what the admin typed. Previously we fell
+        // back to || 25 / || 2 when the field was empty, so a cleared
+        // limit silently reset to the schema seed values on the mobile
+        // "Choose your plan" screen. Now: if the field is blank we send
+        // null, which the mobile renders as "Unlimited"; otherwise we
+        // send the parsed integer (Math.max(1,…) so 0/negative is at
+        // least 1, matching the "at least a single row" guard).
+        max_branches:  draft.max_branches.trim() === '' ? null
+                        : Math.max(1, parseInt(draft.max_branches, 10) || 1),
+        max_students:  draft.max_students.trim() === '' ? null
+                        : Math.max(1, parseInt(draft.max_students, 10) || 1),
+        max_trainers:  draft.max_trainers.trim() === '' ? null
+                        : Math.max(1, parseInt(draft.max_trainers, 10) || 1),
         features:      draft.features.split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
         is_popular:    draft.is_popular,
         is_active:     draft.is_active,
@@ -241,6 +327,9 @@ export function Plans() {
         discount_percent: draft.discount_enabled
           ? Math.max(0, Math.min(100, parseFloat(draft.discount_percent) || 0))
           : 0,
+        // Empty string → null so the backend's present-check clears
+        // the column instead of storing "".
+        image_url: draft.image_url ? draft.image_url : null,
       };
       if (editing === 'new') await api.post('/plans', body);
       else if (editing)      await api.put(`/plans/${editing.id}`, body);
@@ -369,45 +458,101 @@ export function Plans() {
         }
       >
         <div className="space-y-6">
-          {/* Section: Basics */}
+          {/* Section: Basics — plan name + optional image. The image
+              renders next to the plan name in the plan list (web) and
+              on the mobile PlanSelection cards. Pricing got its own
+              section below so admins can price the plan across
+              multiple billing terms. */}
           <FormSection title="Basics" icon={Tag}>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <Input label="Plan name" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="Basic / Pro / Enterprise" />
-              <div>
-                <label className="block text-sm font-medium mb-1.5 text-slate-700 dark:text-slate-300">Price (₹)</label>
-                <div className="relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm">₹</span>
-                  <input
-                    type="number"
-                    min="0"
-                    step="any"
-                    value={draft.price}
-                    onChange={(e) => setDraft({ ...draft, price: e.target.value })}
-                    placeholder="2499"
-                    className="w-full pl-7 pr-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm focus:ring-2 focus:ring-brand-500 focus:border-transparent outline-none"
-                  />
-                </div>
-              </div>
+            <div className="grid grid-cols-1 sm:grid-cols-[96px,1fr] gap-4 items-start">
+              {/* Image upload */}
+              <PlanImageUploader
+                value={draft.image_url}
+                onChange={(next) => setDraft({ ...draft, image_url: next })}
+              />
+              {/* Plan name */}
+              <Input
+                label="Plan name"
+                value={draft.name}
+                onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                placeholder="Basic / Pro / Enterprise"
+              />
             </div>
-            <div className="mt-3">
-              <label className="block text-sm font-medium mb-1.5 text-slate-700 dark:text-slate-300">Billing cycle</label>
-              <div className="grid grid-cols-4 gap-2">
-                {BILLING_CYCLES.map((c) => (
-                  <button
-                    key={c.key}
-                    type="button"
-                    onClick={() => setDraft({ ...draft, billing_cycle: c.key })}
+          </FormSection>
+
+          {/* Section: Pricing — one row per billing term, each with an
+              enable toggle + price. Only enabled terms are surfaced on
+              the mobile plan-selection screen. */}
+          <FormSection title="Pricing" icon={Tag}>
+            <p className="text-xs text-slate-500 mb-3">
+              Turn on any billing terms this plan should offer and set the price. Mobile users will pick a term when they proceed to payment.
+            </p>
+            <div className="space-y-2">
+              {PRICING_TERMS.map((t) => {
+                const row = draft.pricing[t.key];
+                return (
+                  <div
+                    key={t.key}
                     className={cn(
-                      'px-3 py-2 rounded-lg border text-sm font-medium transition',
-                      draft.billing_cycle === c.key
-                        ? 'border-brand-500 bg-brand-50 dark:bg-brand-500/10 text-brand-700 dark:text-brand-400'
-                        : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:border-slate-300 dark:hover:border-slate-600',
+                      'grid grid-cols-12 items-center gap-3 px-3 py-2.5 rounded-lg border',
+                      row.is_enabled
+                        ? 'border-brand-300 bg-brand-50/40 dark:bg-brand-500/5'
+                        : 'border-slate-200 bg-slate-50/60 dark:border-slate-700 dark:bg-slate-800/40',
                     )}
                   >
-                    {c.label}
-                  </button>
-                ))}
-              </div>
+                    <div className="col-span-5">
+                      <div className="text-sm font-semibold text-slate-900 dark:text-white">{t.label}</div>
+                      <div className="text-[11px] text-slate-500">{t.hint}</div>
+                    </div>
+                    <div className="col-span-3">
+                      {/* Toggle */}
+                      <label className="inline-flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={row.is_enabled}
+                          onChange={(e) => setDraft({
+                            ...draft,
+                            pricing: {
+                              ...draft.pricing,
+                              [t.key]: { ...row, is_enabled: e.target.checked },
+                            },
+                          })}
+                          className="w-4 h-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+                        />
+                        <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                          {row.is_enabled ? 'Enabled' : 'Disabled'}
+                        </span>
+                      </label>
+                    </div>
+                    <div className="col-span-4">
+                      <div className="relative">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm">₹</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          value={row.price}
+                          onChange={(e) => setDraft({
+                            ...draft,
+                            pricing: {
+                              ...draft.pricing,
+                              [t.key]: { ...row, price: e.target.value },
+                            },
+                          })}
+                          placeholder={t.placeholder}
+                          disabled={!row.is_enabled}
+                          className={cn(
+                            'w-full pl-7 pr-3 py-2 rounded-md border text-sm outline-none',
+                            row.is_enabled
+                              ? 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 focus:ring-2 focus:ring-brand-500 focus:border-transparent'
+                              : 'border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800/50 text-slate-400',
+                          )}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </FormSection>
 
@@ -576,6 +721,120 @@ function SkeletonCard() {
   );
 }
 
+// ─────────────────────────────────────────────────────────────────
+// PlanImage — renders the plan's thumbnail with a soft-brand placeholder
+// fallback when no image is set. Used both in the form (as the upload
+// target thumbnail) and next to the plan name in the list card.
+// ─────────────────────────────────────────────────────────────────
+function PlanImage({
+  src, size = 40, className = '',
+}: {
+  src?: string | null;
+  size?: number;
+  className?: string;
+}) {
+  const url = src ? resolveImageUrl(src) : '';
+  return (
+    <div
+      className={cn(
+        'shrink-0 rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700',
+        'bg-brand-50 dark:bg-brand-500/10 grid place-items-center',
+        className,
+      )}
+      style={{ width: size, height: size }}
+    >
+      {url ? (
+        <img src={url} alt="" className="w-full h-full object-cover" />
+      ) : (
+        <ImageIcon className="w-1/2 h-1/2 text-brand-400/60" />
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// PlanImageUploader — used inside the edit modal. Click the tile to
+// pick a file; hovering when an image is present reveals a small
+// "Remove" chip so admins can clear it.
+// ─────────────────────────────────────────────────────────────────
+function PlanImageUploader({
+  value, onChange,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr]   = useState('');
+
+  const pickFile = async (file?: File) => {
+    if (!file) return;
+    setBusy(true);
+    setErr('');
+    try {
+      const url = await uploadImage(file);
+      onChange(url);
+    } catch {
+      setErr('Upload failed. Try a smaller image.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const previewUrl = value ? resolveImageUrl(value) : '';
+  return (
+    <div>
+      <label className="block text-sm font-medium mb-1.5 text-slate-700 dark:text-slate-300">
+        Image
+      </label>
+      <div className="relative group">
+        <label
+          htmlFor="plan-image-upload"
+          className={cn(
+            'flex items-center justify-center w-24 h-24 rounded-lg cursor-pointer border-2 border-dashed',
+            'transition-colors',
+            previewUrl
+              ? 'border-slate-200 dark:border-slate-700'
+              : 'border-slate-300 dark:border-slate-600 hover:border-brand-400 hover:bg-brand-50 dark:hover:bg-brand-500/5',
+            'overflow-hidden',
+          )}
+        >
+          {busy ? (
+            <div className="text-[10px] text-slate-500">Uploading…</div>
+          ) : previewUrl ? (
+            <img src={previewUrl} alt="Plan" className="w-full h-full object-cover" />
+          ) : (
+            <div className="text-center px-2">
+              <Upload className="w-4 h-4 mx-auto text-slate-400" />
+              <div className="text-[10px] text-slate-500 mt-1 leading-tight">
+                Click to upload
+              </div>
+            </div>
+          )}
+          <input
+            id="plan-image-upload"
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(e) => pickFile(e.target.files?.[0])}
+            disabled={busy}
+          />
+        </label>
+        {previewUrl && !busy ? (
+          <button
+            type="button"
+            onClick={(e) => { e.preventDefault(); onChange(''); }}
+            className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-rose-500 text-white grid place-items-center opacity-0 group-hover:opacity-100 transition-opacity"
+            title="Remove image"
+          >
+            <X className="w-3 h-3" />
+          </button>
+        ) : null}
+      </div>
+      {err ? <div className="text-[11px] text-rose-500 mt-1">{err}</div> : null}
+    </div>
+  );
+}
+
 function FormSection({ title, icon: Icon, children }: { title: string; icon: any; children: React.ReactNode }) {
   return (
     <div>
@@ -664,18 +923,23 @@ function PlanCard({
       )}
 
       <div className="p-6">
-        {/* Tier icon + name */}
-        <div className="flex items-center gap-2.5 mb-4">
-          <div className={cn('w-10 h-10 rounded-xl grid place-items-center', styles.iconBg)}>
-            <TierIcon className="w-5 h-5" />
-          </div>
-          <div>
-            <div className="text-xs uppercase tracking-wider font-semibold text-slate-500 dark:text-slate-400">
-              {tier === 'basic' ? 'Starter' : tier === 'premium' ? 'Premium' : 'Pro tier'}
+        {/* Title + pricing block on the left, plan image on the right so
+            it visually anchors the whole name+price area at the same
+            height. Placeholder tile renders when no image was uploaded. */}
+        <div className="flex items-start gap-3 mb-3">
+          <div className="min-w-0 flex-1">
+            {/* Tier icon + name */}
+            <div className="flex items-center gap-2.5 mb-4">
+              <div className={cn('w-10 h-10 rounded-xl grid place-items-center', styles.iconBg)}>
+                <TierIcon className="w-5 h-5" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-xs uppercase tracking-wider font-semibold text-slate-500 dark:text-slate-400">
+                  {tier === 'basic' ? 'Starter' : tier === 'premium' ? 'Premium' : 'Pro tier'}
+                </div>
+                <div className="text-base font-bold text-slate-900 dark:text-white leading-tight truncate">{plan.name}</div>
+              </div>
             </div>
-            <div className="text-base font-bold text-slate-900 dark:text-white leading-tight">{plan.name}</div>
-          </div>
-        </div>
 
         {/* Price */}
         <div className="mb-3">
@@ -718,6 +982,11 @@ function PlanCard({
               ) : null}
             </div>
           ) : null}
+        </div>
+          </div>
+          {/* Right-side plan image — 80px so it visually anchors both the
+              plan name and the big price line at the same height. */}
+          <PlanImage src={plan.image_url} size={80} />
         </div>
 
         {/* Limits row */}

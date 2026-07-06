@@ -24,7 +24,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView, Image,
   Alert, ActivityIndicator, StyleSheet, KeyboardAvoidingView, Platform,
-  BackHandler, PermissionsAndroid,
+  BackHandler, PermissionsAndroid, Modal,
 } from 'react-native';
 import {
   ArrowLeft, ChevronRight, ChevronLeft, ChevronDown, Check, Camera, FileText, Plus, Trash2,
@@ -530,14 +530,23 @@ export default function SetupInstitutionScreen({ navigation }) {
         /\.pdf$/i.test(name) ||
         (res.type || '').toLowerCase() === 'application/pdf';
       if (!looksLikePdf) {
-        Alert.alert('PDF only', 'Please pick a .pdf file for your certificate.');
+        confirm({
+          title:       'PDF only',
+          message:     'Please pick a .pdf file for your certificate.',
+          variant:     'warning',
+          confirmText: 'OK',
+          hideCancel:  true,
+        });
         return;
       }
       if (typeof res.size === 'number' && res.size > CERT_MAX_SIZE_BYTES) {
-        Alert.alert(
-          'File too large',
-          `Maximum allowed size is ${CERT_MAX_SIZE_MB} MB. Please pick a smaller PDF.`,
-        );
+        confirm({
+          title:       'File too large',
+          message:     `Maximum allowed size is ${CERT_MAX_SIZE_MB} MB. Please pick a smaller PDF.`,
+          variant:     'warning',
+          confirmText: 'OK',
+          hideCancel:  true,
+        });
         return;
       }
 
@@ -559,7 +568,13 @@ export default function SetupInstitutionScreen({ navigation }) {
         err?.message?.toLowerCase().includes('cancel');
       if (isCancel) return;
       console.warn('pickCertPdf error:', err);
-      Alert.alert('Pick failed', err?.message || 'Could not open the file picker.');
+      confirm({
+        title:       'Pick failed',
+        message:     err?.message || 'Could not open the file picker.',
+        variant:     'warning',
+        confirmText: 'OK',
+        hideCancel:  true,
+      });
     }
   };
 
@@ -622,7 +637,13 @@ export default function SetupInstitutionScreen({ navigation }) {
       }
     } catch (err) {
       console.error('Upload error:', err?.response?.data || err.message);
-      Alert.alert('Upload failed', 'Please try again with a smaller file.');
+      confirm({
+        title:       'Upload failed',
+        message:     'Please try again with a smaller file.',
+        variant:     'warning',
+        confirmText: 'OK',
+        hideCancel:  true,
+      });
       if (kind === 'logo') set('logo_uri', '');
     } finally {
       setUploading(false);
@@ -797,7 +818,15 @@ export default function SetupInstitutionScreen({ navigation }) {
 
     const err = validateStep(stepIdx);
     if (err) {
-      Alert.alert('Required', err);
+      // Styled confirm card — same palette as the rest of the app so
+      // the OS popup doesn't break the visual flow of the setup wizard.
+      confirm({
+        title:       'Check this detail',
+        message:     err,
+        variant:     'warning',
+        confirmText: 'Got it',
+        hideCancel:  true,
+      });
       return;
     }
     if (stepIdx < STEPS.length - 1) {
@@ -851,7 +880,13 @@ export default function SetupInstitutionScreen({ navigation }) {
       const err = validateStep(i);
       if (err) {
         setStepIdx(i);
-        Alert.alert('Required', err);
+        confirm({
+          title:       'Check this detail',
+          message:     err,
+          variant:     'warning',
+          confirmText: 'Got it',
+          hideCancel:  true,
+        });
         return;
       }
     }
@@ -987,6 +1022,12 @@ export default function SetupInstitutionScreen({ navigation }) {
     [stepIdx],
   );
 
+  // Close-handle for the Medium of Instruction dropdown in StepOperations.
+  // The dropdown binds its close fn into this ref via useEffect; the
+  // parent ScrollView fires it on scroll so the panel collapses as soon
+  // as the owner moves past it to the next field.
+  const mediumCloseRef = React.useRef(null);
+
   return (
     <KeyboardAvoidingView
       style={styles.screen}
@@ -1057,6 +1098,11 @@ export default function SetupInstitutionScreen({ navigation }) {
         contentContainerStyle={styles.body}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
+        // Close any open in-page dropdown the moment the user scrolls past
+        // it. Currently only the Medium of Instruction picker uses this;
+        // any future inline dropdown can register its close handle here too.
+        onScroll={() => { mediumCloseRef.current && mediumCloseRef.current(); }}
+        scrollEventThrottle={64}
       >
         {stepIdx === 0 && (
           <StepCore form={form} set={set} pickLogo={() => pickAndUpload('logo')} uploading={uploading} />
@@ -1080,7 +1126,12 @@ export default function SetupInstitutionScreen({ navigation }) {
           />
         )}
         {stepIdx === 3 && (
-          <StepOperations form={form} set={set} planInfo={planInfo} />
+          <StepOperations
+            form={form}
+            set={set}
+            planInfo={planInfo}
+            mediumCloseRef={mediumCloseRef}
+          />
         )}
         {stepIdx === 4 && (
           <StepMaster form={form} set={set} />
@@ -1525,7 +1576,7 @@ function StepAccreditation({ form, set, pickCert, uploading }) {
 }
 
 // ─── Step 4: Operations ─────────────────────────────────────────────────
-function StepOperations({ form, set, planInfo }) {
+function StepOperations({ form, set, planInfo, mediumCloseRef }) {
   const toggleMedium = (m) => {
     const cur = new Set(form.medium_of_instruction);
     if (cur.has(m)) cur.delete(m);
@@ -1631,6 +1682,7 @@ function StepOperations({ form, set, planInfo }) {
           options={MEDIUMS}
           values={form.medium_of_instruction}
           onToggle={toggleMedium}
+          closeRef={mediumCloseRef}
         />
       </Field>
 
@@ -1909,8 +1961,21 @@ function SkillsMultiSelect({ values, onToggle, options, other, onOtherChange }) 
 // the academy teaches in. Closed: trigger row shows the summary; open:
 // inline panel lists every language with a Check tick on the picked ones.
 // Stays open while toggling so the owner can quickly pick more than one.
-function MediumDropdown({ options, values, onToggle }) {
+//
+// closeRef (optional) — the parent passes a ref whose `.current` we set to
+// a close function. When the parent's ScrollView scrolls, it calls
+// closeRef.current?.() to dismiss the panel so the next field underneath
+// becomes the focus.
+function MediumDropdown({ options, values, onToggle, closeRef }) {
   const [open, setOpen] = React.useState(false);
+
+  // Bind the imperative close-handle to the parent's ref. The empty cleanup
+  // clears it on unmount so a stale ref doesn't fire after the component
+  // is gone.
+  React.useEffect(() => {
+    if (closeRef) closeRef.current = () => setOpen(false);
+    return () => { if (closeRef) closeRef.current = null; };
+  }, [closeRef]);
   const selected = Array.isArray(values) ? values : [];
   const summary = selected.length === 0
     ? 'Select language(s)…'
@@ -2079,14 +2144,23 @@ function LocationCaptureCard({ form, set }) {
           },
         );
         if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
-          Alert.alert(
-            'Permission denied',
-            'Please grant location permission in Settings, then try again.',
-          );
+          confirm({
+            title:       'Permission denied',
+            message:     'Please grant location permission in Settings, then try again.',
+            variant:     'warning',
+            confirmText: 'OK',
+            hideCancel:  true,
+          });
           return;
         }
       } catch (e) {
-        Alert.alert('Permission error', e?.message || 'Could not request permission.');
+        confirm({
+          title:       'Permission error',
+          message:     e?.message || 'Could not request permission.',
+          variant:     'warning',
+          confirmText: 'OK',
+          hideCancel:  true,
+        });
         return;
       }
     } else if (typeof Geolocation.requestAuthorization === 'function') {
@@ -2103,7 +2177,13 @@ function LocationCaptureCard({ form, set }) {
             set('longitude', String(c.longitude));
             set('location_accuracy_m', c.accuracy != null ? String(Math.round(c.accuracy)) : '');
           } else {
-            Alert.alert('No location returned', 'The device didn\'t return a valid position. Try again outside or near a window.');
+            confirm({
+              title:       'No location returned',
+              message:     "The device didn't return a valid position. Try again outside or near a window.",
+              variant:     'warning',
+              confirmText: 'OK',
+              hideCancel:  true,
+            });
           }
           setBusy(false);
         },
@@ -2111,12 +2191,21 @@ function LocationCaptureCard({ form, set }) {
           setBusy(false);
           const msg = err?.message || 'Could not read GPS.';
           if (err?.code === 1) {
-            Alert.alert(
-              'Permission denied',
-              'Please grant location permission in Settings, then try again.',
-            );
+            confirm({
+              title:       'Permission denied',
+              message:     'Please grant location permission in Settings, then try again.',
+              variant:     'warning',
+              confirmText: 'OK',
+              hideCancel:  true,
+            });
           } else {
-            Alert.alert('Location error', msg);
+            confirm({
+              title:       'Location error',
+              message:     msg,
+              variant:     'warning',
+              confirmText: 'OK',
+              hideCancel:  true,
+            });
           }
         },
         {
@@ -2127,7 +2216,13 @@ function LocationCaptureCard({ form, set }) {
       );
     } catch (e) {
       setBusy(false);
-      Alert.alert('Location error', e?.message || 'Unexpected error.');
+      confirm({
+        title:       'Location error',
+        message:     e?.message || 'Unexpected error.',
+        variant:     'warning',
+        confirmText: 'OK',
+        hideCancel:  true,
+      });
     }
   };
 
@@ -2602,55 +2697,73 @@ function TimeField({ value, onChange, placeholder = 'Select time' }) {
         </Text>
       </TouchableOpacity>
 
-      {open ? (
-        <View style={styles.wheelCard}>
-          <View style={styles.wheelHeaderRow}>
-            <View style={styles.wheelCol}>
-              <Text style={styles.wheelHeaderText}>Hour</Text>
+      {/* The wheel picker now lives in a centered Modal instead of
+          rendering inline. The previous inline dropdown was getting
+          rendered inside the From column of the row, which made the
+          To column's "End" trigger overlap the Done button. A Modal
+          escapes the row layout entirely and floats above everything. */}
+      <Modal
+        visible={open}
+        transparent
+        animationType="fade"
+        statusBarTranslucent
+        onRequestClose={() => setOpen(false)}
+      >
+        <View style={styles.wheelModalBackdrop}>
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => setOpen(false)}
+          />
+          <View style={styles.wheelModalCard}>
+            <View style={styles.wheelHeaderRow}>
+              <View style={styles.wheelCol}>
+                <Text style={styles.wheelHeaderText}>Hour</Text>
+              </View>
+              <View style={styles.wheelCol}>
+                <Text style={styles.wheelHeaderText}>Min</Text>
+              </View>
+              <View style={styles.wheelCol}>
+                <Text style={styles.wheelHeaderText}>AM/PM</Text>
+              </View>
             </View>
-            <View style={styles.wheelCol}>
-              <Text style={styles.wheelHeaderText}>Min</Text>
-            </View>
-            <View style={styles.wheelCol}>
-              <Text style={styles.wheelHeaderText}>AM/PM</Text>
-            </View>
-          </View>
 
-          <View style={styles.wheelRow}>
-            <View pointerEvents="none" style={styles.wheelHighlight} />
-            <WheelColumn
-              items={HOUR_OPTIONS}
-              selectedIndex={hourIdx}
-              onIndexChange={setHourIdx}
-            />
-            <WheelColumn
-              items={MINUTE_OPTIONS}
-              selectedIndex={minIdx}
-              onIndexChange={setMinIdx}
-              formatter={(n) => pad2(n)}
-            />
-            <WheelColumn
-              items={AMPM_OPTIONS}
-              selectedIndex={ampmIdx}
-              onIndexChange={setAmPmIdx}
-            />
-          </View>
+            <View style={styles.wheelRow}>
+              <View pointerEvents="none" style={styles.wheelHighlight} />
+              <WheelColumn
+                items={HOUR_OPTIONS}
+                selectedIndex={hourIdx}
+                onIndexChange={setHourIdx}
+              />
+              <WheelColumn
+                items={MINUTE_OPTIONS}
+                selectedIndex={minIdx}
+                onIndexChange={setMinIdx}
+                formatter={(n) => pad2(n)}
+              />
+              <WheelColumn
+                items={AMPM_OPTIONS}
+                selectedIndex={ampmIdx}
+                onIndexChange={setAmPmIdx}
+              />
+            </View>
 
-          <View style={styles.wheelFooter}>
-            <View style={{ flex: 1 }} />
-            <TouchableOpacity onPress={() => setOpen(false)} activeOpacity={0.7}>
-              <Text style={styles.wheelFooterTextSecondary}>Cancel</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              onPress={confirm}
-              style={styles.wheelDoneBtn}
-              activeOpacity={0.85}
-            >
-              <Text style={styles.wheelDoneText}>Done</Text>
-            </TouchableOpacity>
+            <View style={styles.wheelFooter}>
+              <View style={{ flex: 1 }} />
+              <TouchableOpacity onPress={() => setOpen(false)} activeOpacity={0.7}>
+                <Text style={styles.wheelFooterTextSecondary}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={confirm}
+                style={styles.wheelDoneBtn}
+                activeOpacity={0.85}
+              >
+                <Text style={styles.wheelDoneText}>Done</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
-      ) : null}
+      </Modal>
     </View>
   );
 }
@@ -3111,6 +3224,37 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingBottom: 8,
   },
+
+  // Centered-modal host for the wheel picker. Replaces the inline
+  // dropdown that used to render inside the From column of the slot
+  // row and overlap the To column.
+  wheelModalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(15,23,42,0.55)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+  },
+  wheelModalCard: {
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: SURFACE,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: BORDER,
+    paddingTop: 14,
+    paddingHorizontal: 12,
+    paddingBottom: 10,
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOpacity: 0.22,
+        shadowRadius: 22,
+        shadowOffset: { width: 0, height: 14 },
+      },
+      android: { elevation: 14 },
+    }),
+  },
   wheelHeaderRow: {
     flexDirection: 'row',
     paddingBottom: 6,
@@ -3529,5 +3673,53 @@ const styles = StyleSheet.create({
   btnGhostText: { fontSize: 14, fontWeight: '700', color: TEXT_MUTED },
   btnPrimary: { backgroundColor: BRAND, flex: 1.6 },
   btnPrimaryText: { fontSize: 14, fontWeight: '800', color: '#fff' },
+
+  // ── LocationCaptureCard styles ─────────────────────────────────────
+  // Were referenced inside LocationCaptureCard but never declared, so
+  // the "Use my current location" button rendered with no padding /
+  // background and was barely tappable. Adding them gives the button a
+  // proper red pill shape and the captured-location chip a green card.
+  locCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    padding: 10,
+    borderRadius: 12,
+    backgroundColor: '#ECFDF5',
+    borderWidth: 1,
+    borderColor: '#A7F3D0',
+    marginBottom: 10,
+  },
+  locIconWrap: {
+    width: 30, height: 30, borderRadius: 15,
+    backgroundColor: '#fff',
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: '#A7F3D0',
+  },
+  locTitle: { fontSize: 13, fontWeight: '800', color: '#065F46' },
+  locDetail: { fontSize: 11, fontWeight: '600', color: '#047857', marginTop: 1 },
+  locClearBtn: {
+    width: 28, height: 28, borderRadius: 14,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: '#fff',
+    borderWidth: 1, borderColor: '#A7F3D0',
+  },
+  locBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    backgroundColor: BRAND,
+    minHeight: 46,
+  },
+  locBtnText: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#fff',
+    letterSpacing: 0.2,
+  },
 });
 

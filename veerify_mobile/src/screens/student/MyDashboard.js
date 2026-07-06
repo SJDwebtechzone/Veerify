@@ -19,13 +19,14 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, Image, ActivityIndicator,
-  StyleSheet, RefreshControl, Linking, Dimensions,
+  StyleSheet, RefreshControl, Linking, Dimensions, Modal, TextInput,
+  KeyboardAvoidingView, Platform, Alert,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import {
   Bell, BookOpen, PlayCircle, Calendar, Clock, GraduationCap, Award,
   ChevronRight, Wallet, CheckCircle2, Video, Building2, User,
-  CalendarDays, Target,
+  CalendarDays, Target, Star, MessageSquare, X as XIcon,
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
@@ -86,6 +87,10 @@ export default function MyDashboard({ navigation }) {
   // wants the dashboard to surface what the student has finished, not
   // the open todo list.
   const [progressByCourse, setProgressByCourse] = useState({});
+
+  // Inline feedback modal — when set, opens StudentFeedbackModal with the
+  // current rating / remarks pre-filled. Cleared on save / cancel.
+  const [feedbackTarget, setFeedbackTarget] = useState(null);
   // Upcoming institution events — published by the academy admin via
   // /institutions/me/events. Same source the trainer dashboard uses.
   const [events, setEvents] = useState([]);
@@ -275,6 +280,14 @@ export default function MyDashboard({ navigation }) {
                     key={`prog-${enrollment.id}`}
                     enrollment={enrollment}
                     progress={progress}
+                    onRate={(lesson) => setFeedbackTarget({
+                      courseId:    enrollment.course_id,
+                      courseName:  enrollment.course_name,
+                      lessonIndex: lesson.idx,
+                      lessonTitle: lesson.title || `Lesson ${lesson.idx + 1}`,
+                      rating:      lesson.student_rating || 0,
+                      remarks:     lesson.student_remarks || '',
+                    })}
                     onPress={() => navigation.navigate('EnrolledCourse', { enrollmentId: enrollment.id })}
                   />
                 ))}
@@ -330,6 +343,16 @@ export default function MyDashboard({ navigation }) {
           </ScrollView>
         )}
       </ScrollView>
+
+      {/* Student feedback (rating + remarks) modal. Renders only when a
+          lesson has been tapped from the Course Progress card. */}
+      {feedbackTarget ? (
+        <StudentFeedbackModal
+          target={feedbackTarget}
+          onClose={() => setFeedbackTarget(null)}
+          onSaved={() => { setFeedbackTarget(null); load(); }}
+        />
+      ) : null}
     </View>
   );
 }
@@ -390,6 +413,27 @@ function EventRow({ event, onPress }) {
           </Text>
         ) : null}
       </View>
+      {/* Fee / Paid chip — mirrors HomeTab + staff dashboard so a
+          student sees pay status at a glance without opening detail. */}
+      {event.payment_required && !event.has_paid ? (
+        <View style={{
+          paddingHorizontal: 8, paddingVertical: 3,
+          borderRadius: 999, backgroundColor: '#10B98122',
+        }}>
+          <Text style={{ fontSize: 11, fontWeight: '800', color: '#10B981' }}>
+            ₹{Number(event.payment_amount || 0).toLocaleString('en-IN')}
+          </Text>
+        </View>
+      ) : event.payment_required && event.has_paid ? (
+        <View style={{
+          paddingHorizontal: 8, paddingVertical: 3,
+          borderRadius: 999, backgroundColor: '#10B98122',
+        }}>
+          <Text style={{ fontSize: 10, fontWeight: '800', color: '#10B981', letterSpacing: 0.4 }}>
+            PAID
+          </Text>
+        </View>
+      ) : null}
     </TouchableOpacity>
   );
 }
@@ -474,7 +518,7 @@ function CourseCard({ enrollment, onPress }) {
 // Compact card listing only the lessons the trainer has ticked off for
 // this student in this course. Shows a percentage ring + the dated
 // list. Tapping opens the EnrolledCourseScreen for full course detail.
-function CourseProgressCard({ enrollment, progress, onPress }) {
+function CourseProgressCard({ enrollment, progress, onPress, onRate }) {
   const total = progress.lessons.length;
   const done  = progress.completed.length;
   const pct   = total > 0 ? Math.round((done / total) * 100) : 0;
@@ -523,17 +567,59 @@ function CourseProgressCard({ enrollment, progress, onPress }) {
           .sort((a, b) => String(b.completed_at).localeCompare(String(a.completed_at)))
           .slice(0, 5)
           .map((lesson) => (
-            <View key={`lesson-${lesson.idx}`} style={styles.progressItem}>
-              <View style={styles.progressCheck}>
-                <CheckCircle2 size={12} color={GREEN} strokeWidth={2.6} />
+            <View key={`lesson-${lesson.idx}`} style={styles.progressLessonWrap}>
+              <View style={styles.progressItem}>
+                <View style={styles.progressCheck}>
+                  <CheckCircle2 size={12} color={GREEN} strokeWidth={2.6} />
+                </View>
+                <Text style={styles.progressItemTitle} numberOfLines={1}>
+                  {lesson.title || `Lesson ${lesson.idx + 1}`}
+                </Text>
+                <View style={styles.progressDateChip}>
+                  <CalendarDays size={9} color={TEXT_MUTED} strokeWidth={2.4} />
+                  <Text style={styles.progressDateText}>{fmt(lesson.completed_at)}</Text>
+                </View>
               </View>
-              <Text style={styles.progressItemTitle} numberOfLines={1}>
-                {lesson.title || `Lesson ${lesson.idx + 1}`}
-              </Text>
-              <View style={styles.progressDateChip}>
-                <CalendarDays size={9} color={TEXT_MUTED} strokeWidth={2.4} />
-                <Text style={styles.progressDateText}>{fmt(lesson.completed_at)}</Text>
-              </View>
+
+              {/* Student rating + remarks summary — shown when the student
+                  has already submitted feedback. The whole row is tappable
+                  to update it. */}
+              {(lesson.student_rating || lesson.student_remarks) ? (
+                <TouchableOpacity
+                  style={styles.feedbackSummary}
+                  onPress={() => onRate && onRate(lesson)}
+                  activeOpacity={0.85}
+                >
+                  <View style={styles.feedbackStarsRow}>
+                    {[1, 2, 3, 4, 5].map((n) => (
+                      <Star
+                        key={n}
+                        size={11}
+                        color={n <= (lesson.student_rating || 0) ? '#F59E0B' : '#E5E7EB'}
+                        fill={n <= (lesson.student_rating || 0) ? '#F59E0B' : 'transparent'}
+                        strokeWidth={2.2}
+                      />
+                    ))}
+                    <Text style={styles.feedbackUpdatedText}>
+                      · Updated {fmt(lesson.student_remarked_at)}
+                    </Text>
+                  </View>
+                  {lesson.student_remarks ? (
+                    <Text style={styles.feedbackRemarkText} numberOfLines={2}>
+                      “{lesson.student_remarks}”
+                    </Text>
+                  ) : null}
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity
+                  style={styles.feedbackCta}
+                  onPress={() => onRate && onRate(lesson)}
+                  activeOpacity={0.85}
+                >
+                  <Star size={11} color={BRAND} strokeWidth={2.4} />
+                  <Text style={styles.feedbackCtaText}>Rate &amp; add remarks</Text>
+                </TouchableOpacity>
+              )}
             </View>
           ))}
         {progress.completed.length > 5 ? (
@@ -579,6 +665,127 @@ function VideoCard({ video, onPress }) {
         <Text style={styles.videoCourse} numberOfLines={1}>{video.course_name}</Text>
       </View>
     </TouchableOpacity>
+  );
+}
+
+// StudentFeedbackModal — bottom-sheet style overlay with a 5-star picker
+// and a free-text remarks input. Posts to POST /api/curriculum-progress/
+// feedback and calls onSaved on success so the parent can refetch.
+function StudentFeedbackModal({ target, onClose, onSaved }) {
+  const [rating, setRating] = useState(target?.rating || 0);
+  const [remarks, setRemarks] = useState(target?.remarks || '');
+  const [saving, setSaving] = useState(false);
+
+  const save = async () => {
+    if (!rating && !remarks.trim()) {
+      Alert.alert('Add feedback', 'Please pick a rating or write a remark before saving.');
+      return;
+    }
+    setSaving(true);
+    try {
+      await apiClient.post('/curriculum-progress/feedback', {
+        course_id:    target.courseId,
+        lesson_index: target.lessonIndex,
+        rating:       rating || null,
+        remarks:      remarks.trim() || null,
+      });
+      onSaved && onSaved();
+    } catch (err) {
+      Alert.alert(
+        'Save failed',
+        err?.response?.data?.message || err?.message || 'Could not save your feedback.',
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal
+      visible
+      transparent
+      animationType="slide"
+      onRequestClose={onClose}
+      statusBarTranslucent
+    >
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={styles.feedbackBackdrop}
+      >
+        <TouchableOpacity
+          style={StyleSheet.absoluteFill}
+          activeOpacity={1}
+          onPress={onClose}
+        />
+        <View style={styles.feedbackSheet}>
+          <View style={styles.feedbackHeader}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.feedbackEyebrow}>{target.courseName || 'Course'}</Text>
+              <Text style={styles.feedbackTitle} numberOfLines={2}>
+                {target.lessonTitle}
+              </Text>
+            </View>
+            <TouchableOpacity onPress={onClose} style={styles.feedbackClose}>
+              <XIcon size={16} color={TEXT_MUTED} strokeWidth={2.4} />
+            </TouchableOpacity>
+          </View>
+
+          <Text style={styles.feedbackLabel}>Your rating</Text>
+          <View style={styles.feedbackPickerRow}>
+            {[1, 2, 3, 4, 5].map((n) => (
+              <TouchableOpacity
+                key={n}
+                onPress={() => setRating(n === rating ? 0 : n)}
+                activeOpacity={0.7}
+                style={styles.feedbackStarBtn}
+              >
+                <Star
+                  size={28}
+                  color={n <= rating ? '#F59E0B' : '#D1D5DB'}
+                  fill={n <= rating ? '#F59E0B' : 'transparent'}
+                  strokeWidth={2.2}
+                />
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          <Text style={styles.feedbackLabel}>Remarks (optional)</Text>
+          <View style={styles.feedbackInputWrap}>
+            <MessageSquare size={14} color={TEXT_MUTED} strokeWidth={2.2} />
+            <TextInput
+              style={styles.feedbackInput}
+              value={remarks}
+              onChangeText={setRemarks}
+              placeholder="What did you enjoy? What's tricky?"
+              placeholderTextColor="#9CA3AF"
+              multiline
+              maxLength={500}
+            />
+          </View>
+          <Text style={styles.feedbackCounter}>{remarks.length}/500</Text>
+
+          <View style={styles.feedbackActions}>
+            <TouchableOpacity
+              onPress={onClose}
+              activeOpacity={0.85}
+              style={[styles.feedbackBtn, styles.feedbackBtnGhost]}
+            >
+              <Text style={styles.feedbackBtnGhostText}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={save}
+              disabled={saving}
+              activeOpacity={0.9}
+              style={[styles.feedbackBtn, styles.feedbackBtnPrimary, saving && { opacity: 0.7 }]}
+            >
+              <Text style={styles.feedbackBtnPrimaryText}>
+                {saving ? 'Saving…' : 'Save feedback'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
   );
 }
 
@@ -836,4 +1043,154 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: BORDER,
   },
   emptyInlineText: { flex: 1, fontSize: 12, color: TEXT_MUTED, fontWeight: '600', lineHeight: 17 },
+
+  // ── Student feedback (rating + remarks) ─────────────────────────────
+  progressLessonWrap: {
+    gap: 6,
+  },
+  feedbackSummary: {
+    marginLeft: 24,
+    backgroundColor: '#FFFBF0',
+    borderRadius: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    gap: 4,
+  },
+  feedbackStarsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+  },
+  feedbackUpdatedText: {
+    marginLeft: 6,
+    fontSize: 10,
+    color: TEXT_MUTED,
+    fontWeight: '600',
+  },
+  feedbackRemarkText: {
+    fontSize: 11,
+    color: '#92400E',
+    fontStyle: 'italic',
+    lineHeight: 15,
+  },
+  feedbackCta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginLeft: 24,
+    paddingVertical: 4,
+  },
+  feedbackCtaText: {
+    fontSize: 11,
+    color: BRAND,
+    fontWeight: '700',
+  },
+
+  // Modal sheet
+  feedbackBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(15,23,42,0.55)',
+    justifyContent: 'flex-end',
+  },
+  feedbackSheet: {
+    backgroundColor: '#fff',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    padding: 20,
+    paddingBottom: 28,
+    gap: 12,
+  },
+  feedbackHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    marginBottom: 4,
+  },
+  feedbackEyebrow: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: TEXT_MUTED,
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+  },
+  feedbackTitle: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: '#0F172A',
+    marginTop: 2,
+  },
+  feedbackClose: {
+    width: 30, height: 30, borderRadius: 15,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: '#F1F5F9',
+  },
+  feedbackLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#475569',
+    marginTop: 4,
+  },
+  feedbackPickerRow: {
+    flexDirection: 'row',
+    gap: 4,
+  },
+  feedbackStarBtn: {
+    padding: 4,
+  },
+  feedbackInputWrap: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    borderWidth: 1,
+    borderColor: BORDER,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: '#F8FAFC',
+  },
+  feedbackInput: {
+    flex: 1,
+    fontSize: 13,
+    color: '#0F172A',
+    minHeight: 64,
+    padding: 0,
+    textAlignVertical: 'top',
+  },
+  feedbackCounter: {
+    fontSize: 10,
+    color: TEXT_MUTED,
+    alignSelf: 'flex-end',
+    marginTop: -8,
+  },
+  feedbackActions: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 4,
+  },
+  feedbackBtn: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  feedbackBtnGhost: {
+    backgroundColor: '#F1F5F9',
+    borderWidth: 1,
+    borderColor: BORDER,
+  },
+  feedbackBtnGhostText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#475569',
+  },
+  feedbackBtnPrimary: {
+    backgroundColor: BRAND,
+  },
+  feedbackBtnPrimaryText: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#fff',
+    letterSpacing: 0.3,
+  },
 });

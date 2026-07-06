@@ -4,6 +4,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { AuthProvider } from './src/context/AuthContext';
 import { InstitutionProvider } from './src/context/InstitutionContext';
 import { ChildProvider } from './src/context/ChildContext';
+import { NotificationAlertProvider } from './src/context/NotificationAlertContext';
 import AppNavigator from './src/navigation/AppNavigator';
 import { ConfirmDialogHost } from './src/components/ConfirmDialog';
 
@@ -23,10 +24,15 @@ export default function App() {
       <AuthProvider>
         <InstitutionProvider>
           <ChildProvider>
-            <AppNavigator />
-            {/* Imperative styled confirm() dialog host — must be inside
-                SafeAreaProvider so its statusBar overlay sits right. */}
-            <ConfirmDialogHost />
+            {/* Polls /api/notifications while signed in. On every new
+                arrival it vibrates, plays an optional tone, and slides
+                an in-app banner down from the top of the screen. */}
+            <NotificationAlertProvider>
+              <AppNavigator />
+              {/* Imperative styled confirm() dialog host — must be inside
+                  SafeAreaProvider so its statusBar overlay sits right. */}
+              <ConfirmDialogHost />
+            </NotificationAlertProvider>
           </ChildProvider>
         </InstitutionProvider>
       </AuthProvider>

@@ -1,14 +1,15 @@
-import { useState, useEffect } from 'react';
-import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useState, useEffect, useMemo } from 'react';
+import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
 import {
   ArrowLeft, Building2, User, Phone, Mail, MapPin,
   Globe, Award, Hash, CreditCard, CheckCircle,
   XCircle, Zap, Calendar, BookOpenCheck, Briefcase, ShieldCheck,
   FileText, BarChart3, Users, Clock, Image as ImageIcon,
   ExternalLink, Building, Languages, Send, BookOpen, UserCog,
-  GraduationCap, Layers, Wallet, Settings,
+  GraduationCap, Layers, Wallet, Settings, Edit3,
 } from 'lucide-react';
 import apiClient from '../../api/client';
+import { InstitutionEditDrawer } from './InstitutionEditDrawer';
 
 interface CourseRow {
   id: number;
@@ -54,6 +55,11 @@ interface Branch {
 
 interface Institution {
   id: number;
+  // When set, this row is a sub-branch of another institution. The
+  // backend hydrates inherited fields (logo, name, accreditation, etc.)
+  // from the parent before returning, so all the existing display code
+  // stays the same — we only branch on this id for the edit button.
+  parent_institution_id?: number | null;
   // Core
   name: string;
   brand_name?: string | null;
@@ -73,6 +79,11 @@ interface Institution {
   pincode: string;
   no_of_branches?: number | null;
   branches?: Branch[] | null;
+  // Backend attaches the real child-institution rows for each branch on a
+  // main-branch detail fetch. We match on email to line them up with the
+  // JSONB branches[] so the "Resend credentials" button knows which
+  // institution id to POST to.
+  sub_branches?: { id: number; name: string | null; email: string | null }[] | null;
   // GPS coordinates of the head office (wizard v2)
   latitude?: number | string | null;
   longitude?: number | string | null;
@@ -164,6 +175,43 @@ function formatTime12(value?: string | null): string {
 export function InstitutionDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
+
+  // Notification deep-link payload. When the super admin clicks an
+  // "Institution profile updated" / "Branch updated" row in the bell,
+  // the Navbar packages the diff into router state so we can:
+  //   1. refetch even when the id in the URL matches — the refreshedAt
+  //      timestamp acts as a cache-buster for the useEffect below.
+  //   2. highlight the exact fields the notification says changed for
+  //      about 10 seconds, so the reviewer can eyeball what moved.
+  const navState = (location.state || {}) as {
+    highlightFields?: string[];
+    highlightBranchId?: number | null;
+    changedValues?: Record<string, any>;
+    refreshedAt?: number;
+    notificationTitle?: string;
+  };
+  const highlightSet = useMemo(
+    () => new Set(navState.highlightFields || []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [navState.refreshedAt],
+  );
+  const changedValues = useMemo(
+    () => navState.changedValues || {},
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [navState.refreshedAt],
+  );
+  const [highlightActive, setHighlightActive] = useState(highlightSet.size > 0);
+  // Auto-dim the highlights after 10s so they don't stick around forever.
+  useEffect(() => {
+    if (!highlightActive) return;
+    const t = setTimeout(() => setHighlightActive(false), 10_000);
+    return () => clearTimeout(t);
+  }, [highlightActive, navState.refreshedAt]);
+  useEffect(() => {
+    setHighlightActive(highlightSet.size > 0);
+  }, [highlightSet, navState.refreshedAt]);
+
   const [institution, setInstitution] = useState<Institution | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
@@ -180,9 +228,14 @@ export function InstitutionDetail() {
   const [courses, setCourses] = useState<CourseRow[] | null>(null);
   const [staff, setStaff] = useState<StaffRow[] | null>(null);
 
+  // Super admin "Edit details" drawer (Core / Contact / Accreditation /
+  // Operations / Master). Lets us fill in fields on behalf of a branch.
+  const [editOpen, setEditOpen] = useState(false);
+
   useEffect(() => {
     loadInstitution();
-  }, [id]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, navState.refreshedAt]);
 
   // Side-load the courses + staff for this institution. Independent fetches so
   // one slow query doesn't block the other section from rendering.
@@ -267,6 +320,87 @@ export function InstitutionDetail() {
       loadInstitution();
     } catch (err: any) {
       setError(err.response?.data?.message || 'Failed to activate');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // Sub-branch credentials recovery — rotates the branch admin's temp
+  // password and re-emails it. Used when the original setup email got
+  // lost or never arrived. Only shown on sub-branch detail pages.
+  // Sub-branch credentials recovery. Can be called either:
+  //   • on the sub-branch's own detail page → targetId omitted, defaults
+  //     to `institution.id`, sends to its own email,
+  //   • or from the parent's "Branch Locations" list → targetId is the
+  //     child institution id for the row that was clicked.
+  const handleResendBranchCredentials = async (
+    targetId?: number,
+    targetEmail?: string | null,
+  ) => {
+    const id = targetId ?? institution?.id;
+    if (!id) return;
+    const sentTo = targetEmail || institution?.email || 'the branch email';
+    if (!window.confirm(
+      `Send fresh login credentials to ${sentTo}?\n\nThis will rotate the branch admin's temporary password, so any previous password becomes invalid.`,
+    )) return;
+    setActionLoading(true);
+    setError('');
+    try {
+      const res = await apiClient.post(
+        `/onboarding/${id}/resend-branch-credentials`,
+      );
+      const msg = res.data?.message || 'Credentials sent.';
+      setSuccessMessage(msg);
+      setTimeout(() => setSuccessMessage(''), 4000);
+    } catch (err: unknown) {
+      const obj = err as { response?: { data?: { message?: string; temp_password?: string } } };
+      const message = obj?.response?.data?.message || 'Could not resend credentials';
+      // If the backend rotated the password but the email failed, the
+      // response payload includes the password so the super admin can
+      // share it manually.
+      const tempPw = obj?.response?.data?.temp_password;
+      setError(tempPw ? `${message}\nTemporary password: ${tempPw}` : message);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // Per-branch credentials sender used from the parent's "Branch
+  // Locations" list. Unified backend endpoint that provisions the child
+  // user + institution row on first call when it doesn't exist yet,
+  // otherwise just rotates the password and re-emails.
+  const handleSendOrResendBranch = async (
+    branchIndex: number,
+    branchEmail: string,
+    alreadyProvisioned: boolean,
+  ) => {
+    if (!institution?.id) return;
+    const verb = alreadyProvisioned ? 'Resend' : 'Send';
+    if (!window.confirm(
+      `${verb} login credentials to ${branchEmail}?\n\n` +
+      (alreadyProvisioned
+        ? "This will rotate the branch admin's temporary password, so any previous password becomes invalid."
+        : "This will create the branch admin's login account and email them their first password."),
+    )) return;
+    setActionLoading(true);
+    setError('');
+    try {
+      const res = await apiClient.post(
+        `/onboarding/${institution.id}/provision-branch`,
+        { branch_index: branchIndex },
+      );
+      const msg = res.data?.message || 'Credentials sent.';
+      setSuccessMessage(msg);
+      setTimeout(() => setSuccessMessage(''), 4000);
+      // Refresh the institution so sub_branches[] picks up the newly
+      // created child row and the chip flips from green "Send" to
+      // amber "Resend" on subsequent clicks.
+      loadInstitution();
+    } catch (err: unknown) {
+      const obj = err as { response?: { data?: { message?: string; temp_password?: string } } };
+      const message = obj?.response?.data?.message || 'Could not send credentials';
+      const tempPw = obj?.response?.data?.temp_password;
+      setError(tempPw ? `${message}\nTemporary password: ${tempPw}` : message);
     } finally {
       setActionLoading(false);
     }
@@ -379,9 +513,46 @@ export function InstitutionDetail() {
             </div>
           </div>
         </div>
-        <span className={`px-3 py-1 rounded-full text-sm font-semibold border ${getStatusColor(institution.onboarding_status)}`}>
-          {institution.onboarding_status.replace(/_/g, ' ').toUpperCase()}
-        </span>
+        <div className="flex items-center gap-2">
+          {/* Edit Details is only available for main-branch institutions.
+              Sub-branches inherit every non-location field from the
+              parent, so editing them in isolation would just produce
+              drift. Branch admins still log in with their own
+              credentials — they just always see the parent's brand. */}
+          {institution.parent_institution_id ? (
+            <>
+              <span
+                className="px-3 py-1.5 rounded-lg bg-slate-50 text-slate-500 text-xs font-medium border border-slate-200 flex items-center gap-1.5"
+                title="Sub-branch — details mirror the main branch and aren't editable here. Edit the parent institution to change them everywhere."
+              >
+                <Layers size={14} /> Sub-branch · details mirror main
+              </span>
+              {/* Resend credentials — rotates the branch admin's temp
+                  password and re-emails it. Shows for every sub-branch
+                  because the setup email is fire-and-forget and can be
+                  lost (spam, typoed address). */}
+              <button
+                onClick={() => handleResendBranchCredentials()}
+                disabled={actionLoading}
+                className="px-3 py-1.5 rounded-lg bg-amber-50 text-amber-700 text-xs font-semibold border border-amber-200 hover:bg-amber-100 flex items-center gap-1.5 disabled:opacity-60"
+                title="Generate a new temp password for the branch admin and email it"
+              >
+                <Mail size={14} /> Resend credentials
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={() => setEditOpen(true)}
+              className="px-3 py-1.5 rounded-lg bg-blue-50 text-blue-700 text-sm font-semibold border border-blue-200 hover:bg-blue-100 flex items-center gap-1.5"
+              title="Edit institution details (Core / Contact / Accreditation / Operations / Master)"
+            >
+              <Edit3 size={14} /> Edit details
+            </button>
+          )}
+          <span className={`px-3 py-1 rounded-full text-sm font-semibold border ${getStatusColor(institution.onboarding_status)}`}>
+            {institution.onboarding_status.replace(/_/g, ' ').toUpperCase()}
+          </span>
+        </div>
       </div>
 
       {/* Success message */}
@@ -389,6 +560,31 @@ export function InstitutionDetail() {
         <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-lg flex items-center gap-2">
           <CheckCircle size={16} />
           {successMessage}
+        </div>
+      )}
+
+      {/* "N field(s) updated" banner — appears when the reviewer arrived
+          via a notification click. Auto-dims after 10s along with the
+          field highlights. */}
+      {highlightActive && highlightSet.size > 0 && (
+        <div className="bg-amber-50 border border-amber-300 text-amber-900 px-4 py-3 rounded-lg flex items-start gap-3 shadow-sm">
+          <div className="w-8 h-8 rounded-full bg-amber-200 flex items-center justify-center flex-shrink-0">
+            <Edit3 size={16} className="text-amber-800" />
+          </div>
+          <div className="flex-1">
+            <div className="text-sm font-semibold">
+              {navState.notificationTitle || 'Recent update'} — {highlightSet.size} field{highlightSet.size === 1 ? '' : 's'} highlighted
+            </div>
+            <div className="text-xs text-amber-800 mt-0.5">
+              Changed: {Array.from(highlightSet).map(k => k.replace(/_/g, ' ')).join(', ')}
+            </div>
+          </div>
+          <button
+            onClick={() => setHighlightActive(false)}
+            className="text-xs font-semibold text-amber-700 hover:text-amber-900 underline"
+          >
+            Dismiss
+          </button>
         </div>
       )}
 
@@ -415,7 +611,13 @@ export function InstitutionDetail() {
           {/* ── 1. Core Details ── */}
           <Card icon={Building2} accent="blue" title="Core Details">
             <div className="grid grid-cols-2 gap-4">
-              <InfoRow icon={Building2} label="Institution Name" value={institution.name} />
+              <InfoRow
+                icon={Building2}
+                label="Institution Name"
+                value={institution.name}
+                highlighted={highlightActive && highlightSet.has('name')}
+                notifiedValue={changedValues.name != null ? String(changedValues.name) : undefined}
+              />
               <InfoRow
                 icon={Award}
                 label="Brand Name"
@@ -471,10 +673,29 @@ export function InstitutionDetail() {
           {/* ── 2. Contact & Location ── */}
           <Card icon={MapPin} accent="emerald" title="Contact & Location">
             <div className="grid grid-cols-2 gap-4">
-              <InfoRow icon={Mail} label="Official Email" value={institution.email} />
-              <InfoRow icon={Phone} label="Primary Contact" value={institution.phone} />
+              <InfoRow
+                icon={Mail}
+                label="Official Email"
+                value={institution.email}
+                highlighted={highlightActive && highlightSet.has('email')}
+                notifiedValue={changedValues.email != null ? String(changedValues.email) : undefined}
+              />
+              <InfoRow
+                icon={Phone}
+                label="Primary Contact"
+                value={institution.phone}
+                highlighted={highlightActive && highlightSet.has('phone')}
+                notifiedValue={changedValues.phone != null ? String(changedValues.phone) : undefined}
+              />
               {institution.website_url ? (
-                <InfoRow icon={Globe} label="Website" value={institution.website_url} isLink />
+                <InfoRow
+                  icon={Globe}
+                  label="Website"
+                  value={institution.website_url}
+                  isLink
+                  highlighted={highlightActive && highlightSet.has('website_url')}
+                  notifiedValue={changedValues.website_url != null ? String(changedValues.website_url) : undefined}
+                />
               ) : (
                 <InfoRow icon={Globe} label="Website" value="—" />
               )}
@@ -490,17 +711,35 @@ export function InstitutionDetail() {
             </div>
 
             {/* Head office address */}
-            <div className="mt-4 pt-4 border-t border-gray-50">
-              <p className="text-xs text-gray-500 mb-1">Head Office Address</p>
-              <p className="text-sm text-gray-900">
-                {institution.address || '—'}
-                {(institution.city || institution.pincode) && (
-                  <span className="block text-gray-500 mt-1">
-                    {[institution.city, institution.pincode].filter(Boolean).join(' · ')}
-                  </span>
-                )}
-              </p>
-            </div>
+            {(() => {
+              const addrHighlighted = highlightActive && (
+                highlightSet.has('address') || highlightSet.has('city') || highlightSet.has('pincode')
+              );
+              return (
+                <div className={
+                  addrHighlighted
+                    ? 'mt-4 pt-4 border-t border-gray-50 -mx-2 px-3 py-2 rounded-lg bg-amber-50 ring-2 ring-amber-300 transition-all'
+                    : 'mt-4 pt-4 border-t border-gray-50'
+                }>
+                  <div className="flex items-center gap-2 mb-1">
+                    <p className="text-xs text-gray-500">Head Office Address</p>
+                    {addrHighlighted ? (
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded">
+                        Updated
+                      </span>
+                    ) : null}
+                  </div>
+                  <p className={addrHighlighted ? 'text-sm text-amber-900 font-semibold' : 'text-sm text-gray-900'}>
+                    {institution.address || '—'}
+                    {(institution.city || institution.pincode) && (
+                      <span className={addrHighlighted ? 'block text-amber-800 mt-1' : 'block text-gray-500 mt-1'}>
+                        {[institution.city, institution.pincode].filter(Boolean).join(' · ')}
+                      </span>
+                    )}
+                  </p>
+                </div>
+              );
+            })()}
 
             {/* Head office GPS — captured via the wizard's "Use my current
                 location" button. Click the link to drop a pin on Google Maps. */}
@@ -525,47 +764,77 @@ export function InstitutionDetail() {
               <div className="mt-4 pt-4 border-t border-gray-50">
                 <p className="text-xs text-gray-500 mb-2">Branch Locations</p>
                 <div className="space-y-2">
-                  {institution.branches.map((b, i) => (
-                    <div
-                      key={i}
-                      className="border border-gray-100 rounded-lg p-3 bg-gray-50/40"
-                    >
-                      <div className="flex items-center justify-between mb-1">
-                        <p className="text-sm font-semibold text-gray-900">
-                          {b.name || `Branch ${i + 1}`}
-                        </p>
-                        <span className="text-xs text-gray-400">#{i + 1}</span>
-                      </div>
-                      {b.address ? (
-                        <p className="text-xs text-gray-600">{b.address}</p>
-                      ) : null}
-                      {(b.city || b.pincode) ? (
-                        <p className="text-xs text-gray-500 mt-1">
-                          {[b.city, b.pincode].filter(Boolean).join(' · ')}
-                        </p>
-                      ) : null}
-                      {(b.email || b.contact_number) ? (
-                        <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 pt-2 border-t border-gray-100">
-                          {b.email ? (
-                            <a
-                              href={`mailto:${b.email}`}
-                              className="text-xs text-blue-600 hover:underline inline-flex items-center gap-1"
-                            >
-                              ✉ {b.email}
-                            </a>
-                          ) : null}
-                          {b.contact_number ? (
-                            <a
-                              href={`tel:${b.contact_number}`}
-                              className="text-xs text-gray-700 hover:underline inline-flex items-center gap-1"
-                            >
-                              ☎ {b.contact_number}
-                            </a>
-                          ) : null}
+                  {institution.branches.map((b, i) => {
+                    // Try to match this JSONB branch entry to a real
+                    // child institution row by email. When there's no
+                    // match it means the branch was never provisioned —
+                    // the unified endpoint below handles that case by
+                    // creating the child user + institution on first
+                    // call, then sending the email. So the chip is
+                    // always actionable when there's an email on the
+                    // branch.
+                    const childInst = (institution.sub_branches || []).find(
+                      (s) => (s.email || '').toLowerCase() ===
+                             (b.email || '').toLowerCase().trim(),
+                    );
+                    return (
+                      <div
+                        key={i}
+                        className="border border-gray-100 rounded-lg p-3 bg-gray-50/40"
+                      >
+                        <div className="flex items-center justify-between mb-1">
+                          <p className="text-sm font-semibold text-gray-900">
+                            {b.name || `Branch ${i + 1}`}
+                          </p>
+                          <span className="text-xs text-gray-400">#{i + 1}</span>
                         </div>
-                      ) : null}
-                    </div>
-                  ))}
+                        {b.address ? (
+                          <p className="text-xs text-gray-600">{b.address}</p>
+                        ) : null}
+                        {(b.city || b.pincode) ? (
+                          <p className="text-xs text-gray-500 mt-1">
+                            {[b.city, b.pincode].filter(Boolean).join(' · ')}
+                          </p>
+                        ) : null}
+                        {(b.email || b.contact_number) ? (
+                          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 mt-2 pt-2 border-t border-gray-100">
+                            {b.email ? (
+                              <a
+                                href={`mailto:${b.email}`}
+                                className="text-xs text-blue-600 hover:underline inline-flex items-center gap-1"
+                              >
+                                ✉ {b.email}
+                              </a>
+                            ) : null}
+                            {b.contact_number ? (
+                              <a
+                                href={`tel:${b.contact_number}`}
+                                className="text-xs text-gray-700 hover:underline inline-flex items-center gap-1"
+                              >
+                                ☎ {b.contact_number}
+                              </a>
+                            ) : null}
+                            {b.email ? (
+                              <button
+                                onClick={() => handleSendOrResendBranch(i, b.email!, !!childInst)}
+                                disabled={actionLoading}
+                                className={`ml-auto px-2.5 py-1 rounded-md text-[11px] font-semibold border inline-flex items-center gap-1 disabled:opacity-60 ${
+                                  childInst
+                                    ? 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'
+                                    : 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
+                                }`}
+                                title={childInst
+                                  ? "Rotate this branch admin's password and email them new credentials"
+                                  : 'Provision this branch admin and email them their login credentials'}
+                              >
+                                <Mail size={11} /> {childInst ? 'Resend credentials' : 'Send credentials'}
+                              </button>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             ) : null}
@@ -916,13 +1185,10 @@ export function InstitutionDetail() {
               <Send size={18} />
               Send Notification
             </button>
-            <Link
-              to={`/institutions/${institution?.id}/marketplace`}
-              className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-indigo-600 text-white rounded-xl font-semibold hover:bg-indigo-700 transition-colors mt-3"
-            >
-              <Settings size={18} />
-              Marketplace Settings
-            </Link>
+            {/* Marketplace Settings button intentionally removed from this
+                Actions panel — the same destination is already available
+                from the global sidebar under Settings → Marketplace, so
+                keeping it here was a duplicate entry point. */}
 
             {/* PENDING → Show Approve + Reject */}
             {institution.onboarding_status === 'pending_approval' && (
@@ -1166,6 +1432,22 @@ export function InstitutionDetail() {
           </div>
         </div>
       )}
+
+      {/* Super admin: edit any institution's details (used when filling in
+          fields on behalf of a branch whose parent only supplied basics). */}
+      {editOpen && institution && (
+        <InstitutionEditDrawer
+          institutionId={institution.id}
+          initial={institution}
+          onClose={() => setEditOpen(false)}
+          onSaved={() => {
+            setEditOpen(false);
+            setSuccessMessage('Institution details updated');
+            loadInstitution();
+            setTimeout(() => setSuccessMessage(''), 3000);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -1342,19 +1624,47 @@ function InfoRow({
   label,
   value,
   isLink = false,
+  highlighted = false,
+  notifiedValue,
 }: {
   icon: any;
   label: string;
   value: string;
   isLink?: boolean;
+  /** Set true when the field's key appears in a recent update-notification
+   *  payload. Pulses a soft amber ring + background so the reviewer
+   *  spots what changed without reading every field. */
+  highlighted?: boolean;
+  /** Ground-truth new value pulled straight from the notification's
+   *  changed_values snapshot. When set and highlighted, we render it
+   *  underneath the fetched value so a stale fetch can't mislead the
+   *  reviewer about what actually changed. */
+  notifiedValue?: string;
 }) {
   return (
-    <div className="flex items-start gap-3">
-      <div className="w-8 h-8 rounded-lg bg-gray-100 flex items-center justify-center flex-shrink-0 mt-0.5">
-        <Icon size={14} className="text-gray-500" />
+    <div
+      className={
+        highlighted
+          ? 'flex items-start gap-3 -mx-2 px-2 py-1.5 rounded-lg bg-amber-50 ring-2 ring-amber-300 shadow-sm transition-all duration-300'
+          : 'flex items-start gap-3'
+      }
+    >
+      <div className={
+        highlighted
+          ? 'w-8 h-8 rounded-lg bg-amber-100 flex items-center justify-center flex-shrink-0 mt-0.5'
+          : 'w-8 h-8 rounded-lg bg-gray-100 flex items-center justify-center flex-shrink-0 mt-0.5'
+      }>
+        <Icon size={14} className={highlighted ? 'text-amber-700' : 'text-gray-500'} />
       </div>
-      <div className="min-w-0">
-        <p className="text-xs text-gray-500">{label}</p>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <p className="text-xs text-gray-500">{label}</p>
+          {highlighted ? (
+            <span className="text-[10px] font-bold uppercase tracking-wider text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded">
+              Updated
+            </span>
+          ) : null}
+        </div>
         {isLink && value && value !== '—' ? (
           <a
             href={value.startsWith('http') ? value : `https://${value}`}
@@ -1365,8 +1675,19 @@ function InfoRow({
             {value}
           </a>
         ) : (
-          <p className="text-sm font-medium text-gray-900 break-all">{value || '—'}</p>
+          <p className={
+            highlighted
+              ? 'text-sm font-semibold text-amber-900 break-all'
+              : 'text-sm font-medium text-gray-900 break-all'
+          }>
+            {value || '—'}
+          </p>
         )}
+        {highlighted && notifiedValue && notifiedValue !== value ? (
+          <p className="text-[11px] text-amber-700 mt-1 break-all">
+            <span className="font-bold">New (from update):</span> {notifiedValue}
+          </p>
+        ) : null}
       </div>
     </div>
   );

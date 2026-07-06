@@ -22,7 +22,7 @@ import {
 } from 'react-native';
 import {
   Users, UserCircle, Award, Plane, Calendar, Bell, HelpCircle,
-  LogOut, ChevronRight, Mail, Phone, Shield,
+  LogOut, ChevronRight, Mail, Phone, Shield, MessageSquare,
 } from 'lucide-react-native';
 
 import { useAuth } from '../../context/AuthContext';
@@ -205,6 +205,15 @@ export default function ParentMoreScreen({ navigation }) {
               'Need a hand?',
               'Drop us a line at support@veerify.app and we\'ll get back within one business day.',
             )}
+          />
+          <Divider />
+          <Row
+            icon={MessageSquare}
+            iconBg={palette.pink?.soft || '#FCE7F3'}
+            iconColor={palette.pink?.vivid || '#DB2777'}
+            label="Send Feedback"
+            sub="Tell us what you think about Veerify"
+            onPress={() => navigation.navigate('SendFeedback')}
           />
           <Divider />
           <Row

@@ -24,6 +24,7 @@ import {
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 import PlanLimitModal from '../../components/PlanLimitModal';
+import { confirm } from '../../components/ConfirmDialog';
 // Shared resolver — repairs legacy DB rows that baked in 10.0.2.2:5000
 // or localhost from the Android emulator, and prepends the current
 // api host to plain /uploads/... paths. See src/utils/assetUrl.js.
@@ -113,21 +114,54 @@ export default function TrainersListScreen({ navigation }) {
   };
 
   const onDelete = (trainer) => {
-    Alert.alert(
-      'Remove trainer?',
-      `${trainer.name} will lose access to your academy. Existing batches they were assigned to stay but become unassigned.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Remove', style: 'destructive', onPress: async () => {
+    // Branded destructive confirm — pink hero, shield icon, glow'd Remove
+    // button. Replaces the stock OS AlertDialog which felt off-brand
+    // against the rest of the trainer management flow.
+    confirm({
+      title: 'Remove trainer?',
+      message: `${trainer.name} will lose access to your academy. Existing batches they were assigned to stay but become unassigned.`,
+      variant: 'destructive',
+      confirmText: 'Remove',
+      cancelText: 'Keep trainer',
+      onConfirm: () => {
+        // The confirm dialog closes immediately when Remove is tapped;
+        // we run the API call afterwards. If we open another confirm
+        // synchronously (for success / error feedback) while the first
+        // dialog is still animating out, Android may swallow it — so
+        // we wait a beat before showing the follow-up.
+        (async () => {
           try {
             await apiClient.delete(`/trainers/${trainer.id}`);
-            load();
+            // Refresh list so the removed trainer disappears.
+            await load();
+            setTimeout(() => {
+              confirm({
+                title: 'Trainer removed',
+                message: `${trainer.name} no longer has access to your academy.`,
+                variant: 'success',
+                confirmText: 'Done',
+                hideCancel: true,
+              });
+            }, 260);
           } catch (err) {
-            Alert.alert('Error', err.response?.data?.message || 'Failed');
+            // eslint-disable-next-line no-console
+            console.log('[TrainersList] delete failed:', err?.response?.status, err?.response?.data);
+            setTimeout(() => {
+              confirm({
+                title: 'Could not remove',
+                message:
+                  err?.response?.data?.message ||
+                  err?.message ||
+                  'Something went wrong. Please try again.',
+                variant: 'warning',
+                confirmText: 'OK',
+                hideCancel: true,
+              });
+            }, 260);
           }
-        } }
-      ]
-    );
+        })();
+      },
+    });
   };
 
   // ── Tap-to-call ─ open the system dialer with the trainer's number ──
@@ -319,51 +353,20 @@ function TrainerCard({ trainer, onCall, onMail, onEdit, onDelete, onView }) {
         </View>
 
         <View style={{ flex: 1, minWidth: 0 }}>
-          <Text style={styles.name} numberOfLines={1}>{trainer.name}</Text>
+          {/* Name + specialization get the whole header row width now
+              that Edit/View/Delete have moved into their own row above
+              the contact list. Both wrap to multiple lines so long
+              names and multi-skill specialisations stay readable. */}
+          <Text style={styles.name}>{trainer.name}</Text>
           {trainer.specialization ? (
             <View style={styles.specRow}>
               <Briefcase size={11} color={palette.purple.vivid} strokeWidth={2.4} />
-              <Text style={styles.specText} numberOfLines={1}>
+              <Text style={styles.specText}>
                 {trainer.specialization}
               </Text>
             </View>
           ) : null}
         </View>
-
-        {/* Edit pill - one-tap entry into the trainer form in edit mode. */}
-        <TouchableOpacity
-          onPress={onEdit}
-          style={styles.editBtn}
-          hitSlop={6}
-          activeOpacity={0.85}
-        >
-          <Edit3 size={13} color="#fff" strokeWidth={2.6} />
-          <Text style={styles.editBtnText}>Edit</Text>
-        </TouchableOpacity>
-
-        {/* Delete pill - removes the trainer (with confirmation). */}
-        <TouchableOpacity
-          onPress={onDelete}
-          style={styles.deleteBtn}
-          hitSlop={6}
-          activeOpacity={0.85}
-        >
-          <Trash2 size={13} color="#fff" strokeWidth={2.6} />
-          <Text style={styles.deleteBtnText}>Delete</Text>
-        </TouchableOpacity>
-
-        {/* View pill - opens the full trainer profile modal. Replaces the
-            old kebab (three-dot) menu so admins can see the whole record
-            in one tap. */}
-        <TouchableOpacity
-          onPress={onView}
-          style={styles.viewBtn}
-          hitSlop={6}
-          activeOpacity={0.85}
-        >
-          <Eye size={13} color="#fff" strokeWidth={2.6} />
-          <Text style={styles.viewBtnText}>View</Text>
-        </TouchableOpacity>
       </View>
 
       {/* Chip row: belt + experience */}
@@ -386,6 +389,37 @@ function TrainerCard({ trainer, onCall, onMail, onEdit, onDelete, onView }) {
           ) : null}
         </View>
       ) : null}
+
+      {/* Action row — Edit / View / Delete sit just above the call &
+          email contact rows now. They used to crowd the header, which
+          was forcing the name + specialisation to truncate on the first
+          line. Equal-width buttons with a small icon + label each. */}
+      <View style={styles.actionRow}>
+        <TouchableOpacity
+          onPress={onEdit}
+          style={[styles.actionBtn, styles.actionEdit]}
+          activeOpacity={0.85}
+        >
+          <Edit3 size={13} color={palette.purple.vivid} strokeWidth={2.6} />
+          <Text style={[styles.actionBtnText, { color: palette.purple.vivid }]}>Edit</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          onPress={onView}
+          style={[styles.actionBtn, styles.actionView]}
+          activeOpacity={0.85}
+        >
+          <Eye size={13} color={palette.blue.vivid} strokeWidth={2.6} />
+          <Text style={[styles.actionBtnText, { color: palette.blue.vivid }]}>View</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          onPress={onDelete}
+          style={[styles.actionBtn, styles.actionDelete]}
+          activeOpacity={0.85}
+        >
+          <Trash2 size={13} color="#B91C1C" strokeWidth={2.6} />
+          <Text style={[styles.actionBtnText, { color: '#B91C1C' }]}>Delete</Text>
+        </TouchableOpacity>
+      </View>
 
       {/* Contact rows - tappable */}
       <View style={styles.contactBlock}>
@@ -610,17 +644,20 @@ const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: palette.bg },
   center: { alignItems: 'center', justifyContent: 'center' },
 
-  // Header
+  // Header — refined for a cleaner, more modern look.
+  //   • Larger title, tighter subtitle
+  //   • Extra top-padding so it breathes below the status bar
+  //   • Hairline divider instead of a solid border for a lighter feel
   header: {
     flexDirection: 'row', alignItems: 'center', gap: spacing.md,
     paddingHorizontal: spacing.lg,
-    paddingTop: spacing.xxl + 8,
-    paddingBottom: spacing.md,
+    paddingTop: spacing.xxl + 12,
+    paddingBottom: spacing.lg,
     backgroundColor: palette.surface,
-    borderBottomWidth: 1, borderBottomColor: palette.borderSoft,
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: palette.borderSoft,
   },
-  headerTitle: { ...type.h1, color: palette.text, fontSize: 18 },
-  headerSub: { ...type.caption, color: palette.textMuted, marginTop: 1, fontWeight: '600' },
+  headerTitle: { ...type.h1, color: palette.text, fontSize: 20, letterSpacing: -0.3 },
+  headerSub: { ...type.caption, color: palette.textMuted, marginTop: 2, fontWeight: '600' },
   headerPill: {
     flexDirection: 'row', alignItems: 'center', gap: 4,
     paddingHorizontal: spacing.sm, paddingVertical: 4,
@@ -640,18 +677,23 @@ const styles = StyleSheet.create({
   usagePillFull: { backgroundColor: '#FFE4E6' },
   usagePillText: { ...type.micro, color: palette.purple.on, fontWeight: '800' },
 
-  // Card
+  // Card — tightened for a cleaner card feel.
+  //   • Slightly rounder corners
+  //   • Fine border in addition to the shadow so cards read distinctly
+  //     against the bg without needing heavier drop-shadows
   card: {
     backgroundColor: palette.surface,
-    borderRadius: radius.lg,
-    padding: spacing.md,
+    borderRadius: 16,
+    padding: spacing.lg,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: palette.borderSoft,
     ...shadows.card,
   },
   cardTop: {
     flexDirection: 'row', alignItems: 'center', gap: spacing.md,
   },
   avatar: {
-    width: 56, height: 56, borderRadius: 28,
+    width: 60, height: 60, borderRadius: 30,
     borderWidth: 2,
     overflow: 'hidden',
     backgroundColor: palette.surface,
@@ -820,6 +862,44 @@ const styles = StyleSheet.create({
     borderRadius: radius.pill,
   },
   expChipText: { ...type.micro, color: palette.textMuted, fontWeight: '700' },
+
+  // ── Action row (Edit / View / Delete) — sits just above the contact
+  //    block so the header row can give name + specialisation full width.
+  actionRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: spacing.md,
+  },
+  // Softer, more modern action pills — outlined with a subtle tinted
+  // background instead of solid colored buttons. Reads as calmer while
+  // still keeping the color-code (purple = edit, blue = view, red = delete).
+  actionBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  actionBtnText: {
+    ...type.micro,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+  actionEdit:   {
+    backgroundColor: palette.purple.soft,
+    borderColor:    palette.purple.vivid + '55',
+  },
+  actionView:   {
+    backgroundColor: palette.blue.soft,
+    borderColor:    palette.blue.vivid + '55',
+  },
+  actionDelete: {
+    backgroundColor: '#FEE2E2',
+    borderColor:    '#FCA5A5',
+  },
 
   // Contact rows
   contactBlock: {

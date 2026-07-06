@@ -11,28 +11,34 @@
 //      attendance % bar, emergency icon, performance dot.
 //
 // Data:
-//   GET /api/batches/trainer/my       - the batch tabs
-//   GET /api/enrollments/batch/:id    - students per batch (name + email)
-//   GET /api/attendance/batch/:id     - records for computing attendance %
+//   GET /api/enrollments/trainer/my-students — one-shot: every student
+//        across every batch the trainer teaches, with name / phone /
+//        photo / course / batch / branch / payment fields.
+//   GET /api/attendance/batch/:id            — records for computing
+//        attendance % per student.
 //
-// Placeholder fields:
-//   gender, age, belt_level, emergency_contact, performance are not in the DB
-//   yet. We derive a stable belt-by-student-id so the UI looks populated, and
-//   show "-" / default icons for the others. Wire real columns once the
-//   student profile migration lands.
+// Fallback:
+//   If the trainer has no batches at all (`has_batches === false`), we
+//   show the "No students assigned" empty state so the trainer knows
+//   the reason — no batches yet vs batches exist but empty.
+//
+// Placeholder fields (belt, age, performance) are still derived client-
+// side until the belt-promotion + DOB fields fully replace them.
 
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, TextInput, ActivityIndicator,
-  StyleSheet, RefreshControl, Linking, Alert,
+  StyleSheet, RefreshControl, Linking, Alert, Image,
 } from 'react-native';
 import {
   ArrowLeft, Search, Users, Phone, ChevronRight,
   TrendingUp, TrendingDown, Minus, Award, Filter,
 } from 'lucide-react-native';
+import { useFocusEffect } from '@react-navigation/native';
 
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
+import resolveAssetUrl from '../../utils/assetUrl';
 
 // ── Belt catalog ──────────────────────────────────────────────────────────
 // Color tokens mirror the literal belt strap colors. We pick one belt per
@@ -52,6 +58,12 @@ const beltFor = (id) => BELTS[Math.abs(Number(id) || 0) % BELTS.length];
 // Synthesized age (12-35) and gender pattern from id so the visual feels
 // alive. Real values will replace these once the migration adds them.
 const genderFor = (id) => (Math.abs(Number(id) || 0) % 2 === 0 ? 'Male' : 'Female');
+
+// Pretty-prints a skill name from the trainer's lowercased specialisation
+// for the cross-branch hint: "karate" → "Karate", "self defense" →
+// "Self Defense". Falls back to the raw string when input is empty.
+const titleCase = (s) =>
+  String(s || '').toLowerCase().replace(/(^|\s)\S/g, (m) => m.toUpperCase());
 const ageFor    = (id) => 12 + (Math.abs(Number(id) || 0) % 24);
 
 // Performance bucket from attendance %.
@@ -64,6 +76,13 @@ function perfFor(pct) {
 
 export default function StaffStudentsScreen({ navigation }) {
   const [batches, setBatches] = useState([]);
+  // Cross-branch view metadata — surfaces the skill-filter hint when
+  // the trainer has switched to another branch. The hint reads:
+  // "Showing batches matching: Karate · Yoga" (or "No matching courses
+  // here" when the filter zeroes the list).
+  const [crossBranch, setCrossBranch] = useState(false);
+  const [trainerSkills, setTrainerSkills] = useState([]);
+  const [filteredBySkills, setFilteredBySkills] = useState(false);
   const [activeBatch, setActiveBatch] = useState('all'); // 'all' | batchId
   const [studentsByBatch, setStudentsByBatch] = useState({}); // { batchId: [{...}] }
   const [pctByStudent, setPctByStudent] = useState({});       // { student_id: percentage }
@@ -72,49 +91,161 @@ export default function StaffStudentsScreen({ navigation }) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
+  // ── Branch picker ──
+  // Lists every institution under the same main-branch group as the
+  // trainer's home institution. Selecting a non-home branch re-fetches
+  // batches/enrollments scoped to that branch (cross-branch mode) — the
+  // trainer can mark attendance / performance there exactly like their
+  // own institution.
+  const [accessibleBranches, setAccessibleBranches] = useState([]);
+  const [homeBranchId, setHomeBranchId]             = useState(null);
+  const [selectedBranchId, setSelectedBranchId]     = useState(null);
+  const [branchPickerOpen, setBranchPickerOpen]     = useState(false);
+
+  // Fetch the list of branches accessible to this trainer once. Used to
+  // populate the dropdown above the search bar.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await apiClient.get('/branches/accessible');
+        if (cancelled) return;
+        const branches = Array.isArray(r.data?.branches) ? r.data.branches : [];
+        setAccessibleBranches(branches);
+        const home = r.data?.home_institution_id || null;
+        setHomeBranchId(home);
+        // Default to viewing the trainer's home institution.
+        if (home) setSelectedBranchId(home);
+      } catch (_e) { /* keep dropdown empty — picker just won't show */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Whether the trainer actually has any batches assigned — powers the
+  // "No batches assigned" empty state message vs "No students yet".
+  const [hasBatches, setHasBatches] = useState(true);
+
   // ── Load everything ──
+  //
+  // Cross-branch path (viewing a sister branch) keeps the legacy fetch:
+  //   /batches/trainer/my?institution_id=X + /enrollments/batch/:id.
+  //
+  // Home-branch path (default) uses the one-shot
+  //   /enrollments/trainer/my-students
+  // endpoint, which returns every student across every batch the trainer
+  // teaches with the full detail (photo, phone, course, batch, branch)
+  // in a single query. Attendance % is still computed per-batch in
+  // parallel from /attendance/batch/:id.
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const batchRes = await apiClient.get('/batches/trainer/my').catch(() => ({ data: { batches: [] } }));
-      const list = batchRes.data?.batches || [];
-      setBatches(list);
+      const isCrossBranch = selectedBranchId && selectedBranchId !== homeBranchId;
 
-      if (list.length === 0) {
-        setStudentsByBatch({});
-        setPctByStudent({});
+      if (isCrossBranch) {
+        // ── Cross-branch (sister branch) — legacy path ────────────
+        const batchRes = await apiClient
+          .get(`/batches/trainer/my?institution_id=${selectedBranchId}`)
+          .catch(() => ({ data: { batches: [] } }));
+        const list = batchRes.data?.batches || [];
+        setBatches(list);
+        setCrossBranch(!!batchRes.data?.cross_branch);
+        setTrainerSkills(Array.isArray(batchRes.data?.trainer_skills) ? batchRes.data.trainer_skills : []);
+        setFilteredBySkills(!!batchRes.data?.filtered_by_skills);
+        setHasBatches(list.length > 0);
+        setActiveBatch('all');
+
+        if (list.length === 0) {
+          setStudentsByBatch({});
+          setPctByStudent({});
+          return;
+        }
+
+        const enrollResults = await Promise.all(
+          list.map((b) =>
+            apiClient.get(`/enrollments/batch/${b.id}`).catch(() => ({ data: { enrollments: [] } })),
+          ),
+        );
+        const attendanceResults = await Promise.all(
+          list.map((b) =>
+            apiClient.get(`/attendance/batch/${b.id}`).catch(() => ({ data: { attendance: [] } })),
+          ),
+        );
+
+        const sbb = {};
+        list.forEach((b, i) => {
+          sbb[b.id] = (enrollResults[i].data?.enrollments || []).map((e) => ({
+            ...e,
+            batch_id:    b.id,
+            batch_name:  b.name,
+            course_id:   b.course_id,
+            course_name: b.course_name,
+          }));
+        });
+        setStudentsByBatch(sbb);
+
+        const totals = {};
+        attendanceResults.forEach((r) => {
+          (r.data?.attendance || []).forEach((rec) => {
+            const t = totals[rec.student_id] || (totals[rec.student_id] = { present: 0, total: 0 });
+            t.total++;
+            if (rec.status === 'present') t.present++;
+          });
+        });
+        const pct = {};
+        Object.entries(totals).forEach(([sid, { present, total }]) => {
+          pct[sid] = total > 0 ? Math.round((present / total) * 100) : null;
+        });
+        setPctByStudent(pct);
         return;
       }
 
-      // Fetch enrollments + attendance for every batch in parallel.
-      const enrollResults = await Promise.all(
-        list.map((b) =>
-          apiClient.get(`/enrollments/batch/${b.id}`).catch(() => ({ data: { enrollments: [] } })),
-        ),
-      );
-      const attendanceResults = await Promise.all(
-        list.map((b) =>
-          apiClient.get(`/attendance/batch/${b.id}`).catch(() => ({ data: { attendance: [] } })),
-        ),
-      );
+      // ── Home branch — one-shot trainer roster ────────────────
+      const rosterRes = await apiClient
+        .get('/enrollments/trainer/my-students')
+        .catch((err) => {
+          // eslint-disable-next-line no-console
+          console.log('[StaffStudents] trainer roster load error:',
+            err?.response?.status, err?.response?.data);
+          return { data: { students: [], has_batches: false, diagnostic: 'request_failed' } };
+        });
+      const students = rosterRes.data?.students || [];
+      setCrossBranch(false);
+      setTrainerSkills([]);
+      setFilteredBySkills(false);
+      setHasBatches(!!rosterRes.data?.has_batches);
+      setActiveBatch('all');
 
+      // Group the roster back into a { batchId: [rows] } shape so the
+      // Batch tabs keep working (same downstream code path).
       const sbb = {};
-      list.forEach((b, i) => {
-        // Stash batch + course info on each enrollment so downstream
-        // screens (StaffStudentDetail in particular) can load the
-        // course's curriculum without a second batch lookup.
-        sbb[b.id] = (enrollResults[i].data?.enrollments || []).map((e) => ({
-          ...e,
-          batch_id:    b.id,
-          batch_name:  b.name,
-          course_id:   b.course_id,
-          course_name: b.course_name,
-        }));
+      const seenBatch = new Map();
+      students.forEach((s) => {
+        const bid = s.batch_id;
+        if (!sbb[bid]) sbb[bid] = [];
+        sbb[bid].push(s);
+        if (!seenBatch.has(bid)) {
+          seenBatch.set(bid, {
+            id: bid,
+            name: s.batch_name,
+            course_id: s.course_id,
+            course_name: s.course_name,
+            branch_name: s.batch_branch_name,
+            branch_id:   s.batch_branch_id,
+          });
+        }
       });
+      setBatches(Array.from(seenBatch.values()));
       setStudentsByBatch(sbb);
 
-      // Compute attendance % per student across all their records.
-      const totals = {}; // { sid: { present: 0, total: 0 } }
+      // Fetch attendance for each batch in parallel to compute %.
+      const batchIds = Array.from(seenBatch.keys());
+      const attendanceResults = await Promise.all(
+        batchIds.map((bid) =>
+          apiClient.get(`/attendance/batch/${bid}`)
+            .catch(() => ({ data: { attendance: [] } })),
+        ),
+      );
+      const totals = {};
       attendanceResults.forEach((r) => {
         (r.data?.attendance || []).forEach((rec) => {
           const t = totals[rec.student_id] || (totals[rec.student_id] = { present: 0, total: 0 });
@@ -131,8 +262,11 @@ export default function StaffStudentsScreen({ navigation }) {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [selectedBranchId, homeBranchId]);
   useEffect(() => { load(); }, [load]);
+  // Auto-refresh when the trainer navigates back to this tab (e.g. after
+  // an admin assigns them a new batch). Prevents needing a manual pull.
+  useFocusEffect(useCallback(() => { load(); }, [load]));
 
   // ── Build a unified student list (de-duped by id when activeBatch === 'all') ──
   const allStudents = useMemo(() => {
@@ -161,8 +295,11 @@ export default function StaffStudentsScreen({ navigation }) {
     const q = search.trim().toLowerCase();
     if (q) {
       arr = arr.filter((s) =>
-        (s.student_name || '').toLowerCase().includes(q) ||
-        (s.student_email || '').toLowerCase().includes(q),
+        (s.student_name  || '').toLowerCase().includes(q) ||
+        (s.student_email || '').toLowerCase().includes(q) ||
+        (s.student_phone || '').toLowerCase().includes(q) ||
+        (s.course_name   || '').toLowerCase().includes(q) ||
+        (s.batch_name    || '').toLowerCase().includes(q),
       );
     }
     return arr;
@@ -202,13 +339,103 @@ export default function StaffStudentsScreen({ navigation }) {
           />
         }
       >
+        {/* Branch picker — sits above the search bar. Only renders when
+            the trainer's group has more than one institution (main branch
+            + at least one sub-branch). Selecting a different branch
+            re-fetches batches scoped to that branch via the new
+            cross-branch path in /batches/trainer/my. */}
+        {accessibleBranches.length > 1 ? (
+          <View style={styles.branchPickerWrap}>
+            <Text style={styles.branchPickerLabel}>BRANCH</Text>
+            <TouchableOpacity
+              style={[styles.branchPickerTrigger, branchPickerOpen && styles.branchPickerTriggerOpen]}
+              onPress={() => setBranchPickerOpen((o) => !o)}
+              activeOpacity={0.85}
+            >
+              <Users size={14} color={palette.purple.vivid} strokeWidth={2.4} />
+              <Text style={styles.branchPickerTriggerText} numberOfLines={1}>
+                {(() => {
+                  const cur = accessibleBranches.find((b) => b.id === selectedBranchId);
+                  if (!cur) return 'Choose a branch';
+                  const tag = cur.is_main ? 'Main' : 'Sub-branch';
+                  const home = cur.is_home ? ' · My institution' : '';
+                  return `${cur.name} · ${tag}${home}`;
+                })()}
+              </Text>
+              <Text style={styles.branchPickerCaret}>{branchPickerOpen ? '▴' : '▾'}</Text>
+            </TouchableOpacity>
+
+            {branchPickerOpen ? (
+              <View style={styles.branchPickerPanel}>
+                {accessibleBranches.map((b) => {
+                  const on = b.id === selectedBranchId;
+                  return (
+                    <TouchableOpacity
+                      key={b.id}
+                      style={[styles.branchPickerItem, on && styles.branchPickerItemActive]}
+                      onPress={() => {
+                        setSelectedBranchId(b.id);
+                        setBranchPickerOpen(false);
+                      }}
+                      activeOpacity={0.7}
+                    >
+                      <View style={{ flex: 1 }}>
+                        <Text
+                          style={[
+                            styles.branchPickerItemText,
+                            on && styles.branchPickerItemTextActive,
+                          ]}
+                          numberOfLines={1}
+                        >
+                          {b.name}
+                          {b.is_home ? '  · My institution' : ''}
+                        </Text>
+                        {b.city || b.pincode ? (
+                          <Text style={styles.branchPickerItemSub} numberOfLines={1}>
+                            {[b.city, b.pincode].filter(Boolean).join(' · ')}
+                          </Text>
+                        ) : null}
+                      </View>
+                      <View
+                        style={[
+                          styles.branchPickerBadge,
+                          { backgroundColor: b.is_main ? palette.purple.soft : palette.blue.soft },
+                        ]}
+                      >
+                        <Text style={[styles.branchPickerBadgeText, { color: b.is_main ? palette.purple.on : palette.blue.on }]}>
+                          {b.is_main ? 'Main' : 'Sub'}
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            ) : null}
+          </View>
+        ) : null}
+
+        {/* Skill-filter hint — only visible when the trainer is viewing
+            a sister branch's roster. Tells them WHY the batch list looks
+            short: it's been filtered to course categories that match
+            their specialisation. Hides when they're on their home branch
+            (which already shows trainer-assigned batches only). */}
+        {crossBranch && filteredBySkills ? (
+          <View style={styles.skillHintWrap}>
+            <Text style={styles.skillHintText}>
+              {batches.length === 0
+                ? `No matching courses here. None of this branch's course categories match your skills (${trainerSkills.map(titleCase).join(' · ')}).`
+                : `Showing batches matching your skills · ${trainerSkills.map(titleCase).join(' · ')}`}
+            </Text>
+          </View>
+        ) : null}
+
         {/* Search */}
         <View style={styles.searchWrap}>
           <Search size={16} color={palette.textMuted} strokeWidth={2.2} />
           <TextInput
             value={search}
             onChangeText={setSearch}
-            placeholder="Search by name or email"
+            placeholder="Search by name, phone, course or batch"
             placeholderTextColor={palette.textLight}
             style={styles.searchInput}
           />
@@ -277,12 +504,18 @@ export default function StaffStudentsScreen({ navigation }) {
           <View style={styles.emptyCard}>
             <Users size={28} color={palette.textLight} strokeWidth={1.6} />
             <Text style={styles.emptyTitle}>
-              {allStudents.length === 0 ? 'No students yet' : 'No matches'}
+              {!hasBatches
+                ? 'No batches assigned to you yet'
+                : allStudents.length === 0
+                  ? 'No students yet'
+                  : 'No matches'}
             </Text>
             <Text style={styles.emptySub}>
-              {allStudents.length === 0
-                ? 'Once students enroll into your batches, they appear here.'
-                : 'Try clearing the search or belt filter.'}
+              {!hasBatches
+                ? 'Ask your institution admin to open Batches → Edit and pick you as the trainer. Once a batch is assigned, its students will appear here automatically.'
+                : allStudents.length === 0
+                  ? 'Your batches don’t have anyone enrolled yet. New enrollments show up here automatically.'
+                  : 'Try clearing the search or belt filter.'}
             </Text>
           </View>
         ) : (
@@ -355,33 +588,61 @@ function StudentCard({ student, attendancePct, onPress }) {
     .join('')
     .toUpperCase();
   const belt = beltFor(student.student_id);
-  const gender = genderFor(student.student_id);
+  const gender = student.student_gender || genderFor(student.student_id);
   const age = ageFor(student.student_id);
+  // Photo — the new /trainer/my-students endpoint returns photo_url when
+  // student_profiles has one. Falls back to initials-in-purple avatar.
+  const photoUrl = student.student_photo_url
+    ? resolveAssetUrl(student.student_photo_url)
+    : null;
+  // Branch label — "Main Institution" for main-institution batches,
+  // else the sub-branch's name. Only display when present so we don't
+  // clutter the card with an empty pill on legacy data.
+  const branchName = student.batch_branch_name || null;
 
   const pct = attendancePct === null || attendancePct === undefined ? null : attendancePct;
   const pctLabel = pct === null ? 'No data' : `${pct}%`;
   const perf = perfFor(pct ?? 0);
   const PerfIcon = perf.icon;
 
-  const callEmergency = () => {
-    if (!student.student_email) {
-      Alert.alert('Emergency contact', 'No emergency contact saved for this student yet.');
+  const callStudent = () => {
+    // Prefer phone — the trainer wants to actually call. Fall back to
+    // email if we don't have a number, and to a friendly message if
+    // neither is on file.
+    if (student.student_phone) {
+      const cleaned = String(student.student_phone).replace(/[^0-9+]/g, '');
+      if (cleaned) {
+        Linking.openURL(`tel:${cleaned}`).catch(() =>
+          Alert.alert('Could not place call', 'Your device did not accept the dialer link.'),
+        );
+        return;
+      }
+    }
+    if (student.student_email) {
+      Linking.openURL(`mailto:${student.student_email}`).catch(() =>
+        Alert.alert('Could not open email', 'No email client found.'),
+      );
       return;
     }
-    Alert.alert(
-      'Emergency contact',
-      `Reach out via ${student.student_email}.\n(Phone contact will be added once the student profile fields land.)`,
-    );
+    Alert.alert('No contact on file', 'This student has no phone or email saved.');
   };
 
   return (
     <TouchableOpacity style={styles.card} onPress={onPress} activeOpacity={0.9}>
       <View style={styles.cardTop}>
         <View style={styles.cardAvatar}>
-          <Text style={styles.cardAvatarText}>{initials}</Text>
+          {photoUrl ? (
+            <Image
+              source={{ uri: photoUrl }}
+              style={styles.cardAvatarImg}
+              resizeMode="cover"
+            />
+          ) : (
+            <Text style={styles.cardAvatarText}>{initials}</Text>
+          )}
         </View>
         <TouchableOpacity
-          onPress={(e) => { e.stopPropagation?.(); callEmergency(); }}
+          onPress={(e) => { e.stopPropagation?.(); callStudent(); }}
           style={styles.emergencyBtn}
           activeOpacity={0.75}
         >
@@ -391,6 +652,21 @@ function StudentCard({ student, attendancePct, onPress }) {
 
       <Text style={styles.cardName} numberOfLines={1}>{student.student_name || 'Student'}</Text>
       <Text style={styles.cardMeta}>{gender} · {age} yrs</Text>
+
+      {/* Course · Batch line — the two things the trainer most needs
+          to know at a glance. */}
+      {(student.course_name || student.batch_name) ? (
+        <Text style={styles.cardCourseLine} numberOfLines={2}>
+          {[student.course_name, student.batch_name].filter(Boolean).join(' · ')}
+        </Text>
+      ) : null}
+
+      {/* Branch pill — only when present. */}
+      {branchName ? (
+        <View style={styles.branchPill}>
+          <Text style={styles.branchPillText} numberOfLines={1}>{branchName}</Text>
+        </View>
+      ) : null}
 
       {/* Belt badge */}
       <View
@@ -464,6 +740,103 @@ const styles = StyleSheet.create({
     backgroundColor: palette.purple.soft,
   },
   headerCountText: { ...type.micro, color: palette.purple.on, fontWeight: '800' },
+
+  // ── Branch picker (above search) ──────────────────────────────────────
+  branchPickerWrap: {
+    marginHorizontal: spacing.xl,
+    marginTop: spacing.md,
+  },
+  branchPickerLabel: {
+    ...type.micro,
+    color: palette.textMuted,
+    fontWeight: '800',
+    letterSpacing: 0.6,
+    marginBottom: 6,
+  },
+  branchPickerTrigger: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: palette.surface,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: palette.borderSoft,
+  },
+  branchPickerTriggerOpen: {
+    borderColor: palette.purple.vivid,
+  },
+  branchPickerTriggerText: {
+    flex: 1,
+    ...type.body,
+    fontWeight: '700',
+    color: palette.text,
+  },
+  branchPickerCaret: {
+    fontSize: 12,
+    color: palette.textMuted,
+    fontWeight: '800',
+  },
+  branchPickerPanel: {
+    marginTop: 6,
+    backgroundColor: palette.surface,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: palette.borderSoft,
+    overflow: 'hidden',
+  },
+  branchPickerItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: palette.borderSoft,
+  },
+  branchPickerItemActive: {
+    backgroundColor: palette.purple.soft,
+  },
+  branchPickerItemText: {
+    ...type.body,
+    fontWeight: '700',
+    color: palette.text,
+  },
+  branchPickerItemTextActive: {
+    color: palette.purple.on,
+  },
+  branchPickerItemSub: {
+    ...type.micro,
+    color: palette.textMuted,
+    marginTop: 2,
+  },
+  branchPickerBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 999,
+  },
+  branchPickerBadgeText: {
+    ...type.micro,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+
+  // ── Skill-filter hint (cross-branch only) ─────────────────────────
+  skillHintWrap: {
+    marginHorizontal: spacing.xl,
+    marginTop: spacing.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 8,
+    borderRadius: radius.md,
+    backgroundColor: palette.purple.soft,
+  },
+  skillHintText: {
+    ...type.micro,
+    color: palette.purple.on,
+    fontWeight: '700',
+    lineHeight: 16,
+  },
 
   // Search
   searchWrap: {
@@ -541,6 +914,34 @@ const styles = StyleSheet.create({
     backgroundColor: palette.purple.vivid,
   },
   cardAvatarText: { color: '#fff', fontWeight: '800', fontSize: 14 },
+  cardAvatarImg: {
+    width: 44, height: 44, borderRadius: 22,
+    backgroundColor: palette.purple.soft,
+  },
+  cardCourseLine: {
+    ...type.micro,
+    color: palette.textMuted,
+    fontWeight: '700',
+    marginTop: 4,
+    lineHeight: 14,
+  },
+  branchPill: {
+    alignSelf: 'flex-start',
+    marginTop: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 999,
+    backgroundColor: palette.blue.soft,
+    borderWidth: 1,
+    borderColor: palette.blue.soft,
+    maxWidth: '100%',
+  },
+  branchPillText: {
+    ...type.micro,
+    fontWeight: '800',
+    color: palette.blue.on,
+    letterSpacing: 0.3,
+  },
   emergencyBtn: {
     width: 28, height: 28, borderRadius: 14,
     alignItems: 'center', justifyContent: 'center',

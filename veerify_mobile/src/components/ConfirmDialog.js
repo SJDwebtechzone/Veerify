@@ -65,12 +65,15 @@ const VARIANT_THEMES = {
     confirmBg: '#2563EB',
     confirmText: '#FFFFFF',
   },
-  // Green — used for "Saved!" or "All set" prompts.
+  // Brand red — used for "Saved!" / "Updated!" / "All set" prompts.
+  // Was green before; flipped to brand red so the success card visually
+  // matches the rest of the app's primary CTAs and confirmation flows
+  // (Payment, Enrollment, Course Save, etc.).
   success: {
-    accent: '#10B981',
-    accentSoft: '#D1FAE5',
+    accent: '#E63946',
+    accentSoft: '#FFE4E6',
     icon: CheckCircle2,
-    confirmBg: '#10B981',
+    confirmBg: '#E63946',
     confirmText: '#FFFFFF',
   },
 };

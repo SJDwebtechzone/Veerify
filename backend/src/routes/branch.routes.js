@@ -17,9 +17,19 @@ const { requireRole } = require('../middleware/role.middleware');
 // Public nearby — must come BEFORE the verifyToken-mounted routes below.
 router.get('/nearby', ctrl.getNearby);
 
-router.get('/',        verifyToken, requireRole('admin'), ctrl.listMine);
-router.post('/',       verifyToken, requireRole('admin'), ctrl.create);
-router.put('/:id',     verifyToken, requireRole('admin'), ctrl.update);
-router.delete('/:id',  verifyToken, requireRole('admin'), ctrl.remove);
+// "Accessible branches" — list every institution under the same main-
+// branch group as the caller's home institution. Drives the trainer
+// Students-tab branch picker. Open to any signed-in role; the response
+// is scoped per-user via the JWT.
+router.get('/accessible', verifyToken, ctrl.listAccessibleBranches);
+
+router.get('/',            verifyToken, requireRole('admin'), ctrl.listMine);
+// Read-only Branch Dashboard — aggregated students / revenue / attendance
+// for a single sub-branch. Powers the "tap a branch card → drill-in"
+// flow on the mobile Branches list.
+router.get('/:id/dashboard', verifyToken, requireRole('admin'), ctrl.getBranchDashboard);
+router.post('/',           verifyToken, requireRole('admin'), ctrl.create);
+router.put('/:id',         verifyToken, requireRole('admin'), ctrl.update);
+router.delete('/:id',      verifyToken, requireRole('admin'), ctrl.remove);
 
 module.exports = router;

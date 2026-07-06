@@ -23,8 +23,9 @@ import {
 } from 'react-native';
 import {
   Search, SlidersHorizontal, Wallet, TrendingUp, AlertTriangle,
-  Clock, CheckCircle2, ChevronRight, Plus,
+  Clock, CheckCircle2, Plus,
   Info, ArrowRight, X as XIcon, ShoppingCart, Receipt, Send,
+  Hash, CreditCard, CalendarDays, RefreshCcw,
 } from 'lucide-react-native';
 
 import { palette, spacing, radius, shadows, type } from '../../../theme';
@@ -59,6 +60,61 @@ function shortDate(iso) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '';
   return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' });
+}
+
+// Full "26 Jun 2026" — used in the Earnings table where the renewal date
+// matters and the year disambiguates payments from previous cycles.
+function longDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+}
+
+// Renewal date = paid_at + (duration_months × 30 days).
+//
+// We deliberately don't use setMonth() here — calendar months are 28–31
+// days, so "paid in Jan, renew in Feb" gives a 31-day cycle for some
+// students and 28 for others. The user spec is a flat 30-day cycle per
+// month of duration, so we add (30 × months) days exactly. If
+// duration_months is missing we fall back to a single 30-day cycle.
+function addRenewalDays(iso, months) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const cycles = Number(months) > 0 ? Number(months) : 1;
+  d.setDate(d.getDate() + 30 * cycles);
+  return d.toISOString();
+}
+
+// Human label for backend payment_mode values. Anything we don't recognise
+// passes through unchanged so unexpected values are still readable.
+function modeLabel(mode) {
+  const key = String(mode || '').toLowerCase();
+  return {
+    cash:   'Cash',
+    upi:    'UPI',
+    bank:   'Bank Transfer',
+    cheque: 'Cheque',
+    online: 'Online',
+    razorpay: 'Razorpay',
+  }[key] || (mode ? String(mode) : '—');
+}
+
+// Short, stable payment id for the row.
+//
+// payment_reference can hold any of:
+//   • pay_xxxxxxxx          — real Razorpay payment id (online flow)
+//   • CASH-…, UPI-…, etc.   — synthetic reference for offline modes
+//   • MOCK-…                — older mock-pay endpoint
+//
+// Only the first one is a "real" payment id worth surfacing. For everything
+// else we fall back to the stable enrollment id so the row shows a
+// meaningful, non-fake identifier the admin can match against a receipt.
+function paymentIdFor(p) {
+  const ref = p.payment_reference;
+  if (ref && /^pay_[A-Za-z0-9]+$/.test(ref)) return ref;
+  return `#ENR-${p.id}`;
 }
 
 // Placeholder wallet ledger.
@@ -139,20 +195,45 @@ export default function PaymentsTabScreen() {
     (async () => {
       try {
         const res = await apiClient.get('/enrollments/institution/me');
-        const rows = (res.data?.enrollments || []).map((e, idx) => ({
-          id:         e.id,
-          studentId:  String(e.student_id),
-          student:    e.student_name || 'Student',
-          course:     [e.course_name, e.batch_name].filter(Boolean).join(' · ') || '—',
-          amount:     Number(e.payment_amount) || 0,
-          status:     e.payment_status || 'pending',
-          date:       shortDate(e.paid_at || e.enrolled_at),
-          photo_url:  resolvePhoto(e.student_photo_url),
-          accent:     ACCENT_CYCLE[idx % ACCENT_CYCLE.length],
-        }));
+        // Diagnostic log so we can see the actual response shape when
+        // the list looks empty. Safe to leave in — it only fires once
+        // per mount and the payload is small.
+        console.log(
+          '[PaymentsTab] enrolments response — count:',
+          res.data?.enrollments?.length,
+          'sample:',
+          res.data?.enrollments?.[0],
+        );
+        const rows = (res.data?.enrollments || []).map((e, idx) => {
+          // For unpaid rows the renewal isn't meaningful yet — only paid
+          // enrolments project a next-renewal date forward in time.
+          const renewalIso = e.payment_status === 'paid'
+            ? addRenewalDays(e.paid_at, e.course_duration_months)
+            : null;
+          return {
+            id:                 e.id,
+            payment_reference:  e.payment_reference || null,
+            studentId:          String(e.student_id),
+            student:            e.student_name || 'Student',
+            course:             [e.course_name, e.batch_name].filter(Boolean).join(' · ') || '—',
+            amount:             Number(e.payment_amount) || 0,
+            status:             e.payment_status || 'pending',
+            mode:               e.payment_mode || null,
+            paid_at:            e.paid_at || null,
+            enrolled_at:        e.enrolled_at || null,
+            renewal_at:         renewalIso,
+            date:               shortDate(e.paid_at || e.enrolled_at),
+            photo_url:          resolvePhoto(e.student_photo_url),
+            accent:             ACCENT_CYCLE[idx % ACCENT_CYCLE.length],
+          };
+        });
         if (!cancelled) setPayments(rows);
       } catch (err) {
-        console.log('[PaymentsTab] enrolments load failed:', err?.message);
+        console.log(
+          '[PaymentsTab] enrolments load failed:',
+          err?.response?.status,
+          err?.response?.data?.message || err?.message,
+        );
       } finally {
         if (!cancelled) setPaymentsLoading(false);
       }
@@ -180,7 +261,9 @@ export default function PaymentsTabScreen() {
       arr = arr.filter(p =>
         p.student.toLowerCase().includes(q) ||
         p.studentId.toLowerCase().includes(q) ||
-        p.course.toLowerCase().includes(q),
+        p.course.toLowerCase().includes(q) ||
+        paymentIdFor(p).toLowerCase().includes(q) ||
+        modeLabel(p.mode).toLowerCase().includes(q),
       );
     }
     return arr;
@@ -405,7 +488,7 @@ export default function PaymentsTabScreen() {
           <TextInput
             value={search}
             onChangeText={setSearch}
-            placeholder="Search by student, ID, or course"
+            placeholder="Search by student, payment ID, mode, or course"
             placeholderTextColor={palette.textLight}
             style={styles.searchInput}
           />
@@ -476,7 +559,7 @@ export default function PaymentsTabScreen() {
           <View style={styles.list}>
             {visible.map((p, idx) => (
               <View key={p.id}>
-                <PaymentRow payment={p} onPress={() => placeholder(p.student)} />
+                <PaymentRow payment={p} />
                 {idx < visible.length - 1 ? <View style={styles.rowDivider} /> : null}
               </View>
             ))}
@@ -537,47 +620,100 @@ function SummaryTile({ label, value, sub, accent, icon: Icon }) {
   );
 }
 
-function PaymentRow({ payment, onPress }) {
-  // Status meta defaults to 'pending' for any unexpected backend value (e.g.
-  // 'failed' before we wire its own pill) so the row never blows up.
+// Compact card for one student payment.
+//
+// Layout (top to bottom):
+//   Row 1 — avatar + student name + status pill (right)
+//   Row 2 — course / batch pill + amount (right)
+//   Row 3 — 2x2 grid of meta:
+//             Payment ID  ·  Mode of payment
+//             Paid on     ·  Next renewal
+//
+// This consolidates the five fields the user asked for into a single
+// scrollable list instead of needing to drill into each student.
+function PaymentRow({ payment }) {
   const meta = STATUS_META[payment.status] || STATUS_META.pending;
-  const Icon = meta.icon;
-  return (
-    <TouchableOpacity style={styles.row} onPress={onPress} activeOpacity={0.85}>
-      {payment.photo_url ? (
-        <Image source={{ uri: payment.photo_url }} style={styles.avatar} />
-      ) : (
-        <View style={[styles.avatar, { backgroundColor: payment.accent.soft, alignItems: 'center', justifyContent: 'center' }]}>
-          <Text style={[styles.avatarInitial, { color: payment.accent.on }]}>
-            {(payment.student || '?').charAt(0).toUpperCase()}
-          </Text>
-        </View>
-      )}
+  const StatusIcon = meta.icon;
+  const isPaid = payment.status === 'paid';
+  // Defensive: if the mapper ever hands us a row without an accent (e.g.
+  // a hot-reload race during dev), fall back to the brand red so the row
+  // still renders instead of throwing inside the style array.
+  const accent = payment.accent || palette.purple;
 
-      <View style={{ flex: 1 }}>
-        <Text style={styles.studentName} numberOfLines={1}>{payment.student}</Text>
-        <View style={styles.rowMeta}>
-          <View style={[styles.coursePill, { backgroundColor: payment.accent.soft }]}>
-            <Text style={[styles.coursePillText, { color: payment.accent.on }]}>
+  return (
+    <View style={styles.row}>
+      {/* Row 1: avatar + name + status pill */}
+      <View style={styles.rowTop}>
+        {payment.photo_url ? (
+          <Image source={{ uri: payment.photo_url }} style={styles.avatar} />
+        ) : (
+          <View
+            style={[
+              styles.avatar,
+              { backgroundColor: accent.soft, alignItems: 'center', justifyContent: 'center' },
+            ]}
+          >
+            <Text style={[styles.avatarInitial, { color: accent.on }]}>
+              {(payment.student || '?').charAt(0).toUpperCase()}
+            </Text>
+          </View>
+        )}
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text style={styles.studentName} numberOfLines={1}>{payment.student}</Text>
+          <View style={[styles.coursePill, { backgroundColor: accent.soft, alignSelf: 'flex-start', marginTop: 4 }]}>
+            <Text style={[styles.coursePillText, { color: accent.on }]} numberOfLines={1}>
               {payment.course}
             </Text>
           </View>
-          <Text style={styles.rowDate}>
-            {payment.status === 'paid' ? 'Paid' : 'Due'} {payment.date}
-          </Text>
+        </View>
+        <View style={{ alignItems: 'flex-end', gap: 4 }}>
+          <Text style={styles.amount}>₹{Number(payment.amount || 0).toLocaleString('en-IN')}</Text>
+          <View style={[styles.statusPill, { backgroundColor: meta.color.soft }]}>
+            <StatusIcon size={10} color={meta.color.vivid} strokeWidth={2.4} />
+            <Text style={[styles.statusPillText, { color: meta.color.on }]}>{meta.label}</Text>
+          </View>
         </View>
       </View>
 
-      <View style={styles.rowRight}>
-        <Text style={styles.amount}>₹{payment.amount.toLocaleString('en-IN')}</Text>
-        <View style={[styles.statusPill, { backgroundColor: meta.color.soft }]}>
-          <Icon size={10} color={meta.color.vivid} strokeWidth={2.4} />
-          <Text style={[styles.statusPillText, { color: meta.color.on }]}>{meta.label}</Text>
-        </View>
+      {/* Row 2 + 3: 2x2 meta grid — payment id, mode, paid date, renewal date */}
+      <View style={styles.metaGrid}>
+        <MetaCell
+          icon={Hash}
+          label="Payment ID"
+          value={paymentIdFor(payment)}
+        />
+        <MetaCell
+          icon={CreditCard}
+          label="Mode"
+          value={isPaid ? modeLabel(payment.mode) : '—'}
+        />
+        <MetaCell
+          icon={CalendarDays}
+          label="Paid on"
+          value={isPaid ? longDate(payment.paid_at) : '—'}
+        />
+        <MetaCell
+          icon={RefreshCcw}
+          label="Next renewal"
+          value={payment.renewal_at ? longDate(payment.renewal_at) : '—'}
+        />
       </View>
+    </View>
+  );
+}
 
-      <ChevronRight size={16} color={palette.textLight} strokeWidth={2} />
-    </TouchableOpacity>
+// One cell in the 2x2 meta grid — small icon + uppercase label + value.
+// Truncates long values (e.g. Razorpay payment_id) with ellipsis so the
+// grid layout never overflows.
+function MetaCell({ icon: Icon, label, value }) {
+  return (
+    <View style={styles.metaCell}>
+      <Icon size={12} color={palette.textLight} strokeWidth={2.4} />
+      <View style={{ flex: 1, minWidth: 0 }}>
+        <Text style={styles.metaLabel}>{label}</Text>
+        <Text style={styles.metaValue} numberOfLines={1}>{value}</Text>
+      </View>
+    </View>
   );
 }
 
@@ -934,13 +1070,17 @@ const styles = StyleSheet.create({
   emptyTitle: { ...type.h2, color: palette.text, marginTop: spacing.md },
   emptyBody: { ...type.body, color: palette.textMuted, textAlign: 'center' },
 
-  // Row
+  // Row — compact card layout. Column-stacked so we can fit the 2x2 meta
+  // grid (payment id, mode, paid date, renewal date) under the header.
   row: {
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.lg,
+    gap: spacing.md,
+  },
+  rowTop: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.md,
-    paddingVertical: spacing.md,
-    paddingHorizontal: spacing.lg,
   },
   avatar: {
     width: 42, height: 42, borderRadius: 21,
@@ -948,20 +1088,13 @@ const styles = StyleSheet.create({
   },
   avatarInitial: { ...type.h3, fontWeight: '700' },
   studentName: { ...type.bodyBold, color: palette.text },
-  rowMeta: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    marginTop: 4,
-  },
   coursePill: {
     paddingHorizontal: spacing.sm,
     paddingVertical: 2,
     borderRadius: radius.pill,
+    maxWidth: '100%',
   },
   coursePillText: { ...type.micro, fontWeight: '700' },
-  rowDate: { ...type.caption, color: palette.textMuted },
-  rowRight: { alignItems: 'flex-end', gap: 4 },
   amount: { ...type.bodyBold, color: palette.text, fontSize: 15 },
   statusPill: {
     flexDirection: 'row',
@@ -972,4 +1105,36 @@ const styles = StyleSheet.create({
     borderRadius: radius.pill,
   },
   statusPillText: { ...type.micro, fontWeight: '700' },
+
+  // 2x2 meta grid (payment id · mode · paid date · renewal date).
+  metaGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    backgroundColor: palette.surfaceAlt,
+    borderRadius: radius.md,
+    paddingVertical: spacing.sm + 2,
+    paddingHorizontal: spacing.md,
+  },
+  metaCell: {
+    width: '50%',
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 6,
+    paddingVertical: 4,
+    paddingRight: 4,
+  },
+  metaLabel: {
+    ...type.micro,
+    color: palette.textLight,
+    fontWeight: '700',
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+    fontSize: 9.5,
+  },
+  metaValue: {
+    ...type.caption,
+    color: palette.text,
+    fontWeight: '700',
+    marginTop: 1,
+  },
 });

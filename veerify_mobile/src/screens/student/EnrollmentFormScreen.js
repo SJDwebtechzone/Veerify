@@ -30,6 +30,7 @@ import { launchImageLibrary, launchCamera } from 'react-native-image-picker';
 import apiClient from '../../api/client';
 import DateField from '../../components/DateField';
 import PlanLimitModal from '../../components/PlanLimitModal';
+import { confirm } from '../../components/ConfirmDialog';
 
 // ─── Theme tokens ──────────────────────────────────────────────────────
 const BRAND = '#E63946';
@@ -80,11 +81,34 @@ export default function EnrollmentFormScreen({ route, navigation }) {
   const { batch, course, adminMode, batchId: paramBatchId } = route?.params || {};
 
   // Admin-initiated path (from the Add Student quick action) doesn't
-  // pre-bind to a batch — we let the admin pick one inside the form
-  // with a small inline dropdown.
+  // pre-bind to a batch — we let the admin pick a course first, then a
+  // batch under that course via two cascading inline dropdowns.
   const [pickedBatch, setPickedBatch] = useState(batch || null);
+  const [pickedCourseId, setPickedCourseId] = useState(batch?.course_id || null);
   const [adminBatches, setAdminBatches] = useState([]);
+  const [coursePickerOpen, setCoursePickerOpen] = useState(false);
   const [batchPickerOpen, setBatchPickerOpen] = useState(false);
+
+  // Derive the course list from the batches the admin has access to. We
+  // don't fire a separate /courses request — every batch row already
+  // carries course_id + course_name. De-dupe by course_id.
+  const adminCourses = React.useMemo(() => {
+    const map = new Map();
+    (adminBatches || []).forEach((b) => {
+      if (!b?.course_id) return;
+      if (!map.has(b.course_id)) {
+        map.set(b.course_id, { id: b.course_id, name: b.course_name || 'Untitled course' });
+      }
+    });
+    return Array.from(map.values());
+  }, [adminBatches]);
+
+  // Batches filtered by the picked course. Hides the Batch picker until
+  // a course is chosen so the admin can't pick an unrelated batch.
+  const filteredBatches = React.useMemo(() => {
+    if (!pickedCourseId) return [];
+    return (adminBatches || []).filter((b) => b.course_id === pickedCourseId);
+  }, [adminBatches, pickedCourseId]);
 
   const batchId = pickedBatch?.id || paramBatchId || batch?.id;
   const coursePrice = pickedBatch?.course_price || batch?.course_price || course?.price || 0;
@@ -235,7 +259,13 @@ export default function EnrollmentFormScreen({ route, navigation }) {
       // from any browser or other device.
       set('photo_url', resp.data.path || resp.data.url);
     } catch (err) {
-      Alert.alert('Upload failed', 'Please try a smaller image.');
+      confirm({
+        title: 'Upload failed',
+        message: 'That image is too large to upload. Please try a smaller one.',
+        variant: 'warning',
+        confirmText: 'OK',
+        hideCancel: true,
+      });
       set('photo_uri', '');
     } finally {
       setUploadingPhoto(false);
@@ -262,8 +292,26 @@ export default function EnrollmentFormScreen({ route, navigation }) {
 
   const submit = async () => {
     const err = validate();
-    if (err) { Alert.alert('Required', err); return; }
-    if (!batchId) { Alert.alert('Missing', 'No batch selected'); return; }
+    if (err) {
+      confirm({
+        title: 'Check this detail',
+        message: err,
+        variant: 'warning',
+        confirmText: 'Got it',
+        hideCancel: true,
+      });
+      return;
+    }
+    if (!batchId) {
+      confirm({
+        title: 'No batch selected',
+        message: 'Please choose a batch before submitting the enrolment.',
+        variant: 'warning',
+        confirmText: 'OK',
+        hideCancel: true,
+      });
+      return;
+    }
 
     setSubmitting(true);
     try {
@@ -316,11 +364,14 @@ export default function EnrollmentFormScreen({ route, navigation }) {
           bank:   'Bank Transfer',
           cheque: 'Cheque',
         }[(form.payment_mode || 'cash').toLowerCase()] || 'Offline';
-        Alert.alert(
-          'Student Enrolled',
-          `${form.full_name.trim()} has been enrolled and the fee was recorded as ${modeLabel}.`,
-          [{ text: 'OK', onPress: () => navigation.goBack() }],
-        );
+        confirm({
+          title: 'Student enrolled',
+          message: `${form.full_name.trim()} has been enrolled and the fee was recorded as ${modeLabel}.`,
+          variant: 'success',
+          confirmText: 'Done',
+          hideCancel: true,
+          onConfirm: () => navigation.goBack(),
+        });
         return;
       }
 
@@ -344,7 +395,21 @@ export default function EnrollmentFormScreen({ route, navigation }) {
         });
         setPlanModalOpen(true);
       } else {
-        Alert.alert('Error', data.message || 'Enrollment failed');
+        // Server-side validation (e.g. "Please enter a valid 10-digit
+        // mobile number starting with 6-9.") and other backend errors
+        // surface through here. Map the validated field to a friendlier
+        // title so the user immediately sees what to fix.
+        const fieldTitle = {
+          phone: 'Check the mobile number',
+          email: 'Check the email',
+        }[data.field] || 'Enrolment failed';
+        confirm({
+          title: fieldTitle,
+          message: data.message || 'Something went wrong while submitting. Please try again.',
+          variant: 'warning',
+          confirmText: 'Fix it',
+          hideCancel: true,
+        });
       }
     } finally {
       setSubmitting(false);
@@ -387,67 +452,144 @@ export default function EnrollmentFormScreen({ route, navigation }) {
           </View>
         ) : null}
 
-        {/* Admin-only: inline Batch picker. Only renders when the form
-            was opened from the institution admin's "Add Student" quick
-            action (adminMode=true) — students still get a pre-bound
-            batch from the CourseDetail "Enroll Now" flow. */}
+        {/* Admin-only: two cascading dropdowns — Course, then Batch.
+            Only renders when the form was opened from the institution
+            admin's "Add Student" quick action (adminMode=true). Students
+            still get a pre-bound batch from CourseDetail's "Enroll Now". */}
         {adminMode ? (
-          <View style={styles.adminBatchCard}>
-            <Text style={styles.adminBatchLabel}>Select Batch</Text>
-            <TouchableOpacity
-              style={styles.adminBatchTrigger}
-              onPress={() => setBatchPickerOpen((o) => !o)}
-              activeOpacity={0.85}
-            >
-              <Text
-                style={[
-                  styles.adminBatchTriggerText,
-                  !pickedBatch && { color: TEXT_LIGHT, fontWeight: '500' },
-                ]}
-                numberOfLines={1}
+          <>
+            {/* ── 1. Select Course ─────────────────────────────────── */}
+            <View style={styles.adminBatchCard}>
+              <Text style={styles.adminBatchLabel}>Select Course</Text>
+              <TouchableOpacity
+                style={styles.adminBatchTrigger}
+                onPress={() => {
+                  setCoursePickerOpen((o) => !o);
+                  setBatchPickerOpen(false);
+                }}
+                activeOpacity={0.85}
               >
-                {pickedBatch
-                  ? `${pickedBatch.name}${pickedBatch.course_name ? ` · ${pickedBatch.course_name}` : ''}`
-                  : 'Choose the batch this student is joining'}
-              </Text>
-              <ChevronRight
-                size={14}
-                color={TEXT_MUTED}
-                strokeWidth={2.2}
-                style={{ transform: [{ rotate: batchPickerOpen ? '90deg' : '0deg' }] }}
-              />
-            </TouchableOpacity>
+                <Text
+                  style={[
+                    styles.adminBatchTriggerText,
+                    !pickedCourseId && { color: TEXT_LIGHT, fontWeight: '500' },
+                  ]}
+                  numberOfLines={1}
+                >
+                  {(() => {
+                    const c = adminCourses.find((x) => x.id === pickedCourseId);
+                    return c ? c.name : 'Choose the course this student is enrolling in';
+                  })()}
+                </Text>
+                <ChevronRight
+                  size={14}
+                  color={TEXT_MUTED}
+                  strokeWidth={2.2}
+                  style={{ transform: [{ rotate: coursePickerOpen ? '90deg' : '0deg' }] }}
+                />
+              </TouchableOpacity>
 
-            {batchPickerOpen ? (
-              <View style={styles.adminBatchMenu}>
-                {adminBatches.length === 0 ? (
-                  <Text style={styles.adminBatchEmpty}>
-                    No batches yet — create a batch first, then come back here.
-                  </Text>
-                ) : (
-                  adminBatches.map((b) => {
-                    const isSel = pickedBatch?.id === b.id;
-                    return (
-                      <TouchableOpacity
-                        key={b.id}
-                        style={[styles.adminBatchItem, isSel && styles.adminBatchItemSelected]}
-                        onPress={() => {
-                          setPickedBatch(b);
-                          setBatchPickerOpen(false);
-                        }}
-                        activeOpacity={0.85}
-                      >
-                        <Text style={styles.adminBatchItemTitle}>{b.name || `Batch #${b.id}`}</Text>
-                        {b.course_name ? (
-                          <Text style={styles.adminBatchItemSub}>{b.course_name}</Text>
-                        ) : null}
-                      </TouchableOpacity>
-                    );
-                  })
-                )}
-              </View>
-            ) : null}
-          </View>
+              {coursePickerOpen ? (
+                <View style={styles.adminBatchMenu}>
+                  {adminCourses.length === 0 ? (
+                    <Text style={styles.adminBatchEmpty}>
+                      No courses yet — publish a course first, then come back here.
+                    </Text>
+                  ) : (
+                    adminCourses.map((c) => {
+                      const isSel = pickedCourseId === c.id;
+                      return (
+                        <TouchableOpacity
+                          key={c.id}
+                          style={[styles.adminBatchItem, isSel && styles.adminBatchItemSelected]}
+                          onPress={() => {
+                            setPickedCourseId(c.id);
+                            // Clear the batch when the course changes so
+                            // the next picker only shows valid options.
+                            if (pickedBatch && pickedBatch.course_id !== c.id) {
+                              setPickedBatch(null);
+                            }
+                            setCoursePickerOpen(false);
+                          }}
+                          activeOpacity={0.85}
+                        >
+                          <Text style={styles.adminBatchItemTitle}>{c.name}</Text>
+                        </TouchableOpacity>
+                      );
+                    })
+                  )}
+                </View>
+              ) : null}
+            </View>
+
+            {/* ── 2. Select Batch (only after a course is chosen) ──── */}
+            <View style={styles.adminBatchCard}>
+              <Text style={styles.adminBatchLabel}>Select Batch</Text>
+              <TouchableOpacity
+                style={[
+                  styles.adminBatchTrigger,
+                  !pickedCourseId && { opacity: 0.6 },
+                ]}
+                onPress={() => {
+                  if (!pickedCourseId) return;
+                  setBatchPickerOpen((o) => !o);
+                  setCoursePickerOpen(false);
+                }}
+                activeOpacity={0.85}
+                disabled={!pickedCourseId}
+              >
+                <Text
+                  style={[
+                    styles.adminBatchTriggerText,
+                    !pickedBatch && { color: TEXT_LIGHT, fontWeight: '500' },
+                  ]}
+                  numberOfLines={1}
+                >
+                  {pickedBatch
+                    ? pickedBatch.name
+                    : pickedCourseId
+                      ? 'Choose a batch under this course'
+                      : 'Pick a course first'}
+                </Text>
+                <ChevronRight
+                  size={14}
+                  color={TEXT_MUTED}
+                  strokeWidth={2.2}
+                  style={{ transform: [{ rotate: batchPickerOpen ? '90deg' : '0deg' }] }}
+                />
+              </TouchableOpacity>
+
+              {batchPickerOpen && pickedCourseId ? (
+                <View style={styles.adminBatchMenu}>
+                  {filteredBatches.length === 0 ? (
+                    <Text style={styles.adminBatchEmpty}>
+                      No batches yet for this course — create a batch first, then come back here.
+                    </Text>
+                  ) : (
+                    filteredBatches.map((b) => {
+                      const isSel = pickedBatch?.id === b.id;
+                      return (
+                        <TouchableOpacity
+                          key={b.id}
+                          style={[styles.adminBatchItem, isSel && styles.adminBatchItemSelected]}
+                          onPress={() => {
+                            setPickedBatch(b);
+                            setBatchPickerOpen(false);
+                          }}
+                          activeOpacity={0.85}
+                        >
+                          <Text style={styles.adminBatchItemTitle}>{b.name || `Batch #${b.id}`}</Text>
+                          {b.days_of_week ? (
+                            <Text style={styles.adminBatchItemSub}>{b.days_of_week}</Text>
+                          ) : null}
+                        </TouchableOpacity>
+                      );
+                    })
+                  )}
+                </View>
+              ) : null}
+            </View>
+          </>
         ) : null}
 
         {/* Photo */}

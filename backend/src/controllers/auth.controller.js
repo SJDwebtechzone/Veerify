@@ -51,68 +51,26 @@ exports.register = async (req, res) => {
     const cleanEmail = eFmt.value;
     const cleanPhone = pFmt.value;
 
-    // Check if email already exists
- const existing = await pool.query(
-  'SELECT * FROM users WHERE LOWER(email) = $1',
-  [cleanEmail]
-);
-
-if (existing.rows.length > 0) {
-
-  const existingUser = existing.rows[0];
-
-  // Active account exists
-  if (!existingUser.is_deleted) {
-    return res.status(409).json({
-      code:    'EMAIL_TAKEN',
-      field:   'email',
-      message: 'This email is already registered. Please sign in or use a different email.',
-    });
-  }
-
-  // Restore deleted account
- const hashedPassword = await bcrypt.hash(password, 10);
-
-const restored = await pool.query(
-  `
-  UPDATE users
-  SET
-    name = $1,
-    phone = $2,
-    password = $3,
-    role = $4,
-    is_deleted = FALSE,
-    deleted_at = NULL,
-    deleted_by = NULL
-  WHERE email = $5
-RETURNING id, name, email, phone, role, institution_id, created_at  `,
-  [
-    name,
-    cleanPhone,
-    hashedPassword,
-    role,
-    cleanEmail,
-  ]
-);
-
-  const user = restored.rows[0];
-
-  const token = jwt.sign(
-    {
-      id: user.id,
-      role: user.role,
-      institution_id: user.institution_id
-    },
-    process.env.JWT_SECRET,
-    { expiresIn: '7d' }
-  );
-
-  return res.status(200).json({
-    message: 'Account restored successfully',
-    token,
-    user
-  });
-}
+    // Uniqueness check — ONLY consider live rows. A soft-deleted user
+    // does not block registration: the fresh account gets its own new
+    // user_id and its own history. The old row stays soft-deleted
+    // forever for audit purposes, and the partial-unique index on
+    // users.email (migration 050) makes this INSERT safe at the DB
+    // layer too.
+    const liveExisting = await pool.query(
+      `SELECT id FROM users
+        WHERE LOWER(email) = $1
+          AND COALESCE(is_deleted, FALSE) = FALSE
+        LIMIT 1`,
+      [cleanEmail],
+    );
+    if (liveExisting.rows.length > 0) {
+      return res.status(409).json({
+        code:    'EMAIL_TAKEN',
+        field:   'email',
+        message: 'This email is already registered. Please sign in or use a different email.',
+      });
+    }
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
@@ -184,9 +142,9 @@ const result = await pool.query(
 
     // Generate JWT
     const token = jwt.sign(
-      { 
-        id: user.id, 
-        email: user.email, 
+      {
+        id: user.id,
+        email: user.email,
         role: user.role,
         institution_id: user.institution_id
       },
@@ -194,16 +152,42 @@ const result = await pool.query(
       { expiresIn: '7d' }
     );
 
+    // Look up the institution's display name once at login so the
+    // mobile can render "Academy Name" chips instantly on every screen
+    // without waiting on a follow-up /institutions/me/details fetch.
+    // Best-effort: any error here just leaves the name empty and the
+    // downstream fetch takes over.
+    let institutionName = null;
+    if (user.institution_id) {
+      try {
+        const instRow = await pool.query(
+          `SELECT COALESCE(NULLIF(name, ''), NULLIF(brand_name, '')) AS name
+             FROM institutions WHERE id = $1`,
+          [user.institution_id],
+        );
+        institutionName = instRow.rows[0]?.name || null;
+      } catch (e) {
+        console.warn('[login] institution name lookup failed:', e?.message);
+      }
+    }
+
     res.json({
       message: 'Login successful',
       token,
       user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        institution_id: user.institution_id
-      }
+        id:               user.id,
+        name:             user.name,
+        email:            user.email,
+        role:             user.role,
+        institution_id:   user.institution_id,
+        institution_name: institutionName,
+        // True for accounts that were created on someone's behalf with
+        // a temp password (currently sub-branch admins). The mobile pops
+        // a "Change password / I'll do it later" dialog when this is
+        // true. Cleared the moment the user actually changes their
+        // password via /auth/change-password (or /auth/reset-password).
+        must_change_password: !!user.must_change_password,
+      },
     });
   } catch (err) {
     console.error('Login error:', err);
@@ -233,8 +217,14 @@ exports.changePassword = async (req, res) => {
     }
 
     const hashed = await bcrypt.hash(new_password, 10);
+    // Clear must_change_password — the user now has a password they
+    // chose themselves, so the first-login dialog won't pop again.
     await pool.query(
-      'UPDATE users SET password = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+      `UPDATE users
+          SET password = $1,
+              must_change_password = FALSE,
+              updated_at = CURRENT_TIMESTAMP
+        WHERE id = $2`,
       [hashed, userId],
     );
 
@@ -249,7 +239,10 @@ exports.changePassword = async (req, res) => {
 exports.getMe = async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT id, name, email, phone, role, institution_id, status, created_at FROM users WHERE id = $1',
+      `SELECT id, name, email, phone, role, institution_id, status, created_at,
+              org_name, org_logo_url, alt_phone
+         FROM users
+        WHERE id = $1`,
       [req.user.id]
     );
 
@@ -260,6 +253,88 @@ exports.getMe = async (req, res) => {
     res.json({ user: result.rows[0] });
   } catch (err) {
     console.error('GetMe error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// PUT /api/auth/me/profile
+//
+// Powers the super-admin "My Profile" editor on the admin web. The user
+// can update their own profile card — Institution Name + Logo, display
+// Name (Owner Name), Email, Mobile, Alternate Contact, and Role (must
+// stay one of admin / super_admin).
+//
+// COALESCE(NULLIF) means: if the client sends an empty string we keep the
+// existing value. To explicitly clear a field, the client should not send
+// the key. Email uniqueness is checked manually so we can return a clean
+// 409 instead of a Postgres constraint error.
+exports.updateMyProfile = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const b = req.body || {};
+
+    // Email uniqueness — only when a new (different-from-current) email
+    // arrives, so the user can save the form unchanged without tripping it.
+    if (b.email && typeof b.email === 'string') {
+      const trimmed = b.email.trim().toLowerCase();
+      if (trimmed) {
+        const dup = await pool.query(
+          `SELECT id FROM users
+            WHERE LOWER(email) = $1
+              AND id <> $2
+              AND COALESCE(is_deleted, FALSE) = FALSE
+            LIMIT 1`,
+          [trimmed, userId],
+        );
+        if (dup.rows.length > 0) {
+          return res.status(409).json({
+            message: 'That email is already taken by another account.',
+            field:   'email',
+          });
+        }
+      }
+    }
+
+    // Role guard — only allow flipping between the two "owner" tiers.
+    // Students, trainers, parents shouldn't be reachable through this
+    // endpoint (which only the super-admin web uses), but the explicit
+    // whitelist keeps a sloppy client from elevating itself anyway.
+    const ALLOWED_ROLES = new Set(['admin', 'super_admin']);
+    if (b.role && !ALLOWED_ROLES.has(b.role)) {
+      return res.status(400).json({
+        message: 'Role must be one of: admin, super_admin.',
+        field:   'role',
+      });
+    }
+
+    const result = await pool.query(
+      `UPDATE users SET
+         org_name     = COALESCE(NULLIF($2, ''), org_name),
+         org_logo_url = COALESCE(NULLIF($3, ''), org_logo_url),
+         name         = COALESCE(NULLIF($4, ''), name),
+         email        = COALESCE(NULLIF($5, ''), email),
+         phone        = COALESCE(NULLIF($6, ''), phone),
+         alt_phone    = COALESCE(NULLIF($7, ''), alt_phone),
+         role         = COALESCE(NULLIF($8, ''), role),
+         updated_at   = NOW()
+       WHERE id = $1
+       RETURNING id, name, email, phone, role, institution_id, status,
+                 created_at, org_name, org_logo_url, alt_phone`,
+      [
+        userId,
+        b.org_name     || '',
+        b.org_logo_url || '',
+        b.name         || '',
+        b.email        ? b.email.trim().toLowerCase() : '',
+        b.phone        || '',
+        b.alt_phone    || '',
+        b.role         || '',
+      ],
+    );
+
+    res.json({ user: result.rows[0] });
+  } catch (err) {
+    console.error('updateMyProfile error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
@@ -398,11 +473,14 @@ exports.resetPassword = async (req, res) => {
     // OTP good. Hash the new password and clear the OTP fields.
     const newHash = await bcrypt.hash(newPassword, 10);
     await pool.query(
+      // OTP reset counts as a user-chosen password — clear the
+      // first-login flag so the change-password dialog doesn't pop again.
       `UPDATE users SET
-         password           = $1,
-         reset_otp_hash     = NULL,
-         reset_otp_expires  = NULL,
-         reset_otp_attempts = 0
+         password             = $1,
+         must_change_password = FALSE,
+         reset_otp_hash       = NULL,
+         reset_otp_expires    = NULL,
+         reset_otp_attempts   = 0
        WHERE id = $2`,
       [newHash, user.id],
     );

@@ -44,10 +44,29 @@ export interface RecentPending {
   plan_price: string | null;
 }
 
+// A row from GET /api/notifications — the generic inbox that carries
+// system events like "Institution profile updated", branch event
+// approval requests, etc. Shape mirrors the mobile side.
+export interface InboxItem {
+  id: number;
+  user_id: number;
+  institution_id: number | null;
+  category: string;
+  title: string;
+  message: string | null;
+  data: Record<string, any> | null;
+  read_at: string | null;
+  created_at: string;
+}
+
 interface NotificationsContextValue {
   counts: OnboardingCounts;
   recentPending: RecentPending[];
+  inbox: InboxItem[];
+  unreadInbox: number;
   refresh: () => Promise<void>;
+  markInboxRead: (id: number) => Promise<void>;
+  markAllInboxRead: () => Promise<void>;
   loading: boolean;
   error: string | null;
 }
@@ -66,6 +85,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   const { isAuthenticated } = useAuth();
   const [counts, setCounts] = useState<OnboardingCounts>(EMPTY);
   const [recentPending, setRecentPending] = useState<RecentPending[]>([]);
+  const [inbox, setInbox] = useState<InboxItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -78,9 +98,20 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     setLoading(true);
     setError(null);
     try {
-      const res = await apiClient.get('/onboarding/counts');
-      setCounts({ ...EMPTY, ...(res.data.counts || {}) });
-      setRecentPending(res.data.recent_pending || []);
+      // Two parallel fetches:
+      //   /onboarding/counts        → pending-institution counts + recent list
+      //   /notifications?limit=50   → generic inbox (system, announcements, etc.)
+      //
+      // The inbox is what carries the "Institution profile updated" ping we
+      // fire from the backend when an admin edits their profile. Catching
+      // errors on the inbox call so a 401/500 doesn't wipe out the counts.
+      const [countsRes, inboxRes] = await Promise.all([
+        apiClient.get('/onboarding/counts'),
+        apiClient.get('/notifications?limit=50').catch(() => ({ data: { notifications: [] } })),
+      ]);
+      setCounts({ ...EMPTY, ...(countsRes.data.counts || {}) });
+      setRecentPending(countsRes.data.recent_pending || []);
+      setInbox(inboxRes.data.notifications || []);
     } catch (err: any) {
       setError(err.response?.data?.message || 'Failed to load notifications');
     } finally {
@@ -89,10 +120,33 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     }
   }, [isAuthenticated]);
 
+  // Mark a single inbox row as read. Optimistic local update so the badge
+  // drops immediately; if the request fails we revert.
+  const markInboxRead = useCallback(async (id: number) => {
+    setInbox((prev) =>
+      prev.map((n) => (n.id === id && !n.read_at ? { ...n, read_at: new Date().toISOString() } : n))
+    );
+    try {
+      await apiClient.post(`/notifications/${id}/read`);
+    } catch {
+      // Best-effort — next poll will re-hydrate.
+    }
+  }, []);
+
+  const markAllInboxRead = useCallback(async () => {
+    if (inbox.every((n) => n.read_at)) return;
+    const now = new Date().toISOString();
+    setInbox((prev) => prev.map((n) => (n.read_at ? n : { ...n, read_at: now })));
+    try {
+      await apiClient.post('/notifications/read-all');
+    } catch { /* poll will resync */ }
+  }, [inbox]);
+
   useEffect(() => {
     if (!isAuthenticated) {
       setCounts(EMPTY);
       setRecentPending([]);
+      setInbox([]);
       return;
     }
     // Fetch immediately on auth, then every POLL_INTERVAL_MS.
@@ -107,8 +161,17 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     };
   }, [isAuthenticated, refresh]);
 
+  const unreadInbox = inbox.reduce((n, item) => (item.read_at ? n : n + 1), 0);
+
   return (
-    <NotificationsContext.Provider value={{ counts, recentPending, refresh, loading, error }}>
+    <NotificationsContext.Provider
+      value={{
+        counts, recentPending,
+        inbox, unreadInbox,
+        markInboxRead, markAllInboxRead,
+        refresh, loading, error,
+      }}
+    >
       {children}
     </NotificationsContext.Provider>
   );
@@ -119,7 +182,11 @@ export function useNotifications(): NotificationsContextValue {
   if (!ctx) {
     // Safe default — components that mount outside the provider get zero
     // counts rather than crashing. (Login page is the main case.)
-    return { counts: EMPTY, recentPending: [], refresh: async () => {}, loading: false, error: null };
+    return {
+      counts: EMPTY, recentPending: [], inbox: [], unreadInbox: 0,
+      markInboxRead: async () => {}, markAllInboxRead: async () => {},
+      refresh: async () => {}, loading: false, error: null,
+    };
   }
   return ctx;
 }

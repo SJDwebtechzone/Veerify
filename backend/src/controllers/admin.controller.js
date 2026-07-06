@@ -39,6 +39,35 @@ exports.getDashboardStats = async (req, res) => {
       return res.status(400).json({ message: 'No institution linked to your account' });
     }
 
+    // Resolve whether the caller is a sub-branch admin so the mobile
+    // dashboard can hide quick actions that only belong at the main
+    // institution (Add Course, Create Batch, Trainer Approvals,
+    // Refer & Earn). Cheap single-row lookup.
+    const parentRes = await pool.query(
+      'SELECT parent_institution_id FROM institutions WHERE id = $1',
+      [institutionId],
+    );
+    const isSubBranch = !!parentRes.rows[0]?.parent_institution_id;
+    const rootId      = parentRes.rows[0]?.parent_institution_id || institutionId;
+
+    // Branch-scoped WHERE fragment for anything joining `batches b`.
+    // Matches the same filter the Students / Payments / Batches tabs
+    // use, so the dashboard's Total Students / Today's Classes /
+    // Pending Fees / Revenue counts stay consistent with what the
+    // admin sees when they drill into those tabs.
+    //   • main admin  → batches with branch_id IS NULL
+    //   • sub-branch  → batches with branch_id = <their inst>
+    // We also anchor to the caller's academy tree via batch.institution_id.
+    const branchClause = isSubBranch
+      ? `b.branch_id = ${institutionId}`
+      : `b.branch_id IS NULL`;
+    const treeClause = `(b.institution_id = ${rootId}
+                         OR b.institution_id IN (
+                           SELECT id FROM institutions WHERE parent_institution_id = ${rootId}
+                         ))`;
+    // Compose the two — used inside every batch-scoped query below.
+    const batchScope = `${treeClause} AND ${branchClause}`;
+
     const todayAbbr = DAY_ABBR[new Date().getDay()];
 
     // Single round-trip — fire every query in parallel.
@@ -54,63 +83,72 @@ exports.getDashboardStats = async (req, res) => {
       recentEnrollRes,
       recentNotifRes,
     ] = await Promise.all([
-      // Total distinct students enrolled in any active batch of this institution
+      // Total distinct students enrolled in any batch under the caller's
+      // branch scope. Filters via batch.branch_id so the number matches
+      // what the Students tab shows (both surfaces used to disagree —
+      // dashboard used batch.institution_id, tab used batch.branch_id).
+      // Soft-deleted students are excluded so a removed student doesn't
+      // keep counting on the hero tile.
       pool.query(
         `SELECT COUNT(DISTINCT e.student_id)::int AS n
-         FROM enrollments e
-         JOIN batches b ON e.batch_id = b.id
-         WHERE b.institution_id = $1`,
+           FROM enrollments e
+           JOIN batches b ON e.batch_id = b.id
+           JOIN users u   ON u.id = e.student_id
+          WHERE ${batchScope}
+            AND COALESCE(u.is_deleted, false) = false`,
+      ),
+
+      // Active trainers — join users so we can filter out soft-deleted
+      // trainers (they still have a row in `trainers` but their user
+      // record is is_deleted = TRUE and their status = 'inactive').
+      // Otherwise a trainer the admin has removed from the roster keeps
+      // counting on the dashboard, which contradicts every other list.
+      pool.query(
+        `SELECT COUNT(*)::int AS n
+           FROM trainers t
+           JOIN users u ON u.id = t.user_id
+          WHERE t.institution_id = $1
+            AND COALESCE(u.is_deleted, false) = false
+            AND COALESCE(u.status, 'active') <> 'inactive'`,
         [institutionId],
       ),
 
-      // Active trainers
+      // Batches scheduled today (matching the day abbreviation, case-insensitive).
+      // Scoped to the caller's branch so the count matches the Batches tab.
       pool.query(
         `SELECT COUNT(*)::int AS n
-         FROM trainers
-         WHERE institution_id = $1`,
-        [institutionId],
+           FROM batches b
+          WHERE ${batchScope}
+            AND b.days_of_week IS NOT NULL
+            AND LOWER(b.days_of_week) LIKE '%' || $1 || '%'`,
+        [todayAbbr],
       ),
 
-      // Batches scheduled today (matching the day abbreviation, case-insensitive)
-      pool.query(
-        `SELECT COUNT(*)::int AS n
-         FROM batches
-         WHERE institution_id = $1
-           AND days_of_week IS NOT NULL
-           AND LOWER(days_of_week) LIKE '%' || $2 || '%'`,
-        [institutionId, todayAbbr],
-      ),
-
-      // Pending fees — sum + count of pending enrollments. Prefer the
-      // enrolment's explicit payment_amount when present; fall back to the
-      // course's listed price for older rows where the student hasn't
-      // initiated payment yet so we still have a useful estimate.
+      // Pending fees — sum + count of pending enrollments in the caller's
+      // branch scope. Prefer the enrolment's explicit payment_amount when
+      // present; fall back to the course's listed price for older rows.
       pool.query(
         `SELECT
            COUNT(*)::int                                                       AS pending_count,
            COALESCE(SUM(COALESCE(e.payment_amount, c.price)), 0)::numeric     AS pending_total
-         FROM enrollments e
-         JOIN batches b ON e.batch_id = b.id
-         JOIN courses c ON b.course_id = c.id
-         WHERE b.institution_id = $1
-           AND e.payment_status = 'pending'`,
-        [institutionId],
+           FROM enrollments e
+           JOIN batches b ON e.batch_id = b.id
+           JOIN courses c ON b.course_id = c.id
+          WHERE ${batchScope}
+            AND e.payment_status = 'pending'`,
       ),
 
-      // Revenue this month — sum of the REAL paid amount on enrollments
-      // whose payment landed in the current calendar month. We use
-      // payment_amount (set when the student paid) rather than the
-      // course's listed price, and COALESCE(paid_at, enrolled_at) so legacy
-      // rows without a recorded paid_at still get attributed to the month
-      // the enrolment happened. Without this, the dashboard never moves on
-      // new payments — only on new enrolments.
+      // Revenue this month — sum of REAL paid amounts on enrollments
+      // whose payment landed in the current calendar month. Scoped to
+      // the caller's branch via the batch join so branch admins only
+      // see their branch's revenue.
       pool.query(
         `SELECT COALESCE(SUM(e.payment_amount), 0)::numeric AS total
-         FROM enrollments e
-         WHERE e.institution_id = $1
-           AND e.payment_status = 'paid'
-           AND COALESCE(e.paid_at, e.enrolled_at) >= date_trunc('month', NOW())`,
-        [institutionId],
+           FROM enrollments e
+           JOIN batches b ON b.id = e.batch_id
+          WHERE ${batchScope}
+            AND e.payment_status = 'paid'
+            AND COALESCE(e.paid_at, e.enrolled_at) >= date_trunc('month', NOW())`,
       ),
 
       // Attendance % this month — present / (present + absent + late). We
@@ -126,9 +164,8 @@ exports.getDashboardStats = async (req, res) => {
       ),
 
       // Monthly revenue series for the last 6 calendar months (oldest first).
-      // Same fix as above — bucket by COALESCE(paid_at, enrolled_at) and sum
-      // the real payment_amount so the chart reflects actual cash inflow,
-      // not enrolment events times the listed price.
+      // Scoped to the caller's branch via the batch join so branch admins
+      // see just their branch's cash inflow, not the whole academy's.
       pool.query(
         `WITH months AS (
            SELECT generate_series(
@@ -143,13 +180,15 @@ exports.getDashboardStats = async (req, res) => {
            COALESCE(SUM(e.payment_amount), 0)::numeric AS total
          FROM months m
          LEFT JOIN enrollments e
-           ON e.institution_id = $1
-           AND e.payment_status = 'paid'
+           ON e.payment_status = 'paid'
            AND COALESCE(e.paid_at, e.enrolled_at) >= m.m
            AND COALESCE(e.paid_at, e.enrolled_at) <  m.m + INTERVAL '1 month'
+           AND EXISTS (
+             SELECT 1 FROM batches b
+              WHERE b.id = e.batch_id AND ${batchScope}
+           )
          GROUP BY m.m
          ORDER BY m.m`,
-        [institutionId],
       ),
 
       // Unread notifications for this admin user
@@ -161,21 +200,22 @@ exports.getDashboardStats = async (req, res) => {
         [req.user.id],
       ),
 
-      // Latest 5 enrollments — fuel for the Recent Activity feed
+      // Latest 5 enrollments — fuel for the Recent Activity feed. Scoped
+      // to the caller's branch so the feed only shows enrolments the
+      // admin actually handles.
       pool.query(
         `SELECT
            e.id, e.enrolled_at, e.payment_status,
            u.name  AS student_name,
            b.name  AS batch_name,
            c.name  AS course_name
-         FROM enrollments e
-         JOIN batches b ON e.batch_id = b.id
-         JOIN courses c ON b.course_id = c.id
-         JOIN users   u ON e.student_id = u.id
-         WHERE b.institution_id = $1
-         ORDER BY e.enrolled_at DESC
-         LIMIT 5`,
-        [institutionId],
+           FROM enrollments e
+           JOIN batches b ON e.batch_id = b.id
+           JOIN courses c ON b.course_id = c.id
+           JOIN users   u ON e.student_id = u.id
+          WHERE ${batchScope}
+          ORDER BY e.enrolled_at DESC
+          LIMIT 5`,
       ),
 
       // Latest 5 notifications targeted at the admin user
@@ -231,6 +271,7 @@ exports.getDashboardStats = async (req, res) => {
         attendance_pct:       attendancePct,
         unread_notifications: unreadRes.rows[0]?.n  || 0,
       },
+      is_sub_branch: isSubBranch,
       monthly_revenue: monthlyRevenueRes.rows.map((r) => ({
         label: r.label,
         total: Number(r.total) || 0,

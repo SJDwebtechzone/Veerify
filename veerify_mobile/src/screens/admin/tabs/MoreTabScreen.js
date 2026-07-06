@@ -22,7 +22,7 @@ import apiClient from '../../../api/client';
 import {
   UserCog, BookOpen, Building2, CalendarRange, Bell, Megaphone,
   MessageSquare, BarChart3, Palette, CreditCard, Settings, LifeBuoy,
-  LogOut, ChevronRight, Edit3, ShieldCheck, Layers,
+  LogOut, ChevronRight, Edit3, ShieldCheck, Layers, KeyRound, MapPin,
 } from 'lucide-react-native';
 
 import { useAuth } from '../../../context/AuthContext';
@@ -58,6 +58,11 @@ export default function MoreTabScreen({ navigation }) {
   // while it's loading or if the request fails, so we never block the
   // rest of the More screen on a slow network.
   const [planLabel, setPlanLabel] = useState('Loading plan…');
+  // isSubBranch drives whether we render the "Update Location" ListRow.
+  // We derive it from /institutions/me/details.parent_institution_id.
+  // Main-branch admins have parent_institution_id = null, so the row
+  // stays hidden for them (they edit head-office location via Settings).
+  const [isSubBranch, setIsSubBranch] = useState(false);
   useEffect(() => {
     let cancelled = false;
     apiClient.get('/plans/usage')
@@ -71,6 +76,14 @@ export default function MoreTabScreen({ navigation }) {
       .catch(() => {
         if (!cancelled) setPlanLabel('Free Plan • Active');
       });
+    // Separate probe — /me/details tells us if this admin is a sub-branch.
+    apiClient.get('/institutions/me/details')
+      .then((r) => {
+        if (cancelled) return;
+        const inst = r.data?.institution || r.data || {};
+        setIsSubBranch(!!inst.parent_institution_id);
+      })
+      .catch(() => { /* not fatal — row just stays hidden */ });
     return () => { cancelled = true; };
   }, []);
 
@@ -80,7 +93,10 @@ export default function MoreTabScreen({ navigation }) {
     trainers: 'TrainersList',
     batches:  'BatchesList',
     settings: 'Settings',
-    branches: null, // not built yet — keep placeholder
+    // Branches tile opens the institution's read-only branch roster.
+    // Scoped server-side to the caller's root (parent) institution so a
+    // sub-branch admin sees the same list a main-branch admin sees.
+    branches: 'BranchesList',
     // Events tile opens the list of every event this institution has
     // published (upcoming + past), with a FAB to add a new one. The
     // create flow lives inside that screen.
@@ -90,6 +106,10 @@ export default function MoreTabScreen({ navigation }) {
     // and "Upgrade/Downgrade/Switch" on alternates all route through to
     // the existing PlanSelection payment flow.
     pricing:  'PricingPlans',
+    // Branding → promotional banners shown on student / trainer
+    // dashboards. Each banner picks its own audience: student-only,
+    // trainer-only, or both.
+    branding: 'InstitutionBranding',
   };
   const handleTile = (key, label) => {
     const route = TILE_ROUTES[key];
@@ -127,10 +147,12 @@ export default function MoreTabScreen({ navigation }) {
         <Text style={styles.subtitle}>Settings, tools, and everything else</Text>
       </View>
 
-      {/* ───── Profile card ───── */}
+      {/* ───── Profile card ─────
+          Tapping opens the full Academy Profile screen (view mode by
+          default; pencil in the top-right toggles edit mode). */}
       <TouchableOpacity
         style={styles.profileCard}
-        onPress={() => placeholder('Academy Profile')}
+        onPress={() => navigation.navigate('AcademyProfile')}
         activeOpacity={0.9}
       >
         <View style={styles.profileAvatar}>
@@ -153,17 +175,26 @@ export default function MoreTabScreen({ navigation }) {
             redundant with that and not yet wired to an edit screen. */}
       </TouchableOpacity>
 
-      {/* ───── Grid menu ───── */}
+      {/* ───── Grid menu ─────
+          Sub-branch admins get a trimmed menu — tiles that belong to
+          the main institution (Trainers roster, Branches list,
+          Branding banners, Pricing & Plans) are hidden. Their branch
+          only manages day-to-day (Courses handled, Batches, Events,
+          Settings, Support). Main admins still see the full grid. */}
       <View style={styles.grid}>
-        {MENU.map((item) => (
-          <MenuTile
-            key={item.key}
-            label={item.label}
-            icon={item.icon}
-            accent={item.accent}
-            onPress={() => handleTile(item.key, item.label)}
-          />
-        ))}
+        {MENU
+          .filter((item) => !(
+            isSubBranch && ['trainers', 'branches', 'branding', 'pricing'].includes(item.key)
+          ))
+          .map((item) => (
+            <MenuTile
+              key={item.key}
+              label={item.label}
+              icon={item.icon}
+              accent={item.accent}
+              onPress={() => handleTile(item.key, item.label)}
+            />
+          ))}
       </View>
 
       {/* ───── Quick links list ───── */}
@@ -173,6 +204,32 @@ export default function MoreTabScreen({ navigation }) {
           label="Privacy & Security"
           accent={palette.green}
           onPress={() => placeholder('Privacy & Security')}
+        />
+        {/* Update Location — sub-branch admins only. Lets them pin
+            their branch's GPS + address so it lands correctly in the
+            student-side Academies Nearby search. Sits above Change
+            Password per product spec. */}
+        {isSubBranch ? (
+          <>
+            <View style={styles.divider} />
+            <ListRow
+              icon={MapPin}
+              label="Update Location"
+              accent={palette.orange}
+              onPress={() => navigation.navigate('UpdateLocation')}
+            />
+          </>
+        ) : null}
+        <View style={styles.divider} />
+        {/* Change Password — wired to the shared ChangePasswordScreen
+            so users (especially sub-branch admins who picked "I'll do
+            it later" on the first-login dialog) can rotate their temp
+            password whenever they want. */}
+        <ListRow
+          icon={KeyRound}
+          label="Change Password"
+          accent={palette.purple}
+          onPress={() => navigation.navigate('ChangePassword')}
         />
         <View style={styles.divider} />
         <ListRow
@@ -186,7 +243,7 @@ export default function MoreTabScreen({ navigation }) {
           icon={MessageSquare}
           label="Send feedback"
           accent={palette.pink}
-          onPress={() => placeholder('Send feedback')}
+          onPress={() => navigation.navigate('SendFeedback')}
         />
       </View>
 

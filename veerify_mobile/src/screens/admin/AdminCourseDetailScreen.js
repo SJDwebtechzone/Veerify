@@ -90,6 +90,11 @@ function parseCurriculum(c) {
 
 export default function AdminCourseDetailScreen({ route, navigation }) {
   const courseId = route?.params?.courseId;
+  // When true, hide every edit / delete affordance. Passed from
+  // CoursesListScreen when the caller is a sub-branch admin — the
+  // course catalog is owned by the main institution and shouldn't
+  // be mutated from a branch login.
+  const readOnly = !!route?.params?.readOnly;
 
   const [course, setCourse] = useState(null);
   const [batches, setBatches] = useState([]);
@@ -222,15 +227,21 @@ export default function AdminCourseDetailScreen({ route, navigation }) {
             >
               <ArrowLeft size={20} color="#fff" strokeWidth={2.4} />
             </TouchableOpacity>
-            <View style={{ flexDirection: 'row', gap: 8 }}>
-              <TouchableOpacity
-                onPress={handleEdit}
-                style={styles.heroIconBtn}
-                activeOpacity={0.85}
-              >
-                <Pencil size={18} color="#fff" strokeWidth={2.4} />
-              </TouchableOpacity>
-            </View>
+            {/* Edit pencil is hidden for sub-branch admins (readOnly) —
+                the course catalog is owned by the main institution. */}
+            {readOnly ? (
+              <View style={{ width: 40 }} />
+            ) : (
+              <View style={{ flexDirection: 'row', gap: 8 }}>
+                <TouchableOpacity
+                  onPress={handleEdit}
+                  style={styles.heroIconBtn}
+                  activeOpacity={0.85}
+                >
+                  <Pencil size={18} color="#fff" strokeWidth={2.4} />
+                </TouchableOpacity>
+              </View>
+            )}
           </View>
 
           {/* Badge + status floating on banner */}
@@ -430,7 +441,9 @@ export default function AdminCourseDetailScreen({ route, navigation }) {
         >
           {batches.length === 0 ? (
             <Text style={styles.placeholderText}>
-              No batches yet. Tap "Edit" then add a batch to start enrolling students.
+              {readOnly
+                ? 'No batches under this course yet.'
+                : 'No batches yet. Tap "Edit" then add a batch to start enrolling students.'}
             </Text>
           ) : (
             <View style={{ gap: spacing.sm }}>
@@ -575,24 +588,29 @@ export default function AdminCourseDetailScreen({ route, navigation }) {
         </Section>
 
         {/* ───── Footer actions ───── */}
-        <View style={styles.footerActions}>
-          <TouchableOpacity
-            style={[styles.btn, styles.btnPrimary]}
-            onPress={handleEdit}
-            activeOpacity={0.85}
-          >
-            <Pencil size={16} color="#fff" strokeWidth={2.4} />
-            <Text style={styles.btnPrimaryText}>Edit Course</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.btn, styles.btnDanger]}
-            onPress={handleDelete}
-            activeOpacity={0.85}
-          >
-            <Trash2 size={16} color={palette.rose.on} strokeWidth={2.4} />
-            <Text style={styles.btnDangerText}>Delete</Text>
-          </TouchableOpacity>
-        </View>
+        {/* Hidden entirely for sub-branch admins (readOnly). Their view
+            of a course is informational only — the catalog lives at
+            the main institution. */}
+        {readOnly ? null : (
+          <View style={styles.footerActions}>
+            <TouchableOpacity
+              style={[styles.btn, styles.btnPrimary]}
+              onPress={handleEdit}
+              activeOpacity={0.85}
+            >
+              <Pencil size={16} color="#fff" strokeWidth={2.4} />
+              <Text style={styles.btnPrimaryText}>Edit Course</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.btn, styles.btnDanger]}
+              onPress={handleDelete}
+              activeOpacity={0.85}
+            >
+              <Trash2 size={16} color={palette.rose.on} strokeWidth={2.4} />
+              <Text style={styles.btnDangerText}>Delete</Text>
+            </TouchableOpacity>
+          </View>
+        )}
       </ScrollView>
     </View>
   );

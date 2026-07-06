@@ -13,6 +13,9 @@
 const nodemailer = require('nodemailer');
 
 const SMTP_USER = process.env.SMTP_USER;
+// Public base URL of the backend, used for links in emails. Falls back
+// to localhost during dev; production sets APP_BASE_URL in the env.
+const APP_BASE_URL = process.env.APP_BASE_URL || 'http://localhost:5000';
 const SMTP_PASS = process.env.SMTP_PASS;
 const FROM_NAME = process.env.MAIL_FROM_NAME || 'Veerify';
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || SMTP_USER;
@@ -104,10 +107,65 @@ function rupees(amountInRupeesOrString) {
 
 // ---------- Templates ----------
 
+// Render the pricing table used inside approval emails. Only enabled
+// terms show up; each row has the term label + payable price. Empty
+// input returns an empty string so the caller can no-op the section
+// cleanly for plans that haven't been configured with per-term pricing.
+function renderPricingTermsTable(pricingTerms) {
+  const enabled = Array.isArray(pricingTerms)
+    ? pricingTerms.filter((t) => t && t.is_enabled && Number(t.price) > 0)
+    : [];
+  if (enabled.length === 0) return '';
+  const TERM_LABEL = {
+    monthly:     'Monthly',
+    quarterly:   'Quarterly',
+    half_yearly: 'Half-Yearly',
+    annual:      'Yearly',
+    yearly:      'Yearly',
+  };
+  const TERM_HINT = {
+    monthly:     'billed every month',
+    quarterly:   'billed every 3 months',
+    half_yearly: 'billed every 6 months',
+    annual:      'billed once per year',
+    yearly:      'billed once per year',
+  };
+  const rows = enabled.map((t, i) => `
+    <tr>
+      <td style="padding:10px 12px;font-size:14px;color:#0f172a;
+                 border-top:${i === 0 ? '0' : '1px solid #e2e8f0'};">
+        <div style="font-weight:600;">${TERM_LABEL[t.billing_term] || t.billing_term}</div>
+        <div style="font-size:11px;color:#64748b;margin-top:2px;">${TERM_HINT[t.billing_term] || ''}</div>
+      </td>
+      <td style="padding:10px 12px;font-size:15px;font-weight:700;color:#0f172a;
+                 text-align:right;
+                 border-top:${i === 0 ? '0' : '1px solid #e2e8f0'};">
+        ${rupees(Number(t.price))}
+      </td>
+    </tr>
+  `).join('');
+  return `
+    <div style="background:#f1f5f9;border-radius:10px;padding:4px;margin:20px 0;">
+      <div style="padding:8px 12px 4px;font-size:12px;color:#64748b;
+                  text-transform:uppercase;letter-spacing:.5px;">
+        Available billing terms
+      </div>
+      <table style="width:100%;border-collapse:collapse;background:#fff;
+                    border-radius:8px;overflow:hidden;">
+        ${rows}
+      </table>
+      <div style="padding:6px 12px 8px;font-size:12px;color:#475569;">
+        Pick your preferred term inside the Veerify mobile app after signing in.
+      </div>
+    </div>
+  `;
+}
+
 function approvalEmailHtml({
   ownerName, institutionName, planName, planPrice, paymentUrl,
   trialDays = 0, graceDays = 0, effectivePrice = null,
   discountEnabled = false, discountPercent = 0,
+  pricingTerms = null, pickerUrl = null,
 }) {
   const hasTrial = Number(trialDays) > 0;
   const chargedAmount = effectivePrice != null ? effectivePrice : planPrice;
@@ -150,18 +208,21 @@ function approvalEmailHtml({
             What happens after ${trialDays} days
           </div>
           <div style="font-size:14px;color:#334155;margin-top:6px;line-height:1.6;">
-            You'll have <b>${graceDays} day${graceDays === 1 ? '' : 's'}</b> to pay
-            <b>${rupees(chargedAmount)}</b> to keep your academy active. We'll send
-            you a reminder before then.
+            You'll have <b>${graceDays} day${graceDays === 1 ? '' : 's'}</b> to pay for
+            your ${planName || 'Subscription'} plan to keep your academy active. We'll send
+            you a reminder before then. Pick whichever billing term suits you when
+            you're ready to pay.
             ${discountLine}
           </div>
         </div>
 
+        ${renderPricingTermsTable(pricingTerms)}
+
         <p style="font-size:13px;color:#64748b;margin:24px 0 6px;">
-          Want to pay early? You can use this link anytime:
+          Want to pay early? Pick a billing term below:
         </p>
         <p style="font-size:13px;word-break:break-all;margin:0 0 24px;">
-          <a href="${paymentUrl}" style="color:#2563eb;">${paymentUrl}</a>
+          <a href="${pickerUrl || paymentUrl}" style="color:#2563eb;">${pickerUrl || paymentUrl}</a>
         </p>
 
         <p style="font-size:12px;color:#94a3b8;margin:24px 0 0;">
@@ -196,23 +257,36 @@ function approvalEmailHtml({
           Plan
         </div>
         <div style="font-size:18px;font-weight:600;margin-top:4px;">
-          ${planName || 'Subscription'} — ${rupees(chargedAmount)} / month
+          ${planName || 'Subscription'}
         </div>
         ${discountLine}
       </div>
 
-      <a href="${paymentUrl}"
-         style="display:inline-block;background:#2563eb;color:#fff;text-decoration:none;
-                font-weight:600;padding:14px 24px;border-radius:10px;font-size:15px;
+      ${renderPricingTermsTable(pricingTerms)}
+
+      <p style="font-size:14px;color:#334155;line-height:1.6;margin:16px 0 8px;">
+        <b>Ready to go live?</b> Tap below to pick a billing term and pay
+        securely on Razorpay. You'll see the exact amount for each term on
+        the next screen.
+      </p>
+
+      <a href="${pickerUrl || paymentUrl}"
+         style="display:inline-block;background:#E63946;color:#fff;text-decoration:none;
+                font-weight:700;padding:14px 24px;border-radius:10px;font-size:15px;
                 margin:8px 0 20px;">
-        Pay ${rupees(chargedAmount)} now →
+        Pick a billing term & pay →
       </a>
 
       <p style="font-size:13px;color:#64748b;margin:0 0 6px;">
         If the button doesn't work, copy and paste this link into your browser:
       </p>
       <p style="font-size:13px;word-break:break-all;margin:0 0 24px;">
-        <a href="${paymentUrl}" style="color:#2563eb;">${paymentUrl}</a>
+        <a href="${pickerUrl || paymentUrl}" style="color:#2563eb;">${pickerUrl || paymentUrl}</a>
+      </p>
+
+      <p style="font-size:12px;color:#94a3b8;margin:0 0 24px;">
+        Or open the Veerify mobile app and sign in with your registered
+        email — you can pick a billing term from the Payment screen there too.
       </p>
 
       <hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0;" />
@@ -241,6 +315,7 @@ function approvalEmailHtml({
 function approvalNoLinkEmailHtml({
   ownerName, institutionName, planName, planPrice,
   effectivePrice = null, discountEnabled = false, discountPercent = 0,
+  pricingTerms = null, pickerUrl = null,
 }) {
   const chargedAmount = effectivePrice != null ? effectivePrice : planPrice;
   const discountLine = discountEnabled && discountPercent > 0
@@ -276,10 +351,12 @@ function approvalNoLinkEmailHtml({
           Plan
         </div>
         <div style="font-size:18px;font-weight:600;margin-top:4px;">
-          ${planName || 'Subscription'} — ${rupees(chargedAmount)}
+          ${planName || 'Subscription'}
         </div>
         ${discountLine}
       </div>
+
+      ${renderPricingTermsTable(pricingTerms)}
 
       <p style="font-size:12px;color:#94a3b8;margin:24px 0 0;">
         Questions? Reply to this email or write to
@@ -344,7 +421,19 @@ async function sendApprovalEmail({
   to, ownerName, institutionName, planName, planPrice, paymentUrl,
   trialDays = 0, graceDays = 0, effectivePrice = null,
   discountEnabled = false, discountPercent = 0,
+  // Array of { billing_term, price, is_enabled } — the per-term
+  // pricing lifted from the plan. Only enabled rows render.
+  pricingTerms = null,
+  // Institution id — used to build the "pick a term & pay" landing
+  // URL. When omitted we fall through to the legacy paymentUrl button.
+  institutionId = null,
 }) {
+  // Build the picker URL. Owners click ONE link in the email → they
+  // land on our HTML page, pick a term, then get redirected to
+  // Razorpay for that term's exact amount.
+  const pickerUrl = institutionId
+    ? `${APP_BASE_URL}/api/onboarding/pay-approval/${institutionId}`
+    : null;
   const t = getTransporter();
   if (!t) return { ok: false, error: 'SMTP not configured' };
   try {
@@ -354,15 +443,17 @@ async function sendApprovalEmail({
       ? `${institutionName} approved on Veerify — payment link coming shortly`
       : hasTrial
         ? `${institutionName} approved on Veerify — your ${trialDays}-day free trial is live`
-        : `${institutionName} approved on Veerify — complete payment to go live`;
+        : `${institutionName} approved on Veerify — pick a billing term to go live`;
     const html = hasLink
       ? approvalEmailHtml({
           ownerName, institutionName, planName, planPrice, paymentUrl,
           trialDays, graceDays, effectivePrice, discountEnabled, discountPercent,
+          pricingTerms, pickerUrl,
         })
       : approvalNoLinkEmailHtml({
           ownerName, institutionName, planName, planPrice,
           effectivePrice, discountEnabled, discountPercent,
+          pricingTerms, pickerUrl,
         });
     const info = await t.sendMail({
       from: `"${FROM_NAME}" <${SMTP_USER}>`,

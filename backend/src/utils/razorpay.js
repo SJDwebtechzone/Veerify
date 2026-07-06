@@ -41,7 +41,7 @@ function getClient() {
  * Reference for the API:
  *   https://razorpay.com/docs/api/payments/payment-links/
  */
-async function createPaymentLink({ amountInRupees, institution }) {
+async function createPaymentLink({ amountInRupees, institution, notes: extraNotes }) {
   const c = getClient();
   if (!c) return { ok: false, error: 'Razorpay not configured' };
 
@@ -72,9 +72,13 @@ async function createPaymentLink({ amountInRupees, institution }) {
       // The webhook uses notes.institution_id as a back-pointer. We also save
       // the payment_link.id on the row, but notes give us a safety net if a
       // future Razorpay payload shape changes.
+      // Callers can attach extra notes (e.g. action, target_plan_id) — those
+      // ride alongside the defaults so the webhook can differentiate
+      // onboarding / renew / change_plan.
       notes: {
         institution_id: String(institution.id),
         plan_name: institution.plan_name || '',
+        ...(extraNotes && typeof extraNotes === 'object' ? extraNotes : {}),
       },
       callback_url: `${APP_BASE_URL}/payment-complete?institution_id=${institution.id}`,
       callback_method: 'get',

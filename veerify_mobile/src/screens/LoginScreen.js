@@ -7,6 +7,7 @@ import {
 import Svg, { Path, Circle, G } from 'react-native-svg';
 import { useAuth } from '../context/AuthContext';
 import { confirm } from '../components/ConfirmDialog';
+import { navigate } from '../navigation/navigationRef';
 
 // Single OK-only branded notice — replaces native Alert.alert so the
 // login screen's error popups match the rest of the app's red dialogs.
@@ -182,7 +183,36 @@ export default function LoginScreen({ navigation }) {
     setLoading(true);
     const result = await login(email, password);
     setLoading(false);
-    if (!result.success) notice('Login failed', result.message);
+    if (!result.success) {
+      notice('Login failed', result.message);
+      return;
+    }
+
+    // First-login password change prompt. The backend returns
+    // user.must_change_password=true for accounts created on the user's
+    // behalf with a temp password (currently sub-branch admins). We
+    // surface the styled dialog here so it overlays whatever screen the
+    // navigator switched to (AdminDashboard etc.). The user can either
+    // jump to the Change Password screen, or defer with "I'll do it
+    // later" and continue using the temp password — the flag stays set
+    // server-side so the dialog re-appears on the next login.
+    if (result.user?.must_change_password) {
+      // Defer slightly so the navigator finishes mounting the new stack
+      // before we try to navigate into ChangePassword.
+      setTimeout(() => {
+        confirm({
+          title:           'Set a new password',
+          message:         "Your account was created with a temporary password. We recommend changing it now — you can do it later if you prefer.",
+          variant:         'info',
+          confirmText:     'Change password',
+          cancelText:      "I'll do it later",
+          onConfirm:       () => {
+            try { navigate('ChangePassword'); } catch (_) { /* ignore */ }
+          },
+          // onCancel: nothing — user keeps using the temp password.
+        });
+      }, 250);
+    }
   };
 
   return (

@@ -73,6 +73,38 @@ export default function BranchesListScreen({ navigation }) {
     );
   };
 
+  // Pre-flight plan-limit check — we call /plans/usage before opening
+  // the Add form so the user sees the upgrade block immediately instead
+  // of filling out the whole form only to be 402'd on Save. If the
+  // usage endpoint itself fails we fall through and let the create
+  // endpoint be the source of truth (the backend re-checks anyway).
+  const openCreate = async () => {
+    try {
+      const r = await apiClient.get('/plans/usage');
+      const b = r.data?.branches || {};
+      const limit  = Number(b.limit  || 0);
+      const used   = Number(b.current || 0);
+      const unlim  = !!b.unlimited || limit >= 999 || limit === 0;
+      if (!unlim && used >= limit) {
+        Alert.alert(
+          'Branch limit reached',
+          'Branch limit reached. Please upgrade your plan to add more branches.',
+        );
+        return;
+      }
+    } catch { /* fall through — backend will re-check on POST */ }
+    navigation.navigate('CreateBranch');
+  };
+
+  const openEdit = (branch) => {
+    // Editing works for both flavors. Sub-branch edits route through a
+    // dedicated main-admin endpoint (PATCH /institutions/sub-branches/:id)
+    // that updates the institutions row; satellite edits use PUT
+    // /branches/:id. The CreateBranch screen switches between them by
+    // reading branch.branch_kind.
+    navigation.navigate('CreateBranch', { branch });
+  };
+
   const openMaps = (branch) => {
     if (branch.latitude && branch.longitude) {
       Linking.openURL(
@@ -134,7 +166,7 @@ export default function BranchesListScreen({ navigation }) {
             </Text>
             <TouchableOpacity
               style={styles.emptyCta}
-              onPress={() => navigation.navigate('CreateBranch')}
+              onPress={openCreate}
               activeOpacity={0.85}
             >
               <Plus size={14} color="#fff" strokeWidth={2.6} />
@@ -145,16 +177,37 @@ export default function BranchesListScreen({ navigation }) {
         renderItem={({ item }) => (
           <BranchCard
             branch={item}
-            onEdit={() => navigation.navigate('CreateBranch', { branch: item })}
-            onDelete={() => onDelete(item)}
+            onEdit={() => openEdit(item)}
+            onDelete={() => {
+              if (item.branch_kind === 'sub_branch') {
+                Alert.alert(
+                  'Sub-branch',
+                  'This is a full academy with its own login credentials, students, and trainers. Deleting it must be done from the super admin dashboard.',
+                );
+                return;
+              }
+              onDelete(item);
+            }}
             onMap={() => openMaps(item)}
+            // Tapping a sub-branch card opens the read-only Branch
+            // Dashboard (students / revenue / attendance). Satellite
+            // rows don't have their own students, so we don't expose
+            // the drill-in for them.
+            onOpen={
+              item.branch_kind === 'sub_branch'
+                ? () => navigation.navigate('BranchDashboard', {
+                    branchId: item.id,
+                    branch: item,
+                  })
+                : null
+            }
           />
         )}
       />
 
       <TouchableOpacity
         style={styles.fab}
-        onPress={() => navigation.navigate('CreateBranch')}
+        onPress={openCreate}
         activeOpacity={0.85}
       >
         <Plus size={22} color="#fff" strokeWidth={2.8} />
@@ -163,10 +216,21 @@ export default function BranchesListScreen({ navigation }) {
   );
 }
 
-function BranchCard({ branch, onEdit, onDelete, onMap }) {
+function BranchCard({ branch, onEdit, onDelete, onMap, onOpen }) {
   const hasCoords = branch.latitude != null && branch.longitude != null;
+  // Two flavors of branch coexist on the list:
+  //   sub_branch → its own login credentials, its own students
+  //   satellite  → additional physical address on the same academy
+  const isSubBranch = branch.branch_kind === 'sub_branch';
+  // Sub-branch cards are tappable — they open the Branch Dashboard.
+  // Satellite cards stay static (no per-satellite student roster).
+  const CardWrap = onOpen ? TouchableOpacity : View;
   return (
-    <View style={styles.card}>
+    <CardWrap
+      style={styles.card}
+      onPress={onOpen || undefined}
+      activeOpacity={0.9}
+    >
       <View style={styles.cardHeader}>
         <View style={styles.cardIcon}>
           <Building2 size={16} color={BRAND} strokeWidth={2.4} />
@@ -178,6 +242,11 @@ function BranchCard({ branch, onEdit, onDelete, onMap }) {
               <View style={styles.primaryBadge}>
                 <Star size={9} color="#fff" strokeWidth={2.6} />
                 <Text style={styles.primaryBadgeText}>Primary</Text>
+              </View>
+            ) : null}
+            {isSubBranch ? (
+              <View style={styles.kindBadge}>
+                <Text style={styles.kindBadgeText}>SUB-BRANCH</Text>
               </View>
             ) : null}
           </View>
@@ -199,7 +268,11 @@ function BranchCard({ branch, onEdit, onDelete, onMap }) {
       </View>
 
       {branch.address_line ? (
-        <TouchableOpacity style={styles.metaRow} onPress={onMap} activeOpacity={0.85}>
+        <TouchableOpacity
+          style={styles.metaRow}
+          onPress={(e) => { e.stopPropagation?.(); onMap && onMap(); }}
+          activeOpacity={0.85}
+        >
           <MapPin size={12} color={TEXT_MUTED} strokeWidth={2.2} />
           <Text style={styles.metaText} numberOfLines={2}>{branch.address_line}</Text>
           {hasCoords ? <ChevronRight size={12} color={TEXT_LIGHT} strokeWidth={2.4} /> : null}
@@ -228,16 +301,33 @@ function BranchCard({ branch, onEdit, onDelete, onMap }) {
       ) : null}
 
       <View style={styles.actionRow}>
-        <TouchableOpacity style={styles.editBtn} onPress={onEdit} activeOpacity={0.85}>
+        <TouchableOpacity
+          style={styles.editBtn}
+          onPress={(e) => { e.stopPropagation?.(); onEdit(); }}
+          activeOpacity={0.85}
+        >
           <Edit3 size={12} color={BRAND} strokeWidth={2.4} />
           <Text style={styles.editBtnText}>Edit</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={styles.deleteBtn} onPress={onDelete} activeOpacity={0.85}>
+        <TouchableOpacity
+          style={styles.deleteBtn}
+          onPress={(e) => { e.stopPropagation?.(); onDelete(); }}
+          activeOpacity={0.85}
+        >
           <Trash2 size={12} color="#fff" strokeWidth={2.4} />
           <Text style={styles.deleteBtnText}>Remove</Text>
         </TouchableOpacity>
       </View>
-    </View>
+
+      {/* Drill-in hint — only for sub-branches, since satellites don't
+          carry their own students / batches to dashboard from. */}
+      {onOpen ? (
+        <View style={styles.dashboardHint}>
+          <Text style={styles.dashboardHintText}>Tap card to view dashboard</Text>
+          <ChevronRight size={12} color={BRAND} strokeWidth={2.6} />
+        </View>
+      ) : null}
+    </CardWrap>
   );
 }
 
@@ -276,6 +366,15 @@ const styles = StyleSheet.create({
   },
   primaryBadgeText: { fontSize: 9, color: '#fff', fontWeight: '800', letterSpacing: 0.3 },
 
+  // Sub-branch chip — signals "has its own admin login" so the mobile
+  // admin can tell wizard-created child institutions apart from plain
+  // satellite locations.
+  kindBadge: {
+    paddingHorizontal: 6, paddingVertical: 2, borderRadius: 999,
+    backgroundColor: '#E0E7FF', borderWidth: 1, borderColor: '#C7D2FE',
+  },
+  kindBadgeText: { fontSize: 9, color: '#3730A3', fontWeight: '800', letterSpacing: 0.4 },
+
   statusPill: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999 },
   statusActive: { backgroundColor: '#D1FAE5' },
   statusInactive: { backgroundColor: '#FEF3C7' },
@@ -302,6 +401,22 @@ const styles = StyleSheet.create({
     gap: 5, paddingVertical: 9, borderRadius: 10, backgroundColor: BRAND,
   },
   deleteBtnText: { fontSize: 12, color: '#fff', fontWeight: '800' },
+
+  // Small "Tap card to view dashboard →" strip rendered at the bottom
+  // of sub-branch cards. Purely a discoverability affordance — the
+  // whole card is already tappable.
+  dashboardHint: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 4,
+    marginTop: 10,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: BRAND_SOFT,
+  },
+  dashboardHintText: {
+    fontSize: 10.5, fontWeight: '800', color: BRAND, letterSpacing: 0.4,
+    textTransform: 'uppercase',
+  },
 
   emptyCard: {
     backgroundColor: SURFACE, borderRadius: 16, padding: 24, alignItems: 'center',

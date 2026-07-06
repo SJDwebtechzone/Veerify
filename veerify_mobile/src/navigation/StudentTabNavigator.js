@@ -53,10 +53,13 @@ export default function StudentTabNavigator() {
           tabBarIcon: ({ focused }) => <TabIcon emoji="🏠" focused={focused} />,
         }}
       />
-      <Tab.Screen 
-        name="Programs" 
+      <Tab.Screen
+        name="Programs"
         component={ProgramsTabScreen}
         options={{
+          // Route name stays "Programs" so existing navigation.jumpTo('Programs')
+          // calls keep working; only the bottom-tab label is rebranded.
+          tabBarLabel: 'Courses',
           tabBarIcon: ({ focused }) => <TabIcon emoji="📚" focused={focused} />,
         }}
       />

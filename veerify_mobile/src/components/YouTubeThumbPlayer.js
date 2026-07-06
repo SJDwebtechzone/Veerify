@@ -19,11 +19,13 @@
 
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
-  View, Text, Image, TouchableOpacity, StyleSheet, Linking, Alert,
+  View, Text, Image, TouchableOpacity, StyleSheet, Linking,
+  Clipboard, Platform,
 } from 'react-native';
 import { PlayCircle, ExternalLink } from 'lucide-react-native';
 
 import { palette, radius, spacing, type, shadows } from '../theme';
+import { confirm } from './ConfirmDialog';
 
 // Try to load WebView at module-eval time. If the user hasn't installed it
 // yet we don't want to crash the screen — we degrade to external launch.
@@ -93,6 +95,12 @@ function buildEmbedHtml(videoId) {
               host: 'https://www.youtube.com',
               playerVars: {
                 autoplay: 1,
+                // mute=1 lets autoplay succeed under Android WebView's
+                // autoplay policy even when the user hasn't directly
+                // gestured on the iframe yet. The viewer can tap the
+                // speaker icon in the YouTube controls to un-mute, which
+                // is exactly how every other muted-autoplay site works.
+                mute: 1,
                 playsinline: 1,
                 end: 90,
                 rel: 0,
@@ -112,15 +120,11 @@ function buildEmbedHtml(videoId) {
               },
             });
           }
-          // If YouTube's own error UI renders inside the iframe (e.g. region
-          // blocks that don't fire onError to the JS API), scan the DOM every
-          // second for the standard error marker and post it back.
-          setInterval(function () {
-            try {
-              var p = document.querySelector('.ytp-error');
-              if (p) send({ type: 'iframe-error' });
-            } catch (_) {}
-          }, 1000);
+          // (The .ytp-error DOM scanner used to live here. It was firing on
+          // transient "loading..." UI even for videos that ended up playing
+          // fine, so we now rely on the JS-API onError + the host-side
+          // watchdog instead. Don't reintroduce without verifying that
+          // YouTube hasn't started reusing .ytp-error for non-fatal states.)
         </script>
       </body>
     </html>
@@ -139,40 +143,69 @@ export default function YouTubeThumbPlayer({ url, fallbackImage }) {
   const thumbs = videoId ? thumbUrls(videoId) : null;
 
   // Non-YouTube URL (or no URL) — degrade to external launch.
+  //
+  // We deliberately do NOT call Linking.canOpenURL() for http/https URLs.
+  // On Android 11+ the system requires every app you want to introspect
+  // to be declared in <queries> in AndroidManifest.xml, so canOpenURL()
+  // returns false on a plain emulator even when Chrome IS installed.
+  // openURL() itself works fine — it asks the OS to resolve the intent
+  // and the user's default browser (or YouTube app) opens.
+  //
+  // If openURL itself rejects (genuinely no handler), we fall back to
+  // copying the URL to the clipboard so the user can paste it into any
+  // browser manually.
   const openExternal = async () => {
+    const raw = (url || '').trim();
+    if (!raw) {
+      confirm({
+        title:       'Coming soon',
+        message:     'The intro video for this program is not yet available.',
+        variant:     'info',
+        confirmText: 'OK',
+        hideCancel:  true,
+      });
+      return;
+    }
+    const final = /^[a-z][a-z0-9+.-]*:/i.test(raw) ? raw : 'https://' + raw;
     try {
-      const raw = (url || '').trim();
-      if (!raw) {
-        Alert.alert('Coming soon', 'The intro video for this program is not yet available.');
-        return;
-      }
-      const final = /^[a-z][a-z0-9+.-]*:/i.test(raw) ? raw : 'https://' + raw;
-      const ok = await Linking.canOpenURL(final);
-      if (!ok) {
-        Alert.alert('Cannot open video', `No app on this device can open this link.\n\n${final}`);
-        return;
-      }
       await Linking.openURL(final);
     } catch (err) {
-      Alert.alert('Could not open video', err?.message || 'Try again.');
+      // Last-ditch — stash the link on the clipboard so the user has
+      // something to paste somewhere that works.
+      try { Clipboard.setString(final); } catch (_e) { /* ignore */ }
+      confirm({
+        title:       "Couldn't open the video",
+        message:     Platform.OS === 'android'
+          ? `We've copied the link to your clipboard so you can paste it into any browser:\n\n${final}`
+          : `We've copied the link so you can paste it into any browser:\n\n${final}`,
+        variant:     'warning',
+        confirmText: 'OK',
+        hideCancel:  true,
+      });
     }
   };
 
-  // YouTube IFrame Player error codes that mean "we can't embed this video":
+  // YouTube IFrame Player error codes — only the ones we KNOW are fatal:
   //   2   invalid id (rare)
-  //   5   HTML5 player can't play it
   //   100 video private / removed
   //   101 owner disabled embed
-  //   150 same as 101 (different surface)
-  //   152 undocumented playback error (Android WebView, regional, copyright)
-  //   153 same family — has been seen on Shorts / region-locked content
-  // We treat any of these as "give up and open YouTube app".
-  const EMBED_BLOCKED = new Set([2, 5, 100, 101, 150, 152, 153]);
+  //
+  // Previously we also treated 5 / 150 / 152 / 153 as fatal, but those
+  // fire even for videos where "Allow embedding" is on — typically when
+  // the video has copyrighted music, is age-restricted, was marked
+  // "Made for kids", or sits behind a regional block. Bailing the moment
+  // we see them means perfectly playable videos get bounced to YouTube.
+  // We let the watchdog (18s) catch genuine non-starters instead.
+  const EMBED_BLOCKED = new Set([2, 100, 101]);
 
-  // Watchdog: if the player never reports a "playing" state within 6s of
-  // mount, YouTube has almost certainly silently failed (shows its own
-  // "video unavailable" UI without firing onError to the JS API). We fall
-  // back to opening externally.
+  // Watchdog — only triggers when the IFrame Player API never wires up
+  // at all (network failure, blocked region, etc.). Bumped from 6s to
+  // 18s because the emulator can take 10+ seconds to spin up the YouTube
+  // IFrame API on a cold WebView, and we want to keep the user in-app.
+  //
+  // On timeout we DON'T auto-bounce to the YouTube app any more — we just
+  // collapse to the thumbnail with a friendly retry prompt. The user can
+  // tap again to retry, or fall through to "Open in YouTube" themselves.
   const watchdogRef = useRef(null);
   const reachedPlayingRef = useRef(false);
 
@@ -188,13 +221,22 @@ export default function YouTubeThumbPlayer({ url, fallbackImage }) {
     watchdogRef.current = setTimeout(() => {
       if (!reachedPlayingRef.current) {
         setPlaying(false);
-        Alert.alert(
-          'Cannot play inline',
-          'This video did not start playing. Opening in YouTube.',
-          [{ text: 'OK', onPress: () => openExternal() }],
-        );
+        // Styled confirm — two clear paths (Retry / Open in YouTube)
+        // plus a Cancel via the close X. A third-button "destructive"
+        // link on the bottom lets the user fall through to the external
+        // app without making it the primary action.
+        confirm({
+          title:           'Taking too long',
+          message:         'The video is slow to load. Tap Retry to try again, or open it in YouTube.',
+          variant:         'warning',
+          confirmText:     'Retry',
+          cancelText:      'Cancel',
+          destructiveText: 'Open in YouTube',
+          onConfirm:       () => setPlaying(true),
+          onDestructive:   () => openExternal(),
+        });
       }
-    }, 6000);
+    }, 18000);
     return () => {
       if (watchdogRef.current) clearTimeout(watchdogRef.current);
     };
@@ -204,6 +246,13 @@ export default function YouTubeThumbPlayer({ url, fallbackImage }) {
   const handleWebViewMessage = (event) => {
     try {
       const msg = JSON.parse(event.nativeEvent.data || '{}');
+
+      // Diagnostic — Metro logs show exactly what YouTube reports so we
+      // can tell "embed blocked" apart from "copyrighted music" etc.
+      if (msg.type === 'error') {
+        // eslint-disable-next-line no-console
+        console.log('[YouTubeThumbPlayer] IFrame Player error code:', msg.code);
+      }
 
       if (msg.type === 'state') {
         // 1 = playing; clear the watchdog the first time we see it.
@@ -222,11 +271,20 @@ export default function YouTubeThumbPlayer({ url, fallbackImage }) {
 
       if (msg.type === 'iframe-error' || (msg.type === 'error' && EMBED_BLOCKED.has(Number(msg.code)))) {
         setPlaying(false);
-        Alert.alert(
-          'Cannot play inline',
-          'This video can\'t be played inside the app. Opening in YouTube.',
-          [{ text: 'OK', onPress: () => openExternal() }],
-        );
+        // YouTube refused to embed this video. The institution who
+        // uploaded the link IS the channel owner, so this is almost
+        // always because they haven't enabled "Allow embedding" on the
+        // video itself (YouTube Studio → Video → Visibility → "Allow
+        // embedding"). We surface that fix in the dialog so the admin
+        // can tap "Open in YouTube" and toggle it on their own.
+        confirm({
+          title:       'Embedding is off for this video',
+          message:     'YouTube blocked the preview from playing in-app. Open it in YouTube and turn on “Allow embedding” in YouTube Studio so guests can watch it here.',
+          variant:     'warning',
+          confirmText: 'Open in YouTube',
+          cancelText:  'Cancel',
+          onConfirm:   () => openExternal(),
+        });
       } else if (msg.type === 'ended') {
         setPlaying(false);
       }
