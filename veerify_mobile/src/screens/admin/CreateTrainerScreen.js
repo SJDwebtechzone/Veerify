@@ -64,10 +64,12 @@ const GOVT_PROOF_TYPES = [
 ];
 
 // Dropdown options for the Skill / Specialization field. Single-select —
-// the trainer picks one discipline. Yoga is included alongside the
-// existing combat disciplines so wellness-focused trainers can register.
+// the trainer picks one discipline. Yoga + Tamil traditional arts are
+// included alongside the combat disciplines so wellness- and
+// tradition-focused trainers can register.
 const SKILL_SUGGESTIONS = [
-  'Karate', 'Silambam', 'Taekwondo', 'Boxing', 'Muay Thai',
+  'Karate', 'Silambam', 'Kalaripayattu', 'Adimurai',
+  'Taekwondo', 'Boxing', 'Muay Thai',
   'BJJ', 'Judo', 'Kung Fu', 'MMA', 'Self Defense', 'Yoga',
 ];
 

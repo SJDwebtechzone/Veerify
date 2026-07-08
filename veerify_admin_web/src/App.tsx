@@ -25,6 +25,7 @@ import { InstitutionMarketplaceSettings } from './pages/settings/InstitutionMark
 import { MarketplaceSettings } from './pages/settings/MarketplaceSettings';
 import { Plans } from './pages/settings/Plans';
 import { InstitutionPayouts } from './pages/payments/InstitutionPayouts';
+import { SubscriptionPayments } from './pages/payments/SubscriptionPayments';
 import { ReferralSettings } from './pages/settings/ReferralSettings';
 import { Profile } from './pages/Profile';
 import { Feedback } from './pages/feedback/Feedback';
@@ -74,7 +75,7 @@ export default function App() {
 
         {/* Payments */}
         <Route path="/payments" element={<InstitutionPayouts />} />
-        <Route path="/payments/subscriptions" element={<PlaceholderPage title="Subscription Payments" icon={Wallet} />} />
+        <Route path="/payments/subscriptions" element={<SubscriptionPayments />} />
         <Route path="/payments/pending" element={<PlaceholderPage title="Pending Payments" icon={Wallet} />} />
 
         {/* Notifications */}

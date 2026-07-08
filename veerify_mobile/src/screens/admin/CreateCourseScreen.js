@@ -368,7 +368,7 @@ export default function CreateCourseScreen({ navigation, route }) {
       {/* ── Section 1: Basic info ── */}
       <Section title="Basic Info" icon={BookOpen} accent={palette.purple}>
         <Field label="Course Name *" value={form.name} onChange={(v) => update('name', v)} placeholder="e.g., Karate — Beginner" />
-        <Field label="Category"      value={form.category} onChange={(v) => update('category', v)} placeholder="Karate, Silambam, Self Defense..." />
+        <Field label="Category"      value={form.category} onChange={(v) => update('category', v)} placeholder="Karate, Silambam, Kalaripayattu, Adimurai..." />
         <Field label="Short tagline" value={form.short_description} onChange={(v) => update('short_description', v)} placeholder="Start your martial arts journey..." />
         <Field label="Full description" value={form.description} onChange={(v) => update('description', v)} placeholder="What will students learn?" multiline />
       </Section>

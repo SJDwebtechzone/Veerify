@@ -20,10 +20,10 @@
 //   Pending Leave + Attendance % use placeholders until the real endpoints
 //   are wired in subsequent steps.
 
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, Image,
-  StyleSheet, ActivityIndicator, RefreshControl,
+  StyleSheet, ActivityIndicator, RefreshControl, Dimensions,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import {
@@ -57,16 +57,18 @@ export default function StaffDashboardScreen({ navigation }) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   // Institution promo banners targeted at trainers ("trainer" or "both"
-  // audience). Loaded once on focus; rendered as a small strip above
-  // the quick actions.
+  // audience). Refetched on focus so a banner uploaded from
+  // Institution Login → More → Branding shows up the moment the
+  // trainer re-opens their dashboard tab.
   const [banners, setBanners] = useState([]);
-  React.useEffect(() => {
+  const loadBanners = useCallback(() => {
     let cancelled = false;
     apiClient.get('/institution-banners/for-me')
       .then((r) => { if (!cancelled) setBanners(r.data?.banners || []); })
       .catch(() => { if (!cancelled) setBanners([]); });
     return () => { cancelled = true; };
   }, []);
+  useFocusEffect(useCallback(() => { loadBanners(); }, [loadBanners]));
 
   // `myLeaves` is the trainer's OWN leave history (from /trainer-leave-requests/my,
   // backed by the trainer_leave_requests table). We compute how many days
@@ -235,39 +237,11 @@ export default function StaffDashboardScreen({ navigation }) {
       </View>
 
       {/* ───── Institution banners (trainer-targeted) ─────
-          Rendered as a horizontal carousel above the quick actions.
-          Pulled from /api/institution-banners/for-me which filters by
-          the trainer's institution and 'trainer' / 'both' audience. */}
-      {banners.length > 0 ? (
-        <View style={{ marginTop: spacing.lg }}>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={{ paddingHorizontal: spacing.lg, gap: 10 }}
-            pagingEnabled
-          >
-            {banners.map((b) => {
-              const uri = resolveAssetUrl(b.image_url);
-              return (
-                <View key={b.id} style={dashStyles.banner}>
-                  {uri ? (
-                    <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="cover" />
-                  ) : null}
-                  <View style={dashStyles.bannerScrim} />
-                  <View style={dashStyles.bannerContent}>
-                    {b.title ? (
-                      <Text style={dashStyles.bannerTitle} numberOfLines={1}>{b.title}</Text>
-                    ) : null}
-                    {b.subtitle ? (
-                      <Text style={dashStyles.bannerSub} numberOfLines={2}>{b.subtitle}</Text>
-                    ) : null}
-                  </View>
-                </View>
-              );
-            })}
-          </ScrollView>
-        </View>
-      ) : null}
+          Auto-scrolling carousel above the quick actions. Falls back
+          to a branded default banner when no institution banner has
+          been uploaded, so the surface never looks empty. */}
+      <BannerCarousel banners={banners} trainerName={user?.name} />
+
 
       {/* ───── Quick Actions ───── */}
       <SectionHeader title="Quick Actions" />
@@ -460,6 +434,108 @@ function EventRow({ event, onPress }) {
 }
 
 // ─── Sub-components ────────────────────────────────────────────────────────
+
+// Banner carousel — auto-scrolls through every trainer-targeted
+// institution banner uploaded via Institution Login → More → Branding.
+// When no banner exists we show a single branded default so the strip
+// never disappears (spec: "If no banner is uploaded, display the
+// default banner.").
+function BannerCarousel({ banners, trainerName }) {
+  const SCREEN_WIDTH = Dimensions.get('window').width;
+  const CARD_WIDTH = SCREEN_WIDTH - spacing.lg * 2;
+  const PAGE = CARD_WIDTH + 10;
+
+  const scrollRef = useRef(null);
+  const indexRef  = useRef(0);
+  const [activeIdx, setActiveIdx] = useState(0);
+
+  // If no institution banners exist, render a single branded default.
+  // Marked with `isDefault: true` so styling can differ from real
+  // uploaded imagery.
+  const list = banners && banners.length > 0
+    ? banners
+    : [{
+        id: 'default',
+        isDefault: true,
+        title: trainerName ? `Welcome back, ${String(trainerName).split(' ')[0]}!` : 'Welcome to your dashboard',
+        subtitle: 'Uploaded banners from your institution will appear here.',
+      }];
+
+  useEffect(() => {
+    if (list.length < 2) return undefined;
+    const id = setInterval(() => {
+      const next = (indexRef.current + 1) % list.length;
+      indexRef.current = next;
+      scrollRef.current?.scrollTo({ x: next * PAGE, animated: true });
+      setActiveIdx(next);
+    }, 4000);
+    return () => clearInterval(id);
+  }, [list.length, PAGE]);
+
+  const onMomentumScrollEnd = (e) => {
+    const x = e.nativeEvent.contentOffset.x;
+    const i = Math.round(x / PAGE);
+    indexRef.current = i;
+    setActiveIdx(i);
+  };
+
+  return (
+    <View style={{ marginTop: spacing.lg }}>
+      <ScrollView
+        ref={scrollRef}
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        pagingEnabled
+        decelerationRate="fast"
+        snapToInterval={PAGE}
+        snapToAlignment="start"
+        contentContainerStyle={{ paddingHorizontal: spacing.lg, gap: 10 }}
+        onMomentumScrollEnd={onMomentumScrollEnd}
+      >
+        {list.map((b) => {
+          const uri = b.image_url ? resolveAssetUrl(b.image_url) : null;
+          return (
+            <View key={b.id} style={[dashStyles.banner, { width: CARD_WIDTH }]}>
+              {uri ? (
+                <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="cover" />
+              ) : (
+                // Default banner background — soft brand gradient via
+                // a solid tint since we don't have a linear-gradient
+                // dep on this screen. Reads as an intentional "empty"
+                // state rather than a broken image.
+                <View style={[StyleSheet.absoluteFill, { backgroundColor: palette.purple.vivid }]} />
+              )}
+              <View style={dashStyles.bannerScrim} />
+              <View style={dashStyles.bannerContent}>
+                {b.title ? (
+                  <Text style={dashStyles.bannerTitle} numberOfLines={1}>{b.title}</Text>
+                ) : null}
+                {b.subtitle ? (
+                  <Text style={dashStyles.bannerSub} numberOfLines={2}>{b.subtitle}</Text>
+                ) : null}
+              </View>
+            </View>
+          );
+        })}
+      </ScrollView>
+
+      {/* Pagination dots — only when there's more than one banner. */}
+      {list.length > 1 ? (
+        <View style={dashStyles.dotsRow}>
+          {list.map((_, i) => (
+            <View
+              key={i}
+              style={[
+                dashStyles.dot,
+                i === activeIdx && dashStyles.dotActive,
+              ]}
+            />
+          ))}
+        </View>
+      ) : null}
+    </View>
+  );
+}
 
 function StatCard({ icon: Icon, label, value, accent }) {
   return (
@@ -745,5 +821,20 @@ const dashStyles = StyleSheet.create({
     fontSize: 12,
     marginTop: 2,
     lineHeight: 16,
+  },
+
+  // Pagination dots below the carousel — one per banner. The active
+  // dot is wider + brand-red so the current slide is obvious.
+  dotsRow: {
+    flexDirection: 'row', justifyContent: 'center', gap: 6,
+    marginTop: 8,
+  },
+  dot: {
+    width: 6, height: 6, borderRadius: 3,
+    backgroundColor: palette.borderSoft,
+  },
+  dotActive: {
+    width: 16,
+    backgroundColor: palette.purple.vivid,
   },
 });

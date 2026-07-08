@@ -257,9 +257,20 @@ export default function HomeTabScreen({ navigation }) {
         </View>
 
         {/* ── Banner carousel ─────────────────────────────────── */}
-        {banners.length > 0 && (
-          <BannerCarousel banners={banners} />
-        )}
+        {/* Banner strip — always renders. When neither the institution
+            nor the CMS has any active banners the carousel shows a
+            single branded default so the surface isn't empty (spec:
+            "If no banner is uploaded, display the default banner."). */}
+        <BannerCarousel
+          banners={banners.length > 0 ? banners : [{
+            id:       'default',
+            image_url: null,
+            title:    'Welcome to Veerify',
+            subtitle: 'Explore martial arts academies near you.',
+            cta:      null,
+            label:    'NEW HERE?',
+          }]}
+        />
 
         {/* ── Categories ──────────────────────────────────────── */}
         {categories.length > 0 && (

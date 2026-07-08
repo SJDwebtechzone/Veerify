@@ -2268,6 +2268,121 @@ exports.startOverMyInstitution = async (req, res) => {
 //     flow) and falls back to payment_reference (used by the mock pay
 //     flow). The client decides which to show as the payment id.
 // ─────────────────────────────────────────────────────────────────────────────
+// GET /api/onboarding/subscription-payments  (super admin)
+//
+// Full ledger of every subscription-related payment attempt across
+// every institution — powers Web Admin → Payments → Subscription
+// Payments. One row per subscription_transactions record, joined with
+// institution (+ parent for branch info), the plan snapshot, and the
+// owner so a single fetch renders the whole table.
+//
+// Query params (all optional):
+//   ?status=paid|pending|failed|cancelled  — filter by outcome
+//   ?limit=200 (default 200)
+//   ?offset=0
+//
+// Migration-tolerant: the extra columns from migration 053
+// (billing_cycle / auto_renewal / payment_gateway / invoice_url) may
+// not be applied yet, in which case they're read as NULL so the page
+// still renders. Run 053_subscription_txn_extras.sql to enable them.
+exports.listSubscriptionPayments = async (req, res) => {
+  try {
+    const limit  = Math.min(Number.parseInt(req.query.limit, 10) || 200, 500);
+    const offset = Math.max(Number.parseInt(req.query.offset, 10) || 0, 0);
+    const status = ['paid', 'pending', 'failed', 'cancelled'].includes(req.query.status)
+      ? req.query.status : null;
+
+    const where = status ? `WHERE t.status = $1` : '';
+    const params = status ? [status] : [];
+
+    // Detect which extra columns actually exist. Newer installs (post
+    // migration 053) have all four; older installs have none. Anything
+    // missing is substituted with a NULL literal so the SELECT is
+    // valid regardless.
+    const colRes = await pool.query(
+      `SELECT column_name
+         FROM information_schema.columns
+        WHERE table_name = 'subscription_transactions'
+          AND column_name = ANY($1::text[])`,
+      [['billing_cycle', 'auto_renewal', 'payment_gateway', 'invoice_url']],
+    );
+    const have = new Set(colRes.rows.map((r) => r.column_name));
+    const col = (name, fallback = 'NULL') => have.has(name) ? `t.${name}` : fallback;
+
+    // Attach institution + parent (for branch label), the current plan's
+    // catalog details, and the owner. `plan_name_snapshot` on the txn
+    // survives plan renames, so we prefer it and only fall back to the
+    // live plan.name when the snapshot is null.
+    const rows = await pool.query(
+      `SELECT
+         t.id,
+         t.institution_id,
+         t.plan_id,
+         COALESCE(t.plan_name_snapshot, sp.name)  AS plan_name,
+         t.action,
+         t.status,
+         ${col('billing_cycle')}    AS billing_cycle,
+         ${col('auto_renewal', 'FALSE')} AS auto_renewal,
+         ${col('payment_gateway', "'razorpay'")} AS payment_gateway,
+         t.razorpay_link_id,
+         t.razorpay_payment_id,
+         t.razorpay_short_url,
+         ${col('invoice_url')} AS invoice_url,
+         t.base_paise,
+         t.referral_discount_paise,
+         t.amount_paise,
+         (t.amount_paise / 100.0)::numeric(10,2) AS amount_inr,
+         t.created_at,
+         t.paid_at,
+         t.new_subscription_end,
+         i.name                     AS institution_name,
+         i.logo_url                 AS institution_logo,
+         i.subscription_start,
+         i.subscription_end,
+         i.parent_institution_id,
+         parent.name                AS parent_institution_name,
+         CASE
+           WHEN i.parent_institution_id IS NOT NULL THEN i.name
+           ELSE NULL
+         END                         AS branch_name,
+         COALESCE(parent.name, i.name) AS root_institution_name,
+         u.name                     AS owner_name,
+         u.email                    AS owner_email,
+         sp.billing_cycle           AS plan_default_billing_cycle
+       FROM subscription_transactions t
+       JOIN institutions i ON i.id = t.institution_id
+       LEFT JOIN institutions parent ON parent.id = i.parent_institution_id
+       LEFT JOIN subscription_plans sp ON sp.id = t.plan_id
+       LEFT JOIN users u ON u.id = i.owner_user_id
+       ${where}
+       ORDER BY t.created_at DESC
+       LIMIT ${limit} OFFSET ${offset}`,
+      params,
+    );
+
+    // Small counts strip so the front-end can render tab pills without
+    // a second round-trip. Independent of the current filter.
+    const counts = await pool.query(
+      `SELECT status, COUNT(*)::int AS n
+         FROM subscription_transactions
+        GROUP BY status`,
+    );
+    const countMap = { paid: 0, pending: 0, failed: 0, cancelled: 0, total: 0 };
+    counts.rows.forEach((r) => { countMap[r.status] = r.n; countMap.total += r.n; });
+
+    res.json({
+      count:    rows.rows.length,
+      payments: rows.rows,
+      counts:   countMap,
+      limit,
+      offset,
+    });
+  } catch (err) {
+    console.error('listSubscriptionPayments error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
 exports.getRecentInstitutionPayments = async (_req, res) => {
   try {
     const result = await pool.query(
@@ -2812,14 +2927,20 @@ exports.startApprovalPayment = async (req, res) => {
         `INSERT INTO subscription_transactions
            (institution_id, plan_id, plan_name_snapshot, action, previous_plan_id,
             base_paise, referral_discount_paise, amount_paise,
-            status, razorpay_link_id, razorpay_short_url)
+            status, razorpay_link_id, razorpay_short_url,
+            billing_cycle, payment_gateway)
          VALUES ($1, $2, $3, 'onboarding', NULL,
                  $4, 0, $4,
-                 'pending', $5, $6)`,
+                 'pending', $5, $6,
+                 $7, 'razorpay')`,
         [
           institution.id, institution.plan_id, institution.plan_name || null,
           linkResult.link.amountPaise,
           linkResult.link.id, linkResult.link.short_url,
+          // billing term picked at mint time — surfaces on the Super
+          // Admin subscription-payments list without needing to join
+          // back to plan_pricing.
+          rawTerm || null,
         ],
       );
     } catch (err) {
@@ -2970,13 +3091,18 @@ exports.createRenewalPaymentLink = async (req, res) => {
       [linkResult.link.id, linkResult.link.short_url, linkResult.link.amountPaise, institution.id],
     );
 
-    // Record a pending row in the transactions ledger.
+    // Record a pending row in the transactions ledger. billing_cycle
+    // is the term the caller picked (monthly / quarterly / annual /
+    // half_yearly) and gets read straight off the mint result's notes
+    // so the Super Admin ledger listing gets the right label even for
+    // plans that offer several terms.
     await pool.query(
       `INSERT INTO subscription_transactions
          (institution_id, plan_id, plan_name_snapshot, action, previous_plan_id,
           base_paise, referral_discount_paise, amount_paise,
-          status, razorpay_link_id, razorpay_short_url)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10)`,
+          status, razorpay_link_id, razorpay_short_url,
+          billing_cycle, payment_gateway)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10, $11, 'razorpay')`,
       [
         institution.id,
         targetPlanId,
@@ -2988,6 +3114,9 @@ exports.createRenewalPaymentLink = async (req, res) => {
         linkResult.link.amountPaise,
         linkResult.link.id,
         linkResult.link.short_url,
+        // Prefer the term the caller explicitly requested; fall back to
+        // the one baked into the notes we sent to Razorpay.
+        requestedTerm || resolvedTerm || null,
       ],
     );
 

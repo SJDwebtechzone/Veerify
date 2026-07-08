@@ -84,7 +84,9 @@ const INSTITUTION_TYPE_OPTIONS = [
 ];
 
 // Martial-arts skills the academy teaches. Multi-select chips — owners can
-// tick as many as apply. "Other" lets them add a custom one.
+// tick as many as apply. "Other" lets them add a custom one on top of any
+// selection (it is NEVER hidden or disabled by other picks — the free-text
+// row is a supplement, not an alternative).
 const SKILL_OPTIONS = [
   'Karate',
   'Taekwondo',
@@ -97,6 +99,7 @@ const SKILL_OPTIONS = [
   'Yoga',
   'Silambam',
   'Kalaripayattu',
+  'Adimurai',
   'Aikido',
   'Krav Maga',
   'Kickboxing',
@@ -234,8 +237,16 @@ export default function SetupInstitutionScreen({ navigation }) {
 
           // Skills are the new required Step 1 field. If the row predates
           // migration 028 the column will be null — fall back to empty
-          // so the validator clearly prompts the admin to pick at least one.
-          const safeSkills = Array.isArray(inst.skills) ? inst.skills : [];
+          // so the validator clearly prompts the admin to pick at least
+          // one. On submit the "Others" free-text is folded INTO
+          // `inst.skills`, so on load we split it back out: anything
+          // matching SKILL_OPTIONS becomes a checked chip, anything
+          // else lands in the Others input as a comma-joined string.
+          const rawSkills = Array.isArray(inst.skills) ? inst.skills : [];
+          const knownSet = new Set(SKILL_OPTIONS);
+          const safeSkills   = rawSkills.filter((s) => knownSet.has(s));
+          const safeOthers   = rawSkills.filter((s) => !knownSet.has(s));
+          const skillsOtherStr = safeOthers.join(', ');
 
           // Structured operating-hour slots (jsonb). If the row only has
           // the legacy text summary in `operating_hours`, seed one blank
@@ -259,7 +270,7 @@ export default function SetupInstitutionScreen({ navigation }) {
             brand_name: inst.brand_name || '',
             institution_type: primaryType,
             skills: safeSkills,
-            skills_other: '',
+            skills_other: skillsOtherStr,
             registration_number: inst.registration_number || '',
             date_of_establishment: inst.date_of_establishment
               ? String(inst.date_of_establishment).slice(0, 10) : '',
@@ -903,13 +914,24 @@ export default function SetupInstitutionScreen({ navigation }) {
         // filters) keep working without a schema migration.
         institution_type: form.institution_type || null,
         institution_types: form.institution_type ? [form.institution_type] : [],
-        // Skills the academy teaches (multi-select). If the owner typed an
-        // additional free-text skill in "other", we fold it into the array
-        // before sending.
-        skills: [
-          ...form.skills,
-          ...(form.skills_other.trim() ? [form.skills_other.trim()] : []),
-        ],
+        // Skills the academy teaches (multi-select). The chip selection
+        // + anything typed in Others are merged into a single array.
+        // Others is comma-tolerant: "Wing Chun, Capoeira" becomes two
+        // separate entries. Duplicates are dropped so re-saving after
+        // an edit doesn't grow the list.
+        skills: (() => {
+          const extras = form.skills_other
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean);
+          const seen = new Set();
+          const merged = [];
+          [...form.skills, ...extras].forEach((s) => {
+            const key = s.toLowerCase();
+            if (!seen.has(key)) { seen.add(key); merged.push(s); }
+          });
+          return merged;
+        })(),
         registration_number: form.registration_number.trim(),
         date_of_establishment: form.date_of_establishment || null,
         logo_url: form.logo_url || null,
@@ -1906,10 +1928,11 @@ function SkillsMultiSelect({ values, onToggle, options, other, onOtherChange }) 
               <TouchableOpacity
                 key={opt}
                 style={[styles.skillsItem, on && styles.skillsItemActive]}
-                onPress={() => {
-                  onToggle(opt);
-                  setOpen(false);
-                }}
+                // Panel stays open so the owner can pick multiple
+                // disciplines in one visit (spec: "Allow selecting
+                // multiple skills."). Tap the trigger row again — or
+                // anywhere outside the panel — to close.
+                onPress={() => onToggle(opt)}
                 activeOpacity={0.7}
               >
                 <Text
@@ -1927,29 +1950,29 @@ function SkillsMultiSelect({ values, onToggle, options, other, onOtherChange }) 
         </View>
       ) : null}
 
+      {/* Others (free-text). ALWAYS enabled, regardless of how many
+          skills are picked from the list above (spec: "If any skill
+          is selected, the user should still be able to enable and
+          configure Others."). Whatever the owner types here gets
+          folded into `skills` on submit alongside the picked chips. */}
       <View style={{ marginTop: 12 }}>
-        <Text
-          style={[
-            styles.skillsOtherLabel,
-            selected.length > 0 && styles.skillsOtherLabelDisabled,
-          ]}
-        >
-          Other (optional)
-          {selected.length > 0 ? '  •  disabled while skills are selected' : ''}
+        <Text style={styles.skillsOtherLabel}>
+          Others (optional)
         </Text>
         <TextInput
-          style={[styles.input, selected.length > 0 && styles.inputDisabled]}
-          placeholder={
-            selected.length > 0
-              ? 'Clear selected skills to use this field'
-              : 'e.g. Wing Chun, Capoeira…'
-          }
+          style={styles.input}
+          placeholder="e.g. Wing Chun, Capoeira, Kalari…"
           placeholderTextColor={TEXT_LIGHT}
           value={other}
           onChangeText={onOtherChange}
           maxLength={60}
-          editable={selected.length === 0}
         />
+        {selected.length > 0 ? (
+          <Text style={styles.skillsOtherHint}>
+            Anything you type here will be saved alongside the {selected.length} discipline
+            {selected.length === 1 ? '' : 's'} you selected.
+          </Text>
+        ) : null}
       </View>
     </View>
   );
@@ -3089,6 +3112,15 @@ const styles = StyleSheet.create({
   },
   skillsOtherLabelDisabled: {
     color: TEXT_LIGHT,
+  },
+  // Small helper caption under the Others input — tells the owner
+  // whatever they type will be merged with their chip selection.
+  skillsOtherHint: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: TEXT_MUTED,
+    marginTop: 6,
+    lineHeight: 15,
   },
 
   // ── Skills dropdown (in-place expanding multi-select) ────────────────

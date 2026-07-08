@@ -42,6 +42,142 @@ import {
 } from '../data/mockData';
 import { formatCurrency, formatNumber, formatDate } from '../lib/utils';
 
+// ─── CSV export helpers ────────────────────────────────────────────
+// Kept in this file (rather than a shared utility) because the CSV
+// shape is tightly coupled to what the dashboard actually renders.
+
+/** Escape a single CSV cell per RFC 4180 — quotes doubled, wrap when needed. */
+function csvCell(v: unknown): string {
+  if (v == null) return '';
+  const s = String(v);
+  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+/** Turn an array of records into a CSV block (header row + N data rows). */
+function csvBlock(headers: string[], rows: (string | number | null | undefined)[][]): string {
+  const head = headers.map(csvCell).join(',');
+  const body = rows.map((r) => r.map(csvCell).join(',')).join('\n');
+  return body ? `${head}\n${body}` : head;
+}
+
+interface CountsForExport {
+  total?:              number;
+  active?:             number;
+  pending_approval?:   number;
+  total_students?:     number;
+  total_trainers?:     number;
+  monthly_revenue?:    number;
+  [key: string]:       number | undefined;
+}
+
+/** Assemble the multi-section CSV the Export button downloads. */
+function buildDashboardCsv({
+  counts,
+  institutions,
+  payments,
+  enrollments,
+}: {
+  counts:       CountsForExport;
+  institutions: RecentInstitutionRow[];
+  payments:     RecentPaymentRow[];
+  enrollments:  RecentEnrollmentRow[];
+}): string {
+  const stamp = new Date().toLocaleString('en-IN', {
+    day: '2-digit', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  });
+
+  // Overview (KPI counts).
+  const overview = csvBlock(
+    ['Metric', 'Value'],
+    [
+      ['Total Institutions',    counts?.total            ?? 0],
+      ['Active Subscriptions',  counts?.active           ?? 0],
+      ['Pending Approvals',     counts?.pending_approval ?? 0],
+      ['Total Students',        counts?.total_students   ?? 0],
+      ['Total Trainers',        counts?.total_trainers   ?? 0],
+      ['Monthly Revenue (INR)', counts?.monthly_revenue  ?? 0],
+    ],
+  );
+
+  const instBlock = csvBlock(
+    ['ID', 'Name', 'City', 'Status', 'Owner', 'Plan', 'Plan Price', 'Created', 'Subscription End'],
+    institutions.map((r: any) => [
+      r.id,
+      r.name,
+      r.city,
+      r.onboarding_status,
+      r.owner_name,
+      r.plan_name,
+      r.plan_price,
+      r.created_at,
+      r.subscription_end,
+    ]),
+  );
+
+  const payBlock = csvBlock(
+    ['Institution', 'Owner', 'Plan', 'Amount (INR)', 'Status', 'Paid On', 'Subscription End'],
+    payments.map((r: any) => [
+      r.institution_name,
+      r.owner_name || r.owner_email,
+      r.plan_name,
+      r.amount_inr,
+      r.payment_link_status,
+      r.paid_at,
+      r.subscription_end,
+    ]),
+  );
+
+  const enrollBlock = csvBlock(
+    ['Enrollment ID', 'Student', 'Email', 'Course', 'Institution', 'Payment Status', 'Enrolled At'],
+    enrollments.map((r: any) => [
+      r.id,
+      r.student_name,
+      r.student_email,
+      r.course_name,
+      r.institution_name,
+      r.payment_status,
+      r.enrolled_at,
+    ]),
+  );
+
+  return [
+    `Veerify Super Admin Dashboard Export`,
+    `Generated,${csvCell(stamp)}`,
+    ``,
+    `# Overview`,
+    overview,
+    ``,
+    `# Recent Institutions (${institutions.length})`,
+    instBlock,
+    ``,
+    `# Recent Subscription Payments (${payments.length})`,
+    payBlock,
+    ``,
+    `# Recent Enrollments (${enrollments.length})`,
+    enrollBlock,
+    ``,
+  ].join('\n');
+}
+
+/** Trigger a browser download of the given CSV string as `filename`. */
+function downloadCsv(filename: string, csv: string) {
+  // BOM prefix so Excel opens UTF-8 CSVs with the right encoding
+  // (₹ symbol + Tamil script names would otherwise mojibake).
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  // Free the blob URL on the next tick — some browsers race the click.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 // Shape of the rows the dashboard's Recent Institutions table consumes.
 // Mirrors what GET /api/onboarding/all returns; we only pick the fields
 // the row renderer actually needs.
@@ -105,6 +241,44 @@ export function Dashboard() {
   const { user } = useAuth();
   const ownerFirstName = (user?.name || '').trim().split(/\s+/)[0] || 'Admin';
 
+  // ── Export dashboard snapshot ──
+  //
+  // Pulls a fresh copy of every table shown on the page and stitches
+  // them into a single CSV file the admin can open in Excel. We refetch
+  // rather than reading from the child tables' local state so the
+  // export doesn't lie when a filter is applied inside one of them.
+  const [exporting, setExporting] = useState(false);
+
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      const [instRes, payRes, enrollRes] = await Promise.all([
+        apiClient.get('/onboarding/all').catch(() => ({ data: { institutions: [] } })),
+        apiClient.get('/onboarding/recent-payments').catch(() => ({ data: { payments: [] } })),
+        apiClient.get('/enrollments/all').catch(() => ({ data: { enrollments: [] } })),
+      ]);
+      const institutions = instRes.data?.institutions || [];
+      const payments     = payRes.data?.payments      || [];
+      const enrollments  = enrollRes.data?.enrollments || [];
+
+      const csv = buildDashboardCsv({
+        counts,
+        institutions,
+        payments,
+        enrollments,
+      });
+
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
+      downloadCsv(`veerify-dashboard-${stamp}.csv`, csv);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[Dashboard] export failed:', err);
+      alert('Could not export the dashboard right now. Please try again.');
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
     <div className="space-y-6 animate-fade-in">
       {/* Header */}
@@ -121,8 +295,14 @@ export function Dashboard() {
           <Button variant="outline" size="sm" leftIcon={<Filter className="w-3.5 h-3.5" />}>
             Filter
           </Button>
-          <Button variant="outline" size="sm" leftIcon={<Download className="w-3.5 h-3.5" />}>
-            Export
+          <Button
+            variant="outline"
+            size="sm"
+            leftIcon={<Download className="w-3.5 h-3.5" />}
+            onClick={handleExport}
+            disabled={exporting}
+          >
+            {exporting ? 'Exporting…' : 'Export'}
           </Button>
         </div>
       </div>

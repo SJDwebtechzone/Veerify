@@ -40,6 +40,9 @@ router.get('/counts',  verifyToken, onboardingController.getOnboardingCounts);
 // Subscription payments made by institutions (recent first). Static path -
 // must come before /:id below.
 router.get('/recent-payments', verifyToken, onboardingController.getRecentInstitutionPayments);
+// Full subscription-payments ledger — powers Web Admin → Payments →
+// Subscription Payments. Static path, must come before /:id.
+router.get('/subscription-payments', verifyToken, onboardingController.listSubscriptionPayments);
 // Broadcast notification across many institutions (also a static path - must
 // come before /:id below).
 router.post('/notify-bulk', verifyToken, onboardingController.notifyInstitutionsBulk);

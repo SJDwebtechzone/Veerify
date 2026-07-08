@@ -81,7 +81,10 @@ export const navSections: NavSection[] = [
     children: [
       { label: 'Institution Payout', to: '/payments' },
       { label: 'Subscription Payments', to: '/payments/subscriptions' },
-      { label: 'Pending Payments', to: '/payments/pending' },
+      // Pending Payments hidden from the sidebar — the "Pending" tab
+      // pill inside Subscription Payments already surfaces every
+      // pending row, so a separate entry was redundant.
+      // { label: 'Pending Payments', to: '/payments/pending' },
     ],
   },
   {
