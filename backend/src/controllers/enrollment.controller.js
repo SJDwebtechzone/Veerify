@@ -5,6 +5,7 @@ const pool = require('../config/db');
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const { sendStudentCredentialsEmail } = require('../utils/mailer');
+const { dispatchWelcomeSms } = require('../utils/smsService');
 const { ensureCapacity, limitResponse } = require('../utils/planLimits');
 const {
   validateEmailFormat, validatePhoneFormat,
@@ -123,8 +124,11 @@ exports.getEnrollmentsForMyInstitution = async (req, res) => {
          u.email AS student_email,
          u.phone AS student_phone,
 
-         sp.photo_url AS student_photo_url,
-         sp.gender    AS student_gender,
+         sp.photo_url         AS student_photo_url,
+         sp.gender            AS student_gender,
+         sp.date_of_birth     AS student_date_of_birth,
+         sp.address           AS student_address,
+         sp.emergency_contact AS student_emergency_contact,
 
          c.id              AS course_id,
          c.name            AS course_name,
@@ -291,12 +295,15 @@ exports.enrollInBatch = async (req, res) => {
         );
         studentId = insertUser.rows[0].id;
         // Defer the send until after the transaction commits so we
-        // don't email a student whose enrollment ultimately fails.
+        // don't email / SMS a student whose enrollment ultimately fails.
+        // We also stash the phone here so the welcome SMS has somewhere
+        // to land — falls back to null if the admin didn't collect one.
         createdStudentCreds = {
           to: cleanEmail,
           name: cleanName,
           loginEmail: cleanEmail,
           password: tempPassword,
+          phone: String(contact_number || '').trim() || null,
         };
       }
     }
@@ -506,6 +513,19 @@ exports.enrollInBatch = async (req, res) => {
       } catch (mailErr) {
         console.warn('[enroll] student credentials email threw:', mailErr.message);
       }
+
+      // Welcome SMS — same temp password as the credentials email, so
+      // the student can log in via either channel. Fire-and-forget: an
+      // MSG91 outage never blocks the 201 response.
+      if (createdStudentCreds.phone) {
+        dispatchWelcomeSms({
+          phone:        createdStudentCreds.phone,
+          name:         createdStudentCreds.name,
+          role:         'student',
+          loginId:      createdStudentCreds.loginEmail,
+          tempPassword: createdStudentCreds.password,
+        });
+      }
     }
 
     // Tailor the message:
@@ -594,14 +614,223 @@ exports.mockPay = async (req, res) => {
 // subsequent enrollments).
 exports.getMyProfile = async (req, res) => {
   try {
+    // Return a merged view: users columns the student is allowed to
+    // edit (name / email / phone) + the full student_profiles row.
+    // Also flags which fields are institution-managed (read-only) so
+    // the mobile can lock them without a second round-trip.
     const r = await pool.query(
-      'SELECT * FROM student_profiles WHERE user_id = $1',
-      [req.user.id]
+      `SELECT
+         u.id, u.name, u.email, u.phone, u.role, u.status,
+         to_char(sp.date_of_birth, 'YYYY-MM-DD') AS date_of_birth,
+         sp.gender,
+         sp.father_name, sp.mother_name, sp.contact_number,
+         sp.email AS profile_email,
+         sp.address, sp.marital_status, sp.occupation,
+         sp.height_cm, sp.weight_kg, sp.disabilities,
+         sp.photo_url,
+         sp.emergency_contact,
+         sp.created_at AS profile_created_at
+       FROM users u
+       LEFT JOIN student_profiles sp ON sp.user_id = u.id
+      WHERE u.id = $1`,
+      [req.user.id],
     );
     res.json({ profile: r.rows[0] || null });
   } catch (err) {
     console.error('Get my profile error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// PATCH /api/enrollments/me/profile
+//
+// Student-facing self-service profile editor. Updates the users row
+// (name / email / phone) AND the student_profiles row (DOB, gender,
+// address, emergency contact, photo, etc.) inside one transaction.
+// Any field left out of the body is left untouched.
+//
+// Institution-managed fields (student_id / institution / belt / enrollment
+// data) live on OTHER tables and are silently ignored if sent — they
+// aren't in the write list.
+exports.updateMyProfile = async (req, res) => {
+  const userId = req.user.id;
+  const b = req.body || {};
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // ── users row (name / email / phone) ─────────────────────────
+    // Validate + uniqueness only when the field is actually sent.
+    const {
+      validateEmailFormat, validatePhoneFormat,
+      ensureEmailUnique,   ensurePhoneUnique,
+    } = require('../utils/contactValidation');
+
+    // Email is the student's sign-in identifier — we IGNORE any attempt
+    // to change it from the mobile Edit Profile screen. If the client
+    // sends a value that differs from what's already on the row, we
+    // silently drop it so uniqueness checks never trip on the student's
+    // own address. Institution admins can still change a student's
+    // email via the admin-side edit flow if truly needed.
+    if (b.email !== undefined) {
+      const existing = await client.query(
+        `SELECT email FROM users WHERE id = $1`, [userId],
+      );
+      const currentEmail = String(existing.rows[0]?.email || '').toLowerCase();
+      const sentEmail    = String(b.email || '').trim().toLowerCase();
+      if (sentEmail && sentEmail !== currentEmail) {
+        // Drop the request quietly — the field is read-only.
+        b.email = currentEmail;
+      }
+    }
+    if (b.phone !== undefined) {
+      const phone = String(b.phone || '').trim();
+      if (phone && !validatePhoneFormat(phone)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ message: 'Please enter a valid phone number.' });
+      }
+      if (phone) {
+        // ensurePhoneUnique returns { ok: true } when free, or
+        // { ok: false, status, body } when taken. Truthy-checking the
+        // whole object was the bug — every call registered as a clash.
+        const check = await ensurePhoneUnique(phone, { excludeUserId: userId });
+        if (!check.ok) {
+          await client.query('ROLLBACK');
+          return res.status(check.status || 409).json(
+            check.body || { message: 'That phone number is already registered.' },
+          );
+        }
+      }
+    }
+
+    // Partial UPDATE on users. COALESCE keeps the current value when
+    // the field wasn't sent (undefined → SQL NULL → COALESCE).
+    await client.query(
+      `UPDATE users SET
+         name  = COALESCE(NULLIF($2, ''), name),
+         email = COALESCE(NULLIF($3, ''), email),
+         phone = COALESCE(NULLIF($4, ''), phone)
+       WHERE id = $1`,
+      [
+        userId,
+        b.name  != null ? String(b.name).trim()  : '',
+        b.email != null ? String(b.email).trim().toLowerCase() : '',
+        b.phone != null ? String(b.phone).trim() : '',
+      ],
+    );
+
+    // ── student_profiles row (photo, DOB, address, etc.) ─────────
+    // UPSERT so a first-time save from the profile screen creates
+    // the row cleanly. Any column not sent gets COALESCE'd against
+    // its current value.
+    const existingSp = await client.query(
+      `SELECT id FROM student_profiles WHERE user_id = $1`, [userId],
+    );
+
+    const spCols = {
+      full_name:       b.name  != null ? String(b.name).trim()  : null,
+      date_of_birth:   b.date_of_birth != null && String(b.date_of_birth).trim() !== ''
+                         ? String(b.date_of_birth).slice(0, 10) : null,
+      gender:          b.gender != null ? String(b.gender).slice(0, 20) : null,
+      father_name:     b.father_name != null ? String(b.father_name).slice(0, 150) : null,
+      mother_name:     b.mother_name != null ? String(b.mother_name).slice(0, 150) : null,
+      // Emergency contact lives on its own column. contact_number
+      // mirrors users.phone so admin queries always match the primary
+      // phone the student just updated.
+      emergency_contact: b.emergency_contact != null ? String(b.emergency_contact).trim().slice(0, 20) : null,
+      contact_number:    b.phone           != null ? String(b.phone).trim().slice(0, 20)
+                         : b.contact_number != null ? String(b.contact_number).trim().slice(0, 20)
+                         : null,
+      // profile_email mirrors users.email for the same reason.
+      email:           b.email          != null ? String(b.email).trim().slice(0, 150)
+                       : b.profile_email != null ? String(b.profile_email).trim().slice(0, 150) : null,
+      address:         b.address != null ? String(b.address).slice(0, 500) : null,
+      marital_status:  b.marital_status != null ? String(b.marital_status).slice(0, 40) : null,
+      occupation:      b.occupation != null ? String(b.occupation).slice(0, 120) : null,
+      height_cm:       Number.isFinite(b.height_cm) ? b.height_cm : null,
+      weight_kg:       Number.isFinite(b.weight_kg) ? b.weight_kg : null,
+      disabilities:    b.disabilities != null ? String(b.disabilities).slice(0, 500) : null,
+      photo_url:       b.photo_url != null ? String(b.photo_url).slice(0, 500) : null,
+    };
+
+    if (existingSp.rows.length === 0) {
+      // Insert with the current user's name as full_name fallback.
+      const nameRes = await client.query(
+        `SELECT name FROM users WHERE id = $1`, [userId],
+      );
+      const fullName = spCols.full_name || nameRes.rows[0]?.name || 'Student';
+      await client.query(
+        `INSERT INTO student_profiles
+           (user_id, full_name, date_of_birth, gender,
+            father_name, mother_name, contact_number, email, address,
+            marital_status, occupation, height_cm, weight_kg,
+            disabilities, photo_url, emergency_contact, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+                 $10, $11, $12, $13, $14, $15, $16, NOW())`,
+        [
+          userId, fullName, spCols.date_of_birth, spCols.gender,
+          spCols.father_name, spCols.mother_name, spCols.contact_number,
+          spCols.email, spCols.address, spCols.marital_status,
+          spCols.occupation, spCols.height_cm, spCols.weight_kg,
+          spCols.disabilities, spCols.photo_url, spCols.emergency_contact,
+        ],
+      );
+    } else {
+      await client.query(
+        `UPDATE student_profiles SET
+           full_name         = COALESCE($2, full_name),
+           date_of_birth     = COALESCE($3, date_of_birth),
+           gender            = COALESCE($4, gender),
+           father_name       = COALESCE($5, father_name),
+           mother_name       = COALESCE($6, mother_name),
+           contact_number    = COALESCE($7, contact_number),
+           email             = COALESCE($8, email),
+           address           = COALESCE($9, address),
+           marital_status    = COALESCE($10, marital_status),
+           occupation        = COALESCE($11, occupation),
+           height_cm         = COALESCE($12, height_cm),
+           weight_kg         = COALESCE($13, weight_kg),
+           disabilities      = COALESCE($14, disabilities),
+           photo_url         = COALESCE($15, photo_url),
+           emergency_contact = COALESCE($16, emergency_contact),
+           updated_at        = NOW()
+         WHERE user_id = $1`,
+        [
+          userId,
+          spCols.full_name, spCols.date_of_birth, spCols.gender,
+          spCols.father_name, spCols.mother_name, spCols.contact_number,
+          spCols.email, spCols.address, spCols.marital_status,
+          spCols.occupation, spCols.height_cm, spCols.weight_kg,
+          spCols.disabilities, spCols.photo_url, spCols.emergency_contact,
+        ],
+      );
+    }
+
+    await client.query('COMMIT');
+
+    // Return the merged profile for immediate UI hydration.
+    const merged = await pool.query(
+      `SELECT u.id, u.name, u.email, u.phone, u.role,
+              to_char(sp.date_of_birth, 'YYYY-MM-DD') AS date_of_birth,
+              sp.gender, sp.father_name, sp.mother_name,
+              sp.contact_number, sp.email AS profile_email, sp.address,
+              sp.marital_status, sp.occupation, sp.height_cm, sp.weight_kg,
+              sp.disabilities, sp.photo_url, sp.emergency_contact
+         FROM users u
+         LEFT JOIN student_profiles sp ON sp.user_id = u.id
+        WHERE u.id = $1`,
+      [userId],
+    );
+    res.json({
+      message: 'Profile updated successfully',
+      profile: merged.rows[0] || null,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('updateMyProfile error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  } finally {
+    client.release();
   }
 };
 
@@ -950,6 +1179,119 @@ exports.markPaid = async (req, res) => {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
+// ─── Student: renew an enrollment ───────────────────────────────────────────
+// POST /api/enrollments/:id/renew
+//
+// Creates a Razorpay payment link for the student to re-pay for an
+// existing enrollment (either currently active-nearing-expiry, or
+// already expired). On the Android emulator without Razorpay creds,
+// the endpoint short-circuits into a mock-pay path — the caller can
+// then confirm via POST /:id/mock-pay.
+//
+// Response shape:
+//   { payment_url: <razorpay short_url>,  provider: 'razorpay',  transaction_id: 'plink_xxx' }
+// OR (dev fallback):
+//   { mock: true, message: 'Razorpay not configured — mock-pay available.' }
+exports.renewEnrollment = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const studentId = req.user.id;
+
+    // Own the row.
+    const enrol = await pool.query(
+      `SELECT e.id, e.student_id, e.institution_id, e.payment_amount,
+              e.payment_status, e.paid_at, e.enrolled_at,
+              c.name AS course_name, c.price AS course_price,
+              i.name AS institution_name,
+              u.name AS student_name, u.email AS student_email, u.phone AS student_phone
+         FROM enrollments e
+         JOIN batches b ON b.id = e.batch_id
+         JOIN courses c ON c.id = b.course_id
+         JOIN institutions i ON i.id = e.institution_id
+         JOIN users u ON u.id = e.student_id
+        WHERE e.id = $1`,
+      [id],
+    );
+    if (enrol.rows.length === 0) return res.status(404).json({ message: 'Enrollment not found' });
+    const row = enrol.rows[0];
+    if (row.student_id !== studentId) return res.status(403).json({ message: 'Not your enrollment' });
+
+    const amount = Number(row.payment_amount || row.course_price || 0);
+    if (amount <= 0) {
+      return res.status(400).json({ message: 'This course has no price configured — nothing to renew.' });
+    }
+
+    // Try Razorpay first. Falls back to the mock-pay dev flow when the
+    // helper reports "Razorpay not configured".
+    const { createPaymentLink } = require('../utils/razorpay');
+    const link = await createPaymentLink({
+      amountInRupees: amount,
+      institution: {
+        id: row.institution_id,
+        name: row.institution_name,
+        owner_name:  row.student_name,
+        owner_email: row.student_email,
+        owner_phone: row.student_phone,
+        plan_name:   row.course_name,
+      },
+      notes: {
+        action:        'enrollment_renew',
+        enrollment_id: String(row.id),
+        student_id:    String(studentId),
+      },
+    });
+
+    if (!link.ok) {
+      // No Razorpay creds → surface a mock-pay hint the mobile can act on.
+      return res.json({
+        mock:    true,
+        message: link.error || 'Razorpay not configured — using dev mock-pay.',
+      });
+    }
+
+    // Persist the pending link on the enrollment so the webhook can
+    // find it. `payment_reference` doubles as the transaction id we
+    // return to the mobile now, and again on the paid confirmation.
+    await pool.query(
+      `UPDATE enrollments
+          SET payment_reference = $2,
+              payment_status    = 'pending'
+        WHERE id = $1`,
+      [row.id, link.link.id],
+    );
+
+    res.json({
+      payment_url:    link.link.short_url,
+      provider:       'razorpay',
+      transaction_id: link.link.id,
+      amount,
+    });
+  } catch (err) {
+    console.error('renewEnrollment error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// GET /api/enrollments/:id/renewal-status
+// Cheap polling endpoint the mobile hits after the user returns from
+// Razorpay. Returns the current payment_status so we can flip the UI.
+exports.renewalStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const studentId = req.user.id;
+    const r = await pool.query(
+      `SELECT id, student_id, payment_status, payment_amount, paid_at, payment_reference
+         FROM enrollments WHERE id = $1`, [id],
+    );
+    if (r.rows.length === 0) return res.status(404).json({ message: 'Not found' });
+    if (r.rows[0].student_id !== studentId) return res.status(403).json({ message: 'Not yours' });
+    res.json({ enrollment: r.rows[0] });
+  } catch (err) {
+    console.error('renewalStatus error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
 // ─── Admin: update a student's profile + user record ────────────────────────
 // PATCH /api/enrollments/student/:userId
 //

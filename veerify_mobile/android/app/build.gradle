@@ -79,7 +79,7 @@ android {
 
     namespace "com.veerify_mobile"
 defaultConfig {
-    applicationId "com.veerify_mobile"
+    applicationId "in.devspectra.veerify"
     minSdkVersion rootProject.ext.minSdkVersion
     targetSdkVersion rootProject.ext.targetSdkVersion
     versionCode 2
@@ -96,13 +96,19 @@ defaultConfig {
             keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
+           release {
+        storeFile file(MYAPP_UPLOAD_STORE_FILE)
+        storePassword MYAPP_UPLOAD_STORE_PASSWORD
+        keyAlias MYAPP_UPLOAD_KEY_ALIAS
+        keyPassword MYAPP_UPLOAD_KEY_PASSWORD
+    }
     }
     buildTypes {
         debug {
             signingConfig signingConfigs.debug
         }
      release {
-    signingConfig signingConfigs.debug
+    signingConfig signingConfigs.release
 
     minifyEnabled false
     shrinkResources false

@@ -23,6 +23,23 @@ const { resolvePincode } = require('../utils/geocoder');
 // resolvePincode is shared from utils/geocoder.js so the branch +
 // onboarding flows use the exact same lookup logic.
 
+// Haversine distance in km — used to decorate pincode-match rows with
+// a distance from the resolved centre so they sort alongside spatial
+// hits. Matches the SQL 6371 * acos(…) formula the DB query uses so
+// numbers agree end-to-end.
+function haversineKm(lat1, lng1, lat2, lng2) {
+  const toRad = (v) => (Number(v) * Math.PI) / 180;
+  const R = 6371; // km
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+    Math.sin(dLng / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
 // GET /api/academies/nearby
 exports.getNearby = async (req, res) => {
   try {
@@ -55,11 +72,89 @@ exports.getNearby = async (req, res) => {
       }
     }
 
-    // No coords at all — return a generic newest-first list.
-    // Only main institutions here; without a distance to rank on, listing
-    // branches would just clutter the view. Users can drill into the
-    // main academy to see its branches.
+    // No coords at all — but if the caller sent a pincode, try an
+    // exact text match FIRST (institutions + sub-branches + satellite
+    // branches) before falling back to a generic newest-first list.
+    // This is what saves the search when the pincode isn't in the
+    // local lookup table AND Nominatim is unreachable / slow.
     if (Number.isNaN(lat) || Number.isNaN(lng)) {
+      if (req.query.pincode) {
+        const pin = String(req.query.pincode).replace(/[^0-9]/g, '').slice(0, 6);
+        if (pin) {
+          const [instRes, subRes, branchRes] = await Promise.all([
+            pool.query(
+              `SELECT i.id, i.name, i.logo_url, i.city, i.address,
+                      NULL::int AS institution_id, NULL::text AS institution_name,
+                      i.latitude, i.longitude, i.pincode,
+                      NULL::float AS distance_km,
+                      'institution' AS kind
+                 FROM institutions i
+                WHERE COALESCE(i.deleted_at::text, '') = ''
+                  AND i.parent_institution_id IS NULL
+                  AND i.onboarding_status IN ('approved', 'active')
+                  AND i.pincode = $1
+                LIMIT $2`,
+              [pin, limit],
+            ),
+            pool.query(
+              `SELECT i.id, i.name,
+                      COALESCE(i.logo_url, p.logo_url) AS logo_url,
+                      i.city, i.address,
+                      i.parent_institution_id AS institution_id,
+                      p.name                  AS institution_name,
+                      i.latitude, i.longitude, i.pincode,
+                      NULL::float AS distance_km,
+                      'sub_branch' AS kind
+                 FROM institutions i
+                 JOIN institutions p ON p.id = i.parent_institution_id
+                WHERE COALESCE(i.deleted_at::text, '') = ''
+                  AND COALESCE(p.deleted_at::text, '') = ''
+                  AND p.onboarding_status IN ('approved', 'active')
+                  AND i.pincode = $1
+                LIMIT $2`,
+              [pin, limit],
+            ),
+            pool.query(
+              `SELECT b.id, b.name, i.logo_url,
+                      b.city, b.address_line AS address,
+                      b.institution_id, i.name AS institution_name,
+                      b.latitude, b.longitude, b.pin_code AS pincode,
+                      NULL::float AS distance_km,
+                      'branch' AS kind
+                 FROM institution_branches b
+                 JOIN institutions i ON i.id = b.institution_id
+                WHERE b.status = 'active'
+                  AND COALESCE(i.deleted_at::text, '') = ''
+                  AND i.onboarding_status IN ('approved', 'active')
+                  AND b.pin_code = $1
+                LIMIT $2`,
+              [pin, limit],
+            ),
+          ]);
+          const rows = [...instRes.rows, ...subRes.rows, ...branchRes.rows];
+          // Dedupe by kind+id — same academy could show up more than
+          // once if it has both a main row and a satellite branch.
+          const seen = new Set();
+          const deduped = [];
+          rows.forEach((row) => {
+            const key = `${row.kind}:${row.id}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            deduped.push(row);
+          });
+          if (deduped.length > 0) {
+            return res.json({
+              resolved_from:    'pincode-text',
+              resolved_pincode: { pincode: pin },
+              results:          deduped.slice(0, limit),
+            });
+          }
+        }
+      }
+
+      // Truly no coords AND no pincode text hit — generic newest first.
+      // Only main institutions here; without a distance to rank on, listing
+      // branches would just clutter the view.
       const r = await pool.query(
         `SELECT i.id, i.name, i.logo_url, i.city, i.address,
                 i.latitude, i.longitude, i.pincode,
@@ -242,57 +337,108 @@ exports.getNearby = async (req, res) => {
       }
     }
 
-    // Pincode-text fallback. The spatial query filters out academies
-    // whose latitude/longitude are NULL (a lot of older rows have no
-    // coords). When the caller searched by pincode and we still found
-    // nothing, fall back to a text match on the institutions.pincode
-    // column — exact match first, then a 3-digit prefix so the same
-    // district returns something. Branches are excluded here since they
-    // already require coords by design.
+    // ── Pincode-text fallback ──────────────────────────────────────
+    // When the caller searched by pincode AND the spatial query came
+    // up empty, run three tiny separate queries (institutions +
+    // sub-branches + satellite branches) with an exact pincode match
+    // and merge them in JS. Splitting keeps each query fast and
+    // sidesteps any UNION-column type mismatches on older schemas.
     if (r.rows.length === 0 && req.query.pincode) {
       const pin = String(req.query.pincode).trim();
       if (pin) {
-        const exact = await pool.query(
-          `SELECT i.id, i.name, i.logo_url, i.city, i.address,
-                  NULL::int AS institution_id, NULL::varchar AS institution_name,
-                  i.latitude, i.longitude, i.pincode,
-                  'institution' AS kind,
-                  NULL::float   AS distance_km
-             FROM institutions i
-            WHERE COALESCE(i.deleted_at::text, '') = ''
-              AND i.parent_institution_id IS NULL
-              AND i.onboarding_status IN ('approved', 'active')
-              AND i.pincode = $1
-            ORDER BY i.created_at DESC
-            LIMIT $2`,
-          [pin, limit],
-        );
-        if (exact.rows.length) {
-          r = exact;
-          widened_to = 'pincode-exact';
-        } else if (pin.length >= 3) {
-          // Same district by 3-digit prefix.
-          const prefix = pin.slice(0, 3) + '%';
-          const district = await pool.query(
+        const [instRes, subRes, branchRes] = await Promise.all([
+          pool.query(
             `SELECT i.id, i.name, i.logo_url, i.city, i.address,
-                    NULL::int AS institution_id, NULL::varchar AS institution_name,
+                    NULL::int AS institution_id, NULL::text AS institution_name,
                     i.latitude, i.longitude, i.pincode,
-                    'institution' AS kind,
-                    NULL::float   AS distance_km
+                    'institution' AS kind
                FROM institutions i
               WHERE COALESCE(i.deleted_at::text, '') = ''
+                AND i.parent_institution_id IS NULL
                 AND i.onboarding_status IN ('approved', 'active')
-                AND i.pincode LIKE $1
-              ORDER BY i.created_at DESC
+                AND i.pincode = $1
               LIMIT $2`,
-            [prefix, limit],
-          );
-          if (district.rows.length) {
-            r = district;
-            widened_to = 'pincode-prefix';
-          }
+            [pin, limit],
+          ),
+          pool.query(
+            `SELECT i.id, i.name,
+                    COALESCE(i.logo_url, p.logo_url) AS logo_url,
+                    i.city, i.address,
+                    i.parent_institution_id AS institution_id,
+                    p.name                  AS institution_name,
+                    i.latitude, i.longitude, i.pincode,
+                    'sub_branch' AS kind
+               FROM institutions i
+               JOIN institutions p ON p.id = i.parent_institution_id
+              WHERE COALESCE(i.deleted_at::text, '') = ''
+                AND COALESCE(p.deleted_at::text, '') = ''
+                AND p.onboarding_status IN ('approved', 'active')
+                AND i.pincode = $1
+              LIMIT $2`,
+            [pin, limit],
+          ),
+          pool.query(
+            `SELECT b.id, b.name, i.logo_url,
+                    b.city, b.address_line AS address,
+                    b.institution_id, i.name AS institution_name,
+                    b.latitude, b.longitude, b.pin_code AS pincode,
+                    'branch' AS kind
+               FROM institution_branches b
+               JOIN institutions i ON i.id = b.institution_id
+              WHERE b.status = 'active'
+                AND COALESCE(i.deleted_at::text, '') = ''
+                AND i.onboarding_status IN ('approved', 'active')
+                AND b.pin_code = $1
+              LIMIT $2`,
+            [pin, limit],
+          ),
+        ]);
+
+        const rows = [...instRes.rows, ...subRes.rows, ...branchRes.rows];
+        if (rows.length > 0) {
+          const decorated = rows.map((row) => {
+            if (row.latitude != null && row.longitude != null
+                && !Number.isNaN(lat) && !Number.isNaN(lng)) {
+              return {
+                ...row,
+                distance_km: haversineKm(lat, lng, row.latitude, row.longitude),
+              };
+            }
+            return { ...row, distance_km: null };
+          });
+          decorated.sort((a, b) => {
+            const A = a.distance_km ?? Number.POSITIVE_INFINITY;
+            const B = b.distance_km ?? Number.POSITIVE_INFINITY;
+            return A - B;
+          });
+          // Dedupe by kind+id in case the same row shows up twice.
+          const seen = new Set();
+          const deduped = [];
+          decorated.forEach((row) => {
+            const key = `${row.kind}:${row.id}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            deduped.push(row);
+          });
+          r = { rows: deduped.slice(0, limit) };
+          widened_to = 'pincode-exact';
         }
       }
+    }
+
+    // Dedupe the spatial result set too — a real-world academy can
+    // otherwise appear twice if it has both an institutions row AND a
+    // satellite branch pointing at the same coords.
+    {
+      const seen = new Set();
+      const deduped = [];
+      (r.rows || []).forEach((row) => {
+        const key = `${row.kind}:${row.id}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        deduped.push(row);
+      });
+      r = { rows: deduped };
     }
 
     // Decorate each row with `seats_available` so the mobile can flag

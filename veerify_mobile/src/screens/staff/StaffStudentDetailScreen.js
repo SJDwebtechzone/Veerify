@@ -33,6 +33,7 @@ import {
 
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
+import { confirm } from '../../components/ConfirmDialog';
 
 const BELTS = [
   { key: 'white',  label: 'White',  bg: '#FFFFFF', fg: '#111827', border: '#E5E7EB' },
@@ -148,6 +149,12 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
   // Toggle a lesson. If already completed → DELETE. Otherwise → upsert
   // with the picked date (or today as the fallback when no date picker
   // was opened).
+  //
+  // Course-completion handoff: when the tick brings the total number of
+  // completed lessons up to the full length of the curriculum, we pop
+  // the "Course completed. Proceed to Belt Test?" dialog. On Yes we
+  // POST to /course-completions which places a row on the trainer's
+  // Completed Students queue.
   const toggleLesson = async (idx, dateOverride) => {
     if (!studentId || !courseId) return;
     const current = progressByIdx[idx];
@@ -168,10 +175,25 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
           lesson_index: idx,
           completed_at: dateOverride || new Date().toISOString().slice(0, 10),
         });
-        setProgressByIdx((prev) => ({
-          ...prev,
-          [idx]: res.data?.progress || { lesson_index: idx, completed_at: dateOverride || isoDate(new Date()) },
-        }));
+        const updated = {
+          ...progressByIdx,
+          [idx]: res.data?.progress || {
+            lesson_index: idx,
+            completed_at: dateOverride || isoDate(new Date()),
+          },
+        };
+        setProgressByIdx(updated);
+
+        // Did that tick complete the whole curriculum? Fire the
+        // handoff dialog exactly once — 260 ms delay so the row's
+        // spinner UI settles before the modal slides in (avoids the
+        // Android Modal-during-transition swallow bug).
+        const isFullyDone =
+          lessons.length > 0 &&
+          Object.keys(updated).length >= lessons.length;
+        if (isFullyDone) {
+          setTimeout(() => promptBeltTest(), 260);
+        }
       }
     } catch (err) {
       console.log('[StudentDetail] toggle failed:', err?.response?.data || err?.message);
@@ -179,6 +201,52 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
       setSavingIdx(null);
       setPickerForIdx(null);
     }
+  };
+
+  // Show the branded "Course completed. Proceed to Belt Test?" dialog
+  // and, on Yes, register the completion on the backend. The row lands
+  // on Trainer Login → Quick Actions → Completed Students.
+  const promptBeltTest = () => {
+    confirm({
+      title:       'Course completed 🎉',
+      message:     'Every lesson in the curriculum is now marked. Proceed to Belt Test?',
+      variant:     'success',
+      confirmText: 'Yes',
+      cancelText:  'No',
+      onConfirm: () => {
+        (async () => {
+          try {
+            await apiClient.post('/course-completions', {
+              student_id: studentId,
+              course_id:  courseId,
+              batch_id:   batchId || null,
+            });
+            setTimeout(() => {
+              confirm({
+                title:       'Moved to Completed Students',
+                message:     'You can now record the belt-test remarks from Quick Actions → Completed Students.',
+                variant:     'success',
+                confirmText: 'Open now',
+                cancelText:  'Later',
+                onConfirm:   () => navigation.navigate('StaffCompletedStudents'),
+              });
+            }, 260);
+          } catch (err) {
+            const msg = err?.response?.data?.message ||
+                        'Could not mark the course complete. Please try again.';
+            setTimeout(() => {
+              confirm({
+                title: 'Something went wrong',
+                message: msg,
+                variant: 'warning',
+                confirmText: 'OK',
+                hideCancel: true,
+              });
+            }, 260);
+          }
+        })();
+      },
+    });
   };
 
   // ── Derive everything from records + passed student ──
@@ -696,22 +764,15 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
 // ─── Sub-components ─────────────────────────────────────────────────────
 
 function StatPill({ icon: Icon, label, value, accent }) {
-  // Centered layout — top icon in a soft-brand circle, then a bigger
-  // bolder value line, then the label. This replaces the earlier
-  // left-aligned block where a "-" or "0" looked lost.
+  // Matches the trainer StaffProfile stat strip — left-aligned pill
+  // with a small tinted icon in the top-left, the value in the dark
+  // brand color, and the label underneath.
   return (
     <View style={styles.statPill}>
       <View style={[styles.statPillIcon, { backgroundColor: accent.soft }]}>
-        <Icon size={15} color={accent.vivid} strokeWidth={2.4} />
+        <Icon size={14} color={accent.vivid} strokeWidth={2.4} />
       </View>
-      <Text
-        style={[styles.statPillValue, { color: accent.vivid }]}
-        numberOfLines={1}
-        adjustsFontSizeToFit
-        minimumFontScale={0.7}
-      >
-        {value}
-      </Text>
+      <Text style={styles.statPillValue} numberOfLines={1}>{value}</Text>
       <Text style={styles.statPillLabel}>{label}</Text>
     </View>
   );
@@ -776,7 +837,8 @@ function LegendItem({ label, value, status }) {
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: palette.bg },
 
-  // Hero
+  // Hero — normal padding, pills no longer overlap so the red card
+  // ends cleanly and every pill icon stays fully visible.
   hero: {
     backgroundColor: palette.purple.vivid,
     paddingHorizontal: spacing.lg,
@@ -840,44 +902,39 @@ const styles = StyleSheet.create({
   },
   heroBeltText: { ...type.caption, fontWeight: '800' },
 
-  // Stat strip
+  // Stat strip — sits fully below the red hero with a small breathing
+  // gap so the pill icons never touch the hero's rounded bottom edge.
+  // We keep the trainer-profile pill styling (left-aligned icon + value
+  // + label) but remove the negative overlap that was clipping icons.
   statStrip: {
     flexDirection: 'row',
     gap: spacing.sm,
     paddingHorizontal: spacing.xl,
-    marginTop: -spacing.lg,
+    marginTop: spacing.md,
   },
+  // Trainer-profile match: left-aligned pill, tinted round icon at
+  // the top-left, big dark value below it, muted uppercase label.
   statPill: {
     flex: 1,
     backgroundColor: palette.surface,
     borderRadius: radius.lg,
-    paddingVertical: spacing.md,
-    paddingHorizontal: spacing.sm,
-    alignItems: 'center',
-    justifyContent: 'center',
-    minHeight: 96,
+    padding: spacing.md,
     ...shadows.card,
   },
   statPillIcon: {
-    width: 30, height: 30, borderRadius: 15,
+    width: 28, height: 28, borderRadius: 14,
     alignItems: 'center', justifyContent: 'center',
-    marginBottom: 8,
+    marginBottom: spacing.xs,
   },
   statPillValue: {
-    ...type.bodyBold,
+    ...type.h1,
     color: palette.text,
     fontSize: 18,
-    fontWeight: '800',
-    textAlign: 'center',
-    letterSpacing: -0.2,
   },
   statPillLabel: {
     ...type.micro,
     color: palette.textMuted,
     fontWeight: '700',
-    marginTop: 2,
-    letterSpacing: 0.6,
-    textTransform: 'uppercase',
   },
 
   // Card

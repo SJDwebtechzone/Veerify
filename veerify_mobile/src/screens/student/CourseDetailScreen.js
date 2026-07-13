@@ -22,12 +22,12 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, Image,
   StyleSheet, ActivityIndicator, Alert, Share, Linking,
-  StatusBar, Dimensions,
+  StatusBar, Dimensions, Modal,
 } from 'react-native';
 import {
   ArrowLeft, Share2, Heart, Star, Users, Clock, Globe,
   PlayCircle, Lock, ChevronRight, CheckCircle2, GraduationCap,
-  Award, Calendar, MapPin,
+  Award, Calendar, MapPin, X, User,
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
@@ -63,6 +63,12 @@ export default function CourseDetailScreen({ navigation, route }) {
   const [program, setProgram] = useState(null);
   const [batches, setBatches] = useState([]);
   const [loading, setLoading] = useState(true);
+  // Batch picker modal — surfaced instead of the native Alert.alert
+  // when the course has more than one available batch. Renders each
+  // batch as a full card (days, time, trainer, capacity) so the
+  // student can compare before choosing.
+  const [batchPickerOpen, setBatchPickerOpen] = useState(false);
+  const [batchPickerList, setBatchPickerList] = useState([]);
 
   const isGuest = !user;
   const isPaid = false; // Phase 2
@@ -173,25 +179,28 @@ export default function CourseDetailScreen({ navigation, route }) {
       return;
     }
 
-    // Multiple batches — pop a chooser. Alert.alert supports up to 3 buttons
-    // on Android (plus Cancel), so we cap at 3; if you ever need more, swap
-    // this for a real bottom-sheet.
-    const top = availableBatches.slice(0, 3);
-    Alert.alert(
-      'Pick a batch',
-      'Which batch would you like to enroll in?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        ...top.map((b) => ({
-          text: `${b.name}${b.start_time ? ' · ' + b.start_time.slice(0, 5) : ''}`,
-          onPress: () => navigation.navigate('EnrollmentForm', {
-            batch: { ...b, course_price: program.price },
-            course: courseSummary,
-          }),
-        })),
-      ],
-      { cancelable: true },
-    );
+    // Multiple batches — open the custom bottom-sheet picker instead
+    // of the two-line native Alert. Handles as many batches as the
+    // course has, each rendered as a full card so the student can see
+    // days / time / trainer / capacity side-by-side.
+    setBatchPickerList(availableBatches);
+    setBatchPickerOpen(true);
+  };
+
+  // Selected a batch from the picker → close it and hand off to the
+  // enrollment form with the same payload the single-batch branch uses.
+  const pickBatch = (b) => {
+    setBatchPickerOpen(false);
+    const courseSummary = {
+      id:               program.id,
+      name:             program.name,
+      price:            program.price,
+      institution_name: program.institution_name,
+    };
+    navigation.navigate('EnrollmentForm', {
+      batch: { ...b, course_price: program.price },
+      course: courseSummary,
+    });
   };
 
   // Open the intro video URL externally (browser / YouTube app / VLC for .mp4).
@@ -431,19 +440,13 @@ export default function CourseDetailScreen({ navigation, route }) {
         ) : null}
 
         {/* ── Premium banner ───────────────────────────────── */}
-        {!isPaid ? (
-          <View style={{ paddingHorizontal: spacing.xl, marginTop: spacing.lg }}>
-            <View style={styles.premiumBanner}>
-              <Lock size={20} color="#fff" strokeWidth={2.4} />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.premiumTitle}>Unlock the full program</Text>
-                <Text style={styles.premiumBody}>
-                  Subscribe to watch all lessons, join live classes, and earn a certificate.
-                </Text>
-              </View>
-            </View>
-          </View>
-        ) : null}
+        {/* Removed. Guests must NOT see the "Unlock Premium Access"
+            prompt on the course detail page — the spec says they can
+            only browse public course info (name, description, duration,
+            fee, syllabus preview, trainer). Signed-in free users still
+            hit the "Subscribe to Unlock Premium Access" modal from
+            handleEnroll if they tap the Enroll bar without a plan, so
+            no CTA is lost. */}
       </ScrollView>
 
       {/* ── Sticky bottom Enroll bar ─────────────────────── */}
@@ -465,6 +468,122 @@ export default function CourseDetailScreen({ navigation, route }) {
           <Text style={styles.enrollBtnText}>{isPaid ? 'Continue' : 'Enroll now'}</Text>
         </TouchableOpacity>
       </View>
+
+      {/* ── Batch picker (custom bottom sheet) ───────────────────────
+          Replaces the old native Alert.alert with a proper card list.
+          Each batch shows days, time, trainer, and seats-remaining so
+          the student can compare before picking. Slides up from the
+          bottom with a translucent scrim behind so the parent scroll
+          stays visible. */}
+      <Modal
+        visible={batchPickerOpen}
+        transparent
+        animationType="slide"
+        statusBarTranslucent
+        onRequestClose={() => setBatchPickerOpen(false)}
+      >
+        <TouchableOpacity
+          style={styles.pickerBackdrop}
+          activeOpacity={1}
+          onPress={() => setBatchPickerOpen(false)}
+        />
+        <View style={styles.pickerSheet}>
+          <View style={styles.pickerHandle} />
+          <View style={styles.pickerHeader}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.pickerTitle}>Pick a batch</Text>
+              <Text style={styles.pickerSub}>
+                Choose the batch you'd like to enroll in.
+              </Text>
+            </View>
+            <TouchableOpacity
+              onPress={() => setBatchPickerOpen(false)}
+              style={styles.pickerClose}
+              activeOpacity={0.85}
+            >
+              <X size={18} color={palette.text} strokeWidth={2.4} />
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView
+            style={{ maxHeight: 420 }}
+            contentContainerStyle={{ padding: spacing.lg, paddingTop: 0 }}
+            showsVerticalScrollIndicator={false}
+          >
+            {batchPickerList.map((b) => {
+              const cap = Number(b.capacity || 0);
+              const used = Number(b.enrolled_count || 0);
+              const left = Math.max(cap - used, 0);
+              const nearlyFull = cap > 0 && left / cap <= 0.15;
+              const time =
+                (b.start_time && b.end_time && `${String(b.start_time).slice(0,5)} – ${String(b.end_time).slice(0,5)}`) ||
+                b.time || '';
+              const days = b.days || b.days_of_week || '';
+              return (
+                <TouchableOpacity
+                  key={b.id}
+                  style={styles.pickerCard}
+                  onPress={() => pickBatch(b)}
+                  activeOpacity={0.9}
+                >
+                  <View style={styles.pickerCardHead}>
+                    <Text style={styles.pickerCardTitle} numberOfLines={1}>
+                      {b.name || `Batch ${b.id}`}
+                    </Text>
+                    {cap > 0 ? (
+                      <View style={[
+                        styles.pickerSeatsPill,
+                        nearlyFull && styles.pickerSeatsPillLow,
+                      ]}>
+                        <Text style={[
+                          styles.pickerSeatsPillText,
+                          nearlyFull && styles.pickerSeatsPillTextLow,
+                        ]}>
+                          {left === 0 ? 'Full' : `${left} left`}
+                        </Text>
+                      </View>
+                    ) : null}
+                  </View>
+
+                  <View style={styles.pickerMetaGrid}>
+                    {days ? (
+                      <View style={styles.pickerMetaRow}>
+                        <Calendar size={12} color={palette.textMuted} strokeWidth={2.2} />
+                        <Text style={styles.pickerMetaText} numberOfLines={1}>{days}</Text>
+                      </View>
+                    ) : null}
+                    {time ? (
+                      <View style={styles.pickerMetaRow}>
+                        <Clock size={12} color={palette.textMuted} strokeWidth={2.2} />
+                        <Text style={styles.pickerMetaText}>{time}</Text>
+                      </View>
+                    ) : null}
+                    {b.trainer_name ? (
+                      <View style={styles.pickerMetaRow}>
+                        <User size={12} color={palette.textMuted} strokeWidth={2.2} />
+                        <Text style={styles.pickerMetaText} numberOfLines={1}>
+                          {b.trainer_name}
+                        </Text>
+                      </View>
+                    ) : null}
+                    {cap > 0 ? (
+                      <View style={styles.pickerMetaRow}>
+                        <Users size={12} color={palette.textMuted} strokeWidth={2.2} />
+                        <Text style={styles.pickerMetaText}>{used}/{cap} enrolled</Text>
+                      </View>
+                    ) : null}
+                  </View>
+
+                  <View style={styles.pickerCardCta}>
+                    <Text style={styles.pickerCardCtaText}>Select this batch</Text>
+                    <ChevronRight size={16} color={palette.purple.vivid} strokeWidth={2.4} />
+                  </View>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -713,4 +832,112 @@ const styles = StyleSheet.create({
     marginTop: spacing.xl,
   },
   ctaText: { ...type.bodyBold, color: '#fff' },
+
+  // ── Batch picker bottom sheet ────────────────────────────────────
+  pickerBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(15,10,40,0.55)',
+  },
+  pickerSheet: {
+    position: 'absolute',
+    left: 0, right: 0, bottom: 0,
+    backgroundColor: palette.surface,
+    borderTopLeftRadius: 22,
+    borderTopRightRadius: 22,
+    paddingBottom: spacing.xl,
+    ...shadows.raised,
+  },
+  pickerHandle: {
+    alignSelf: 'center',
+    width: 44, height: 4,
+    borderRadius: 2,
+    backgroundColor: palette.borderSoft,
+    marginTop: 10,
+    marginBottom: 8,
+  },
+  pickerHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    gap: spacing.md,
+  },
+  pickerTitle: { ...type.h1, color: palette.text, fontSize: 20 },
+  pickerSub:   { ...type.caption, color: palette.textMuted, marginTop: 2 },
+  pickerClose: {
+    width: 34, height: 34,
+    borderRadius: 17,
+    backgroundColor: palette.bg,
+    alignItems: 'center', justifyContent: 'center',
+  },
+
+  pickerCard: {
+    backgroundColor: palette.bg,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: palette.borderSoft,
+    padding: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  pickerCardHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  pickerCardTitle: { ...type.bodyBold, color: palette.text, flex: 1, fontSize: 15 },
+
+  pickerSeatsPill: {
+    paddingHorizontal: 10, paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: palette.green.soft,
+  },
+  pickerSeatsPillText: {
+    ...type.micro,
+    color: palette.green.on,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+  pickerSeatsPillLow: { backgroundColor: palette.orange.soft },
+  pickerSeatsPillTextLow: { color: palette.orange.on },
+
+  pickerMetaGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    rowGap: 6,
+    marginBottom: spacing.sm,
+  },
+  pickerMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: palette.surface,
+    paddingHorizontal: 8, paddingVertical: 5,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: palette.borderSoft,
+  },
+  pickerMetaText: {
+    ...type.caption,
+    color: palette.textMuted,
+    fontWeight: '600',
+    maxWidth: 160,
+  },
+
+  pickerCardCta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 4,
+    borderTopWidth: 1,
+    borderTopColor: palette.borderSoft,
+    paddingTop: spacing.sm,
+  },
+  pickerCardCtaText: {
+    ...type.caption,
+    color: palette.purple.vivid,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
 });

@@ -2,6 +2,7 @@ const bcrypt = require('bcrypt');
 const pool = require('../config/db');
 const { ensureCapacity, limitResponse } = require('../utils/planLimits');
 const { sendTrainerCredentialsEmail } = require('../utils/mailer');
+const { dispatchWelcomeSms } = require('../utils/smsService');
 const {
   validateEmailFormat, validatePhoneFormat,
   ensureEmailUnique, ensurePhoneUnique,
@@ -186,6 +187,19 @@ exports.createTrainer = async (req, res) => {
     } catch (mailErr) {
       console.warn('[createTrainer] credentials email threw:', mailErr.message);
     }
+
+    // ── Welcome SMS (fire-and-forget) ─────────────────────────────
+    // Trainer was provisioned by the admin with a temp password, so we
+    // pass it along in the SMS just like the credentials email does.
+    // dispatchWelcomeSms swallows errors internally — SMS provider
+    // outages never affect the 201 response.
+    dispatchWelcomeSms({
+      phone:        cleanPhone,
+      name:         user.name,
+      role:         'trainer',
+      loginId:      user.email,
+      tempPassword: password,
+    });
 
     res.status(201).json({
       message: 'Trainer created successfully. Login details emailed to the trainer.',

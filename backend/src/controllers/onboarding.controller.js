@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const {
   sendApprovalEmail, sendActivationEmail, sendBranchSetupEmail,
 } = require('../utils/mailer');
+const { dispatchWelcomeSms } = require('../utils/smsService');
 const { createPaymentLink, verifyWebhookSignature } = require('../utils/razorpay');
 const { insertNotification } = require('./notification.controller');
 const { creditReferralReward, consumeDiscount } = require('./referral.controller');
@@ -574,6 +575,17 @@ exports.setupAcademy = async (req, res) => {
           loginEmail:      branchEmail,
           loginPassword:   tempPassword,
         }).catch((err) => console.error('[setup] branch email failed:', err?.message));
+
+        // 4. Welcome SMS to the branch admin so they can log in even
+        //    without checking email. Fire-and-forget: MSG91 outages
+        //    never break the head-office setup flow.
+        dispatchWelcomeSms({
+          phone:        b.contact_number,
+          name:         branchAdminName,
+          role:         'branch',
+          loginId:      branchEmail,
+          tempPassword,
+        });
       }
     } catch (err) {
       // Don't fail the whole setup if branch provisioning blows up — the
@@ -1731,6 +1743,32 @@ exports.handlePaymentWebhook = async (req, res) => {
         [ep.rows[0].id, paymentId || null],
       );
       return res.json({ ok: true, event_payment: true });
+    }
+
+    // ── Enrollment renewal branch ──────────────────────────────────
+    // Student-initiated renewals mint their link with
+    // notes.action='enrollment_renew' + notes.enrollment_id.
+    // We flip the matching enrollments row to 'paid', stamp paid_at
+    // and the payment id, and return early (institution-side logic
+    // is irrelevant for these).
+    if (notes.action === 'enrollment_renew' && notes.enrollment_id) {
+      const enrollmentId = parseInt(notes.enrollment_id, 10);
+      if (!Number.isInteger(enrollmentId)) {
+        return res.status(400).json({ message: 'Invalid enrollment_id note' });
+      }
+      const upd = await pool.query(
+        `UPDATE enrollments
+            SET payment_status  = 'paid',
+                paid_at         = NOW(),
+                payment_reference = COALESCE($2, payment_reference)
+          WHERE id = $1
+            AND payment_status <> 'paid'
+          RETURNING id, student_id, payment_amount`,
+        [enrollmentId, paymentId || linkId],
+      );
+      // eslint-disable-next-line no-console
+      console.log('[webhook] enrollment_renew paid=', upd.rowCount, 'enrollment=', enrollmentId);
+      return res.json({ ok: true, enrollment_renew: true, matched: upd.rowCount > 0 });
     }
 
     // Look up by stored payment_link_id first; fall back to notes.institution_id

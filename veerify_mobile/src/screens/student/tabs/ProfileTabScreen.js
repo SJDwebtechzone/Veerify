@@ -133,12 +133,9 @@ function GuestView({ navigation }) {
           title="Track your progress"
           body="Attendance, completed lessons, and certificates in one place."
         />
-        <Benefit
-          icon={Gift}
-          accent={palette.orange}
-          title="Refer friends, earn perks"
-          body="Get rewards every time someone joins through your link."
-        />
+        {/* "Refer friends, earn perks" benefit removed alongside the
+            More-tab Refer & Earn tile — students no longer see any
+            referral messaging on the Profile tab. */}
       </View>
     </View>
   );
@@ -201,8 +198,11 @@ function LoggedInView({ user, subscription, selectedInstitution, onLogout, navig
               <Text style={styles.avatarInitial}>{initials}</Text>
             </View>
           )}
+          {/* Small pencil overlay on the avatar — one-tap shortcut into
+              the Edit Profile screen. Both this and the "Edit Profile"
+              button below route to the same StudentEditProfile screen. */}
           <TouchableOpacity
-            onPress={() => placeholder('Edit Profile')}
+            onPress={() => navigation.navigate('StudentEditProfile')}
             style={styles.editPencil}
           >
             <Edit3 size={11} color="#fff" strokeWidth={2.6} />
@@ -215,6 +215,17 @@ function LoggedInView({ user, subscription, selectedInstitution, onLogout, navig
             <Text style={styles.atPillText}>at {selectedInstitution.name}</Text>
           </View>
         ) : null}
+
+        {/* Prominent Edit Profile CTA — larger and more discoverable
+            than the small pencil overlay alone. */}
+        <TouchableOpacity
+          onPress={() => navigation.navigate('StudentEditProfile')}
+          style={styles.editProfileBtn}
+          activeOpacity={0.85}
+        >
+          <Edit3 size={13} color={palette.purple.vivid} strokeWidth={2.6} />
+          <Text style={styles.editProfileBtnText}>Edit Profile</Text>
+        </TouchableOpacity>
       </View>
 
       {/* Subscription card — only renders when the student already has an
@@ -238,12 +249,16 @@ function LoggedInView({ user, subscription, selectedInstitution, onLogout, navig
 
       {/* Grid menu */}
       <View style={styles.grid}>
-        <Tile icon={GraduationCap}  label="Enrolled Programs" accent={palette.purple} onPress={() => placeholder('Enrolled Programs')} />
-        <Tile icon={ClipboardCheck} label="Attendance"        accent={palette.green}  onPress={() => placeholder('Attendance')} />
+        <Tile icon={GraduationCap}  label="Enrolled Programs" accent={palette.purple} onPress={() => navigation.navigate('StudentEnrolledPrograms')} />
+        <Tile icon={ClipboardCheck} label="Attendance"        accent={palette.green}  onPress={() => navigation.navigate('StudentAttendance')} />
         <Tile icon={Star}           label="My Performance"    accent={palette.orange} onPress={() => navigation.navigate('StudentPerformanceReports')} />
         <Tile icon={Award}          label="Belts & Certs"     accent={palette.teal}   onPress={() => navigation.navigate('StudentBeltJourney')} />
-        <Tile icon={Wallet}         label="Payments"          accent={palette.blue}   onPress={() => placeholder('Payment History')} />
-        <Tile icon={Gift}           label="Refer & Earn"      accent={palette.pink}   onPress={handleReferral} />
+        <Tile icon={Wallet}         label="Payments"          accent={palette.blue}   onPress={() => navigation.navigate('StudentPayments')} />
+        {/* Refer & Earn removed from the student More tab per product
+            request. The tile lives elsewhere for roles where the
+            referral program actually pays out (admin), and re-enabling
+            it here later is a one-line uncomment. */}
+        {/* <Tile icon={Gift}           label="Refer & Earn"      accent={palette.pink}   onPress={handleReferral} /> */}
         {/* <Tile icon={Settings}       label="Settings"          accent={palette.teal}   onPress={() => placeholder('Settings')} /> */}
       </View>
 
@@ -440,6 +455,21 @@ const styles = StyleSheet.create({
     borderRadius: radius.pill,
   },
   atPillText: { ...type.micro, color: palette.purple.on, fontWeight: '700' },
+
+  // Prominent Edit Profile CTA on the profile card. Soft-purple
+  // outline pill sits below the "at <institution>" line.
+  editProfileBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    marginTop: spacing.md,
+    paddingHorizontal: 14, paddingVertical: 7,
+    borderRadius: 999,
+    backgroundColor: palette.purple.soft,
+    borderWidth: 1, borderColor: palette.purple.vivid,
+  },
+  editProfileBtnText: {
+    fontSize: 12, fontWeight: '800', color: palette.purple.vivid,
+    letterSpacing: 0.3,
+  },
 
   // Subscription card (active)
   subCard: {

@@ -23,6 +23,7 @@ import {
   UserCog, BookOpen, Building2, CalendarRange, Bell, Megaphone,
   MessageSquare, BarChart3, Palette, CreditCard, Settings, LifeBuoy,
   LogOut, ChevronRight, Edit3, ShieldCheck, Layers, KeyRound, MapPin,
+  Award,
 } from 'lucide-react-native';
 
 import { useAuth } from '../../../context/AuthContext';
@@ -39,6 +40,8 @@ const MENU = [
   { key: 'batches',       label: 'Batches',          icon: Layers,         accent: palette.teal   },
   { key: 'branches',      label: 'Branches',         icon: Building2,      accent: palette.green  },
   { key: 'events',        label: 'Events',           icon: CalendarRange,  accent: palette.orange },
+  { key: 'certificates',  label: 'Certificates',     icon: Award,          accent: palette.rose   },
+  { key: 'certificate_templates', label: 'Cert Templates', icon: Award,       accent: palette.purple },
   // { key: 'notifications', label: 'Notifications',    icon: Bell,           accent: palette.pink   },
   // { key: 'announcements', label: 'Announcements',    icon: Megaphone,      accent: palette.teal   },
   // { key: 'feedback',      label: 'Feedback',         icon: MessageSquare,  accent: palette.rose   },
@@ -101,6 +104,10 @@ export default function MoreTabScreen({ navigation }) {
     // published (upcoming + past), with a FAB to add a new one. The
     // create flow lives inside that screen.
     events:   'EventsList',
+    // Certificates queue — students awaiting certificate dispatch after
+    // a trainer submits their belt-test remarks.
+    certificates: 'AdminCertificates',
+    certificate_templates: 'CertificateTemplates',
     // Pricing & Plans — shows current subscription + renewal + the
     // catalog of other plans (super admin defined). "Renew" on current
     // and "Upgrade/Downgrade/Switch" on alternates all route through to

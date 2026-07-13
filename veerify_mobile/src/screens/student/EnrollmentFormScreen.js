@@ -31,6 +31,8 @@ import apiClient from '../../api/client';
 import DateField from '../../components/DateField';
 import PlanLimitModal from '../../components/PlanLimitModal';
 import { confirm } from '../../components/ConfirmDialog';
+import { useAuth } from '../../context/AuthContext';
+import { useInstitution } from '../../context/InstitutionContext';
 
 // ─── Theme tokens ──────────────────────────────────────────────────────
 const BRAND = '#E63946';
@@ -79,6 +81,8 @@ function ageFromDob(iso) {
 
 export default function EnrollmentFormScreen({ route, navigation }) {
   const { batch, course, adminMode, batchId: paramBatchId } = route?.params || {};
+  const { user } = useAuth();
+  const { selectedInstitution } = useInstitution();
 
   // Admin-initiated path (from the Add Student quick action) doesn't
   // pre-bind to a batch — we let the admin pick a course first, then a
@@ -169,7 +173,11 @@ export default function EnrollmentFormScreen({ route, navigation }) {
 
   const set = (k, v) => setForm((p) => ({ ...p, [k]: v }));
 
-  // Pre-fill from existing profile (subsequent enrollments)
+  // Pre-fill from existing profile (subsequent enrollments) with a
+  // fallback to the current user's account row when this is the
+  // student's first enrolment (nothing in /enrollments/my-profile yet).
+  // Guarantees Full Name, Mobile Number and Email are auto-populated
+  // on the very first Join Batch tap, matching the spec.
   useEffect(() => {
     (async () => {
       try {
@@ -183,12 +191,15 @@ export default function EnrollmentFormScreen({ route, navigation }) {
           const isStandardBelt = BELT_OPTIONS.includes(savedBelt);
           setForm((prev) => ({
             ...prev,
-            full_name:      p.full_name || '',
+            // Fall back to the AuthContext user for the three "auto-fill"
+            // fields so a brand-new student who never enrolled before
+            // still sees their name / phone / email pre-populated.
+            full_name:      p.full_name      || user?.name  || '',
             date_of_birth:  p.date_of_birth ? String(p.date_of_birth).slice(0, 10) : '',
             father_name:    p.father_name || '',
             mother_name:    p.mother_name || '',
-            contact_number: p.contact_number || '',
-            email:          p.email || '',
+            contact_number: p.contact_number || user?.phone || '',
+            email:          p.email          || user?.email || '',
             address:        p.address || '',
             occupation:     p.occupation || '',
             height_cm:      p.height_cm ? String(p.height_cm) : '',
@@ -201,14 +212,32 @@ export default function EnrollmentFormScreen({ route, navigation }) {
             belt_category_other: savedBelt && !isStandardBelt ? savedBelt : '',
             photo_url:      p.photo_url || '',
           }));
+        } else {
+          // No profile at all yet — seed the three auto-fill fields
+          // straight from the AuthContext user.
+          setForm((prev) => ({
+            ...prev,
+            full_name:      user?.name  || '',
+            contact_number: user?.phone || '',
+            email:          user?.email || '',
+          }));
         }
       } catch (err) {
-        // First-time enroller; leave the form blank.
+        // First-time enroller / API hiccup — still try to auto-fill the
+        // three headline fields from the AuthContext user so the form is
+        // never empty on the very first Join Batch tap.
+        setForm((prev) => ({
+          ...prev,
+          full_name:      prev.full_name      || user?.name  || '',
+          contact_number: prev.contact_number || user?.phone || '',
+          email:          prev.email          || user?.email || '',
+        }));
       } finally {
         setLoadingProfile(false);
       }
     })();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
 
   const age = useMemo(() => ageFromDob(form.date_of_birth), [form.date_of_birth]);
 
@@ -592,6 +621,82 @@ export default function EnrollmentFormScreen({ route, navigation }) {
           </>
         ) : null}
 
+        {/* ── Batch summary (student mode only) ─────────────────────
+            Shows the student EXACTLY what they're enrolling into so they
+            can eyeball the details before scrolling into the form. All
+            fields come from the batch row we were handed by the Batches
+            tab; nothing here needs a second fetch. Fields with no value
+            simply don't render — the card never has an empty row. */}
+        {!adminMode && pickedBatch ? (
+          <View style={styles.summaryCard}>
+            <Text style={styles.summaryHeading}>Batch Summary</Text>
+            <SummaryRow
+              label="Institution"
+              value={selectedInstitution?.name || pickedBatch.institution_name}
+            />
+            <SummaryRow
+              label="Branch"
+              value={pickedBatch.branch_name}
+            />
+            <SummaryRow
+              label="Course"
+              value={pickedBatch.course_name || course?.name}
+            />
+            <SummaryRow
+              label="Batch"
+              value={pickedBatch.name || pickedBatch.batch_name}
+            />
+            <SummaryRow
+              label="Trainer"
+              value={pickedBatch.trainer_name || pickedBatch.trainer}
+            />
+            <SummaryRow
+              label="Schedule"
+              value={(() => {
+                const time =
+                  (pickedBatch.start_time && pickedBatch.end_time &&
+                    `${pickedBatch.start_time} – ${pickedBatch.end_time}`) ||
+                  pickedBatch.time ||
+                  pickedBatch.timing ||
+                  '';
+                const days = pickedBatch.days || pickedBatch.days_of_week || '';
+                return [days, time].filter(Boolean).join(' · ');
+              })()}
+            />
+            <SummaryRow
+              label="Duration"
+              value={(() => {
+                const months =
+                  pickedBatch.duration_months ??
+                  course?.duration_months ??
+                  pickedBatch.course_duration_months;
+                if (months) return `${months} ${months === 1 ? 'month' : 'months'}`;
+                return pickedBatch.duration || '';
+              })()}
+            />
+            {/* Fee — always render the actual course price. The value
+                is joined into the batch row by the backend so it's
+                populated even on first load. Renders "Free" only when
+                the course really does have a price of 0. */}
+            <SummaryRow
+              label="Fee"
+              value={coursePrice
+                ? `₹${Number(coursePrice).toLocaleString('en-IN')}`
+                : 'Free'}
+              emphasise
+              alwaysShow
+            />
+            <SummaryRow
+              label="Start Date"
+              value={pickedBatch.start_date
+                ? new Date(pickedBatch.start_date).toLocaleDateString('en-IN', {
+                    day: '2-digit', month: 'short', year: 'numeric',
+                  })
+                : ''}
+            />
+          </View>
+        ) : null}
+
         {/* Photo */}
         <View style={styles.photoCard}>
           <TouchableOpacity
@@ -887,6 +992,32 @@ export default function EnrollmentFormScreen({ route, navigation }) {
 }
 
 // ─── Reusable bits ────────────────────────────────────────────────────
+
+// One line inside the Batch Summary card. Silently returns null when
+// there's no value so the card never renders a blank row (keeps the
+// student's confidence in the data — no "-" placeholders).
+function SummaryRow({ label, value, emphasise, alwaysShow }) {
+  // Silently hide any row without a value so the summary card never
+  // renders an empty line — unless the caller explicitly asks us to
+  // always show it (e.g. Fee, which needs to display "Free" when the
+  // course has no price).
+  if (!alwaysShow
+      && (value === null || value === undefined || value === '' || value === 0)) {
+    return null;
+  }
+  return (
+    <View style={styles.summaryRow}>
+      <Text style={styles.summaryLabel}>{label}</Text>
+      <Text
+        style={[styles.summaryValue, emphasise && styles.summaryValueEmphasise]}
+        numberOfLines={2}
+      >
+        {value}
+      </Text>
+    </View>
+  );
+}
+
 function SectionTitle({ icon: Icon, title }) {
   return (
     <View style={styles.sectionTitle}>
@@ -1017,6 +1148,52 @@ const styles = StyleSheet.create({
   body: { padding: 16, paddingBottom: 32 },
 
   photoCard: { alignItems: 'center', marginBottom: 16 },
+
+  // ── Batch summary card (student mode only) ────────────────────────
+  // Renders the Institution / Branch / Course / Batch / Trainer /
+  // Schedule / Duration / Fee / Start Date at the top of the form so
+  // the student can confirm what they picked before typing anything.
+  summaryCard: {
+    backgroundColor: SURFACE,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: BORDER,
+    padding: 14,
+    marginBottom: 14,
+  },
+  summaryHeading: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: TEXT_MUTED,
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginBottom: 10,
+  },
+  summaryRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingVertical: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: BORDER,
+  },
+  summaryLabel: {
+    flex: 0.9,
+    fontSize: 12,
+    color: TEXT_MUTED,
+    fontWeight: '700',
+  },
+  summaryValue: {
+    flex: 1.6,
+    fontSize: 13,
+    color: TEXT,
+    fontWeight: '700',
+    textAlign: 'right',
+  },
+  summaryValueEmphasise: {
+    color: BRAND,
+    fontWeight: '800',
+    fontSize: 14,
+  },
 
   // ── Admin-mode batch picker (only rendered when adminMode=true) ──
   adminBatchCard: {

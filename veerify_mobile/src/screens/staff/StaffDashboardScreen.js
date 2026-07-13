@@ -81,6 +81,18 @@ export default function StaffDashboardScreen({ navigation }) {
   // pretty name in the header. Falls back to `user` from AuthContext when
   // the fetch hasn't returned yet so the header never flashes empty.
   const [me, setMe] = useState(null);
+  // Unread notifications count — powers the bell badge. Refetched on
+  // focus so the dot / number always reflects reality when the trainer
+  // returns to the dashboard. GET /notifications?limit=1 gives us the
+  // `counts.unread` field cheaply.
+  const [unreadCount, setUnreadCount] = useState(0);
+  const loadUnread = useCallback(async () => {
+    try {
+      const r = await apiClient.get('/notifications?limit=1');
+      setUnreadCount(Number(r.data?.counts?.unread) || 0);
+    } catch { /* keep last value */ }
+  }, []);
+  useFocusEffect(useCallback(() => { loadUnread(); }, [loadUnread]));
   // Upcoming institution events — published by the academy admin via
   // /institutions/me/events, fanned out to every linked trainer here.
   const [events, setEvents] = useState([]);
@@ -195,10 +207,17 @@ export default function StaffDashboardScreen({ navigation }) {
           <TouchableOpacity
             style={styles.bellBtn}
             onPress={() => navigation.navigate('StaffNotifications')}
-            activeOpacity={0.85}
+            activeOpacity={0.75}
+            hitSlop={10}
           >
             <Bell size={20} color={palette.text} strokeWidth={2.2} />
-            <View style={styles.bellDot} />
+            {unreadCount > 0 ? (
+              <View style={styles.bellBadge}>
+                <Text style={styles.bellBadgeText}>
+                  {unreadCount > 99 ? '99+' : String(unreadCount)}
+                </Text>
+              </View>
+            ) : null}
           </TouchableOpacity>
         </View>
         <Text style={styles.headerSub}>
@@ -269,6 +288,12 @@ export default function StaffDashboardScreen({ navigation }) {
           label="Send Announcement"
           accent={palette.green}
           onPress={() => navigation.navigate('TrainerSendAnnouncement')}
+        />
+        <ActionButton
+          icon={Award}
+          label="Completed Students"
+          accent={palette.rose}
+          onPress={() => navigation.navigate('StaffCompletedStudents')}
         />
         <ActionButton
           icon={Video}
@@ -662,6 +687,21 @@ const styles = StyleSheet.create({
     width: 8, height: 8, borderRadius: 4,
     backgroundColor: palette.rose.vivid,
     borderWidth: 1.5, borderColor: palette.surface,
+  },
+  // Numeric badge — shown when unreadCount > 0. Auto-widens for
+  // multi-digit counts and caps at "99+".
+  bellBadge: {
+    position: 'absolute', top: -4, right: -4,
+    minWidth: 16, height: 16,
+    paddingHorizontal: 4,
+    borderRadius: 8,
+    backgroundColor: palette.rose.vivid,
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 2, borderColor: palette.surface,
+  },
+  bellBadgeText: {
+    fontSize: 10, fontWeight: '900', color: '#fff',
+    lineHeight: 12, letterSpacing: 0.3,
   },
   headerSub: { ...type.caption, color: palette.textMuted, marginTop: spacing.md },
 

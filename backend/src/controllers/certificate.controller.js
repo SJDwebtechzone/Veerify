@@ -62,15 +62,40 @@ exports.verify = async (req, res) => {
 // ── List: student's own ────────────────────────────────────────────────────
 exports.listMy = async (req, res) => {
   try {
-    const r = await pool.query(
-      `SELECT c.*, i.name AS institution_name
-         FROM certificates c
-         JOIN institutions i ON c.institution_id = i.id
-        WHERE c.student_id = $1
-        ORDER BY c.issue_date DESC, c.id DESC`,
-      [req.user.id],
-    );
-    res.json({ count: r.rows.length, certificates: r.rows });
+    // Issued certificates (real rows) + pending awaits so the student's
+    // Certificates screen can show BOTH sections in one round-trip.
+    const [certs, awaits] = await Promise.all([
+      pool.query(
+        `SELECT c.*, i.name AS institution_name
+           FROM certificates c
+           JOIN institutions i ON c.institution_id = i.id
+          WHERE c.student_id = $1
+          ORDER BY c.issue_date DESC, c.id DESC`,
+        [req.user.id],
+      ),
+      // Course completions that haven't been dispatched yet. We show
+      // these under an "Awaiting Certificate" section on the student's
+      // screen so the state is transparent to them.
+      pool.query(
+        `SELECT
+           cc.id, cc.status,
+           cc.course_completed_at, cc.belt_test_completed_at,
+           co.name AS course_name,
+           i.name  AS institution_name
+         FROM course_completions cc
+         JOIN courses co ON co.id = cc.course_id
+         LEFT JOIN institutions i ON i.id = cc.institution_id
+        WHERE cc.student_id = $1
+          AND cc.status <> 'certificate_sent'
+        ORDER BY cc.course_completed_at DESC`,
+        [req.user.id],
+      ).catch(() => ({ rows: [] })),
+    ]);
+    res.json({
+      count:        certs.rows.length,
+      certificates: certs.rows,
+      awaiting:     awaits.rows,
+    });
   } catch (err) {
     console.error('Cert listMy error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });

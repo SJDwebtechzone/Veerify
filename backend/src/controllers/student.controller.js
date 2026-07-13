@@ -73,6 +73,7 @@ exports.getAllStudents = async (req, res) => {
          sp.weight_kg,
          sp.disabilities,
          sp.photo_url,
+         sp.emergency_contact,
 
          (
            SELECT COALESCE(jsonb_agg(DISTINCT jsonb_build_object(

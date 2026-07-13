@@ -39,12 +39,23 @@ async function _nominatimSearch(qs) {
     const url =
       `https://nominatim.openstreetmap.org/search?${qs}` +
       `&country=India&format=json&addressdetails=1&limit=1`;
-    const r = await fetch(url, {
-      headers: {
-        'User-Agent': NOMINATIM_USER_AGENT,
-        'Accept':     'application/json',
-      },
-    });
+    // Cap the outbound Nominatim call at 3s so a slow / unreachable
+    // upstream can't stall the whole /academies/nearby endpoint. On
+    // timeout we fall back to the local prefix average.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    let r;
+    try {
+      r = await fetch(url, {
+        headers: {
+          'User-Agent': NOMINATIM_USER_AGENT,
+          'Accept':     'application/json',
+        },
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
     if (!r.ok) {
       console.warn('[geocoder] nominatim http', r.status, 'for', qs);
       return null;

@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const pool = require('../config/db');
 const { sendPasswordResetEmail } = require('../utils/mailer');
+const { dispatchWelcomeSms } = require('../utils/smsService');
 const {
   validateEmailFormat, validatePhoneFormat,
   ensureEmailUnique, ensurePhoneUnique,
@@ -90,6 +91,22 @@ exports.register = async (req, res) => {
       process.env.JWT_SECRET,
       { expiresIn: '7d' }
     );
+
+    // ── Welcome SMS (fire-and-forget) ─────────────────────────────
+    // Fires after the DB commit + JWT succeed, so a Msg91 outage cannot
+    // block the response. dispatchWelcomeSms swallows errors internally
+    // and only logs — the registration flow is never affected.
+    // The 'admin' role here maps to institution owner sign-ups (the
+    // wizard creates admins first, then attaches the institution).
+    const smsRole = user.role === 'admin' ? 'institution' : user.role;
+    dispatchWelcomeSms({
+      phone:    user.phone,
+      name:     user.name,
+      role:     smsRole,
+      loginId:  user.email,
+      // Password chosen by the user themselves during self-registration,
+      // so we don't echo it back over SMS. tempPassword is left blank.
+    });
 
     res.status(201).json({
       message: 'User registered successfully',

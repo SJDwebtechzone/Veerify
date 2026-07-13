@@ -25,18 +25,8 @@ import {
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
+import resolveAssetUrl from '../../utils/assetUrl';
 import { palette, spacing, radius, shadows, type } from '../../theme';
-
-const ASSET_HOST = (apiClient.defaults.baseURL || '').replace(/\/api\/?$/, '');
-function resolveAssetUrl(src) {
-  if (!src) return null;
-  if (src.startsWith('data:')) return src;
-  if (src.startsWith('/uploads/')) return ASSET_HOST + src;
-  if (src.includes('://localhost:') || src.includes('://127.0.0.1:')) {
-    return src.replace(/:\/\/(localhost|127\.0\.0\.1)(?=[:\/])/, '://10.0.2.2');
-  }
-  return src;
-}
 
 const BADGE_STYLE = {
   popular:      { label: 'Popular',      bg: '#ef4444', fg: '#fff' },
@@ -54,17 +44,33 @@ export default function InstitutionDetailScreen({ route, navigation }) {
   const { institutionId } = route.params;
   const [institution, setInstitution] = useState(null);
   const [courses, setCourses] = useState([]);
+  const [banners, setBanners] = useState([]);
+  const [bannerError, setBannerError] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const [instRes, coursesRes] = await Promise.all([
+      // Three parallel fetches: the academy details, its active
+      // student-visible courses, and the institution branding banners
+      // (public endpoint so guests can see the branded hero too).
+      const [instRes, coursesRes, bannersRes] = await Promise.all([
         apiClient.get(`/institutions/${institutionId}`),
         apiClient.get(`/courses/institution/${institutionId}`),
+        apiClient
+          .get(`/institution-banners/public/${institutionId}`)
+          .catch(() => ({ data: { banners: [] } })),
       ]);
       setInstitution(instRes.data.institution);
-      setCourses(coursesRes.data.courses || []);
+      // The backend already filters to status='active' for public
+      // callers, but we double-check on the client so a mixed-status
+      // response never leaks non-active rows into the guest view.
+      const activeOnly = (coursesRes.data.courses || []).filter(
+        (c) => !c.status || String(c.status).toLowerCase() === 'active',
+      );
+      setCourses(activeOnly);
+      setBanners(bannersRes.data?.banners || []);
+      setBannerError(false);
     } catch (err) {
       console.log('[InstitutionDetail] load error:', err.message);
     } finally {
@@ -88,12 +94,53 @@ export default function InstitutionDetailScreen({ route, navigation }) {
     return <View style={styles.center}><Text style={styles.notFoundText}>Academy not found</Text></View>;
   }
 
+  // Pick the top-priority banner (banners come from the backend already
+  // sorted by sort_order ASC, created_at DESC). Falls back to null so
+  // the render logic can decide between real banner and placeholder.
+  const heroBanner = banners.length > 0 ? banners[0] : null;
+  const heroBannerUrl = heroBanner && !bannerError
+    ? resolveAssetUrl(heroBanner.image_url)
+    : null;
+
   return (
     <ScrollView
       style={styles.screen}
       contentContainerStyle={{ paddingBottom: 60 }}
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={palette.purple.vivid} />}
     >
+      {/* ───── Branding banner (top hero) ───── */}
+      {/* When the institution has uploaded one or more branding banners
+          via the admin dashboard, we show the top-priority image. If no
+          banner is set OR the image fails to load, we fall back to a
+          branded purple placeholder with the academy name so the hero
+          surface never renders empty. */}
+      {heroBannerUrl ? (
+        <View style={styles.bannerWrap}>
+          <Image
+            source={{ uri: heroBannerUrl }}
+            style={styles.bannerImage}
+            resizeMode="cover"
+            onError={() => setBannerError(true)}
+          />
+          {heroBanner.title ? (
+            <View style={styles.bannerOverlay}>
+              <Text style={styles.bannerTitle} numberOfLines={1}>{heroBanner.title}</Text>
+              {heroBanner.subtitle ? (
+                <Text style={styles.bannerSubtitle} numberOfLines={2}>{heroBanner.subtitle}</Text>
+              ) : null}
+            </View>
+          ) : null}
+        </View>
+      ) : (
+        <View style={[styles.bannerWrap, styles.bannerPlaceholder]}>
+          <Building2 size={40} color={palette.purple.vivid} strokeWidth={1.6} />
+          <Text style={styles.bannerPlaceholderTitle} numberOfLines={1}>
+            {institution?.name || 'Veerify Academy'}
+          </Text>
+          <Text style={styles.bannerPlaceholderSub}>Welcome</Text>
+        </View>
+      )}
+
       {/* ───── Academy header card ───── */}
       <View style={styles.headerCard}>
         <View style={styles.headerRow}>
@@ -244,10 +291,43 @@ const styles = StyleSheet.create({
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: palette.bg },
   notFoundText: { ...type.body, color: palette.textMuted },
 
+  // Branding banner (top hero image)
+  bannerWrap: {
+    width: '100%',
+    height: 180,
+    backgroundColor: palette.borderSoft,
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  bannerImage: { width: '100%', height: '100%' },
+  bannerOverlay: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    backgroundColor: 'rgba(15,10,40,0.55)',
+  },
+  bannerTitle:    { ...type.h2, color: '#fff', fontWeight: '800' },
+  bannerSubtitle: { ...type.caption, color: 'rgba(255,255,255,0.9)', marginTop: 2 },
+  bannerPlaceholder: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: palette.purple.soft,
+  },
+  bannerPlaceholderTitle: { ...type.h2, color: palette.purple.on, fontWeight: '800', paddingHorizontal: spacing.lg },
+  bannerPlaceholderSub:   { ...type.caption, color: palette.purple.on, opacity: 0.75 },
+
   // Header card
   headerCard: {
     backgroundColor: palette.surface,
-    margin: spacing.lg,
+    marginHorizontal: spacing.lg,
+    // Pull the card up so it overlaps the banner slightly, giving the
+    // classic "profile card floats over hero image" look.
+    marginTop: -spacing.xl,
+    marginBottom: spacing.lg,
     borderRadius: radius.xl,
     padding: spacing.lg,
     ...shadows.card,

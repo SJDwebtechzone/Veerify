@@ -559,9 +559,24 @@ exports.getInstitutionPrograms = async (req, res) => {
 exports.getInstitutionBatches = async (req, res) => {
   try {
     const { id } = req.params;
+    // Join courses + trainers + the (optional) branch institution row
+    // so the mobile can render the batch card + the student-side
+    // enrollment summary WITHOUT a second round-trip per batch. Every
+    // field the enrollment form's summary card needs — course_name,
+    // course_price, duration_months, trainer_name, branch_name — is
+    // produced right here in one query.
     const result = await pool.query(
-      `SELECT b.*
+      `SELECT b.*,
+              c.name             AS course_name,
+              c.price            AS course_price,
+              c.duration_months  AS course_duration_months,
+              u.name             AS trainer_name,
+              br.name            AS branch_name
          FROM batches b
+         LEFT JOIN courses  c  ON b.course_id  = c.id
+         LEFT JOIN trainers t  ON b.trainer_id = t.id
+         LEFT JOIN users    u  ON t.user_id    = u.id
+         LEFT JOIN institutions br ON b.branch_id = br.id
         WHERE b.institution_id = $1
         ORDER BY b.created_at DESC
         LIMIT 100`,

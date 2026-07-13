@@ -125,13 +125,8 @@ export default function CategoryAcademiesScreen({ navigation, route }) {
                 : `${items.length} ${items.length === 1 ? 'academy' : 'academies'}`}
           </Text>
         </View>
-        {category?.image_url ? (
-          <Image
-            source={{ uri: resolveAssetUrl(category.image_url) }}
-            style={styles.categoryChipImg}
-            resizeMode="cover"
-          />
-        ) : null}
+        <CategoryHeaderImage category={category} />
+
       </View>
 
       {loading ? (
@@ -187,6 +182,33 @@ function EmptyState({ categoryName, error, onRetry }) {
 }
 
 // ─── Academy card ───────────────────────────────────────────────────────
+// Header thumbnail with graceful fallback. If the uploaded image URL
+// 404s (or was never uploaded), we render a soft brand-tinted tile
+// with the category's initial letter so the header slot is never
+// blank.
+function CategoryHeaderImage({ category }) {
+  const [imgError, setImgError] = React.useState(false);
+  const url = category?.image_url && !imgError
+    ? resolveAssetUrl(category.image_url)
+    : null;
+  if (url) {
+    return (
+      <Image
+        source={{ uri: url }}
+        style={styles.categoryChipImg}
+        resizeMode="cover"
+        onError={() => setImgError(true)}
+      />
+    );
+  }
+  const initial = (category?.name || '?').trim().charAt(0).toUpperCase();
+  return (
+    <View style={[styles.categoryChipImg, styles.categoryChipFallback]}>
+      <Text style={styles.categoryChipFallbackText}>{initial}</Text>
+    </View>
+  );
+}
+
 function AcademyCard({ academy, onPress, onDirections }) {
   const logo = resolveAssetUrl(academy.logo_url);
   const dist = Number.isFinite(Number(academy.distance_km))
@@ -272,6 +294,12 @@ const styles = StyleSheet.create({
   categoryChipImg: {
     width: 36, height: 36, borderRadius: 18,
     backgroundColor: BRAND_SOFT,
+  },
+  categoryChipFallback: {
+    alignItems: 'center', justifyContent: 'center',
+  },
+  categoryChipFallbackText: {
+    fontSize: 15, fontWeight: '900', color: BRAND, letterSpacing: -0.2,
   },
 
   // Card

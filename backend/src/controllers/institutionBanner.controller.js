@@ -177,6 +177,34 @@ exports.remove = async (req, res) => {
   }
 };
 
+// GET /api/institution-banners/public/:institutionId  (public — guest)
+//
+// Returns the active student-facing banners for a given institution.
+// Powers the Guest → Academy Search → academy profile branding banner
+// at the top of the InstitutionDetailScreen. No auth required so guests
+// browsing an academy can see the branded hero.
+exports.publicList = async (req, res) => {
+  try {
+    const institutionId = parseInt(req.params.institutionId, 10);
+    if (!Number.isInteger(institutionId)) {
+      return res.status(400).json({ message: 'Invalid institution id' });
+    }
+    const r = await pool.query(
+      `SELECT id, image_url, title, subtitle, link_url, audience, sort_order
+         FROM institution_banners
+        WHERE institution_id = $1
+          AND is_active = TRUE
+          AND (audience = 'student' OR audience = 'both')
+        ORDER BY sort_order ASC, created_at DESC`,
+      [institutionId],
+    );
+    res.json({ count: r.rows.length, banners: r.rows });
+  } catch (err) {
+    console.error('[institutionBanner.publicList]', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
 // GET /api/institution-banners/for-me  (student / trainer / parent)
 // Optional ?institution_id=N for students whose home isn't bound yet
 // (they may be browsing a picked academy as a guest with an explicit

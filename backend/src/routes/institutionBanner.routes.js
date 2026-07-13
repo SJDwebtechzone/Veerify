@@ -22,4 +22,9 @@ router.get('/for-me',  verifyToken,
            requireRole('student', 'trainer', 'parent'),
            ctrl.forMe);
 
+// Public read — guest browsing an academy profile card sees the active
+// student-facing banners without needing to log in. Powers the branded
+// hero banner on the Guest → Academy Search → InstitutionDetail screen.
+router.get('/public/:institutionId', ctrl.publicList);
+
 module.exports = router;

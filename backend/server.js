@@ -113,6 +113,13 @@ app.use('/api/branches', branchRoutes);
 // Per-institution promotional banners shown on student / trainer
 // dashboards. Admin CRUDs them under More → Branding → Banners.
 app.use('/api/institution-banners', require('./src/routes/institutionBanner.routes'));
+// Course completion → belt-test remarks → certificate dispatch workflow.
+// Trainer records completion + remarks; institution admin dispatches the
+// certificate from the Certificates queue.
+app.use('/api/course-completions', require('./src/routes/courseCompletion.routes'));
+// Certificate template CRUD + merge/preview. The templates are the
+// canvas for the "Send Certificate" flow on the admin's Certificates screen.
+app.use('/api/certificate-templates', require('./src/routes/certificateTemplate.routes'));
 app.use('/api/academies', academyRoutes);
 app.use('/api/students', studentRoutes);
 app.use('/api/course-videos', courseVideoRoutes);
@@ -120,6 +127,15 @@ app.use('/api/uploads', uploadRoutes);
 app.use('/api/marketplace-settings', marketplaceRoutes);
 // Feedback module — mobile submit + super-admin read.
 app.use('/api/feedback', require('./src/routes/feedback.routes'));
+
+// MSG91 email diagnostics — dev-only. GET /api/dev/email-test?to=addr@x
+// fires the "welcome" template at the supplied address and returns
+// MSG91's raw response so you can prove the AUTHKEY + template id
+// wiring is correct before the real flows depend on it. NEVER exposed
+// in production so a stray link can't be abused to spam.
+if (process.env.NODE_ENV !== 'production') {
+  app.use('/api/dev/email-test', require('./src/routes/emailTest.routes'));
+}
 
 app.use((req, res) => {
   res.status(404).json({ message: 'Route not found' });

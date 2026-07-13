@@ -14,10 +14,19 @@ const { requireActiveSubscription } = require('../utils/subscriptionGuard');
 router.post('/', verifyToken, requireRole('student', 'admin'), requireActiveSubscription, enrollmentController.enrollInBatch);
 router.get('/my', verifyToken, requireRole('student'), enrollmentController.getMyEnrollments);
 router.get('/my-profile', verifyToken, requireRole('student'), enrollmentController.getMyProfile);
+// Student updates their OWN profile (users + student_profiles merge).
+// Institution-managed fields (belt, enrollment, institution) live on
+// other tables and aren't touched.
+router.patch('/me/profile', verifyToken, requireRole('student'), enrollmentController.updateMyProfile);
 router.delete('/:id', verifyToken, requireRole('student'), enrollmentController.cancelEnrollment);
 router.patch('/:id/payment', verifyToken, requireRole('student'), enrollmentController.markPaid);
 // Mock payment - flips status to paid. Replace with Razorpay webhook later.
 router.post('/:id/mock-pay', verifyToken, requireRole('student'), enrollmentController.mockPay);
+// Student-initiated renewal — mints a Razorpay payment link scoped to
+// the student. Mobile opens the returned URL in the browser; the
+// existing Razorpay webhook flips payment_status to 'paid' on success.
+router.post('/:id/renew',         verifyToken, requireRole('student'), enrollmentController.renewEnrollment);
+router.get('/:id/renewal-status', verifyToken, requireRole('student'), enrollmentController.renewalStatus);
 
 // Admin/trainer route — enrollments for a single batch
 router.get('/batch/:id', verifyToken, requireRole('admin', 'trainer'), enrollmentController.getEnrollmentsByBatch);

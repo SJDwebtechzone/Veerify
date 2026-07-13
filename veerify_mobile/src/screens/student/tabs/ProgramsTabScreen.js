@@ -32,16 +32,12 @@ import { useInstitution } from '../../../context/InstitutionContext';
 import { palette, spacing, radius, shadows, type } from '../../../theme';
 import { confirm } from '../../../components/ConfirmDialog';
 
-const ASSET_HOST = (apiClient.defaults.baseURL || '').replace(/\/api\/?$/, '');
-function resolveAssetUrl(src) {
-  if (!src) return null;
-  if (src.startsWith('data:')) return src;
-  if (src.startsWith('/uploads/')) return ASSET_HOST + src;
-  if (src.includes('://localhost:') || src.includes('://127.0.0.1:')) {
-    return src.replace(/:\/\/(localhost|127\.0\.0\.1)(?=[:\/])/, '://10.0.2.2');
-  }
-  return src;
-}
+// Shared resolver — strips legacy embedded dev hosts (10.0.2.2:5000,
+// localhost:5000, 127.0.0.1:5000) that got baked into DB rows before
+// we started storing relative /uploads/ paths, and rewrites them to
+// the current API base. Same helper used everywhere else so the
+// legacy behavior only lives in one place.
+import resolveAssetUrl from '../../../utils/assetUrl';
 
 const ACCENTS = [palette.purple, palette.blue, palette.green, palette.orange, palette.pink, palette.teal];
 const cycleAccent = (i) => ACCENTS[i % ACCENTS.length];
@@ -225,6 +221,12 @@ export default function ProgramsTabScreen({ navigation }) {
                 <CategoryChip
                   key={c.id}
                   label={c.name}
+                  // Prefer the web-admin-uploaded image (mobile_categories.
+                  // image_url) — resolveAssetUrl expands the relative
+                  // "/uploads/…" path to a device-reachable URL. Falls
+                  // back to the row's emoji, then a default 🥋 so the
+                  // chip never renders blank.
+                  imageUrl={c.image_url}
                   emoji={c.emoji || '🥋'}
                   active={activeCategory?.id === c.id}
                   onPress={() => setActiveCategory(c)}
@@ -304,7 +306,12 @@ export default function ProgramsTabScreen({ navigation }) {
 // Pieces
 // ─────────────────────────────────────────────────────────────────────────────
 
-function CategoryChip({ label, emoji, active, onPress, accent }) {
+function CategoryChip({ label, emoji, imageUrl, active, onPress, accent }) {
+  // Track image load failure so a broken URL falls back gracefully to
+  // the emoji instead of leaving a blank square. resolveAssetUrl already
+  // handles /uploads/, localhost, and 127.0.0.1 rewrites.
+  const [imgError, setImgError] = React.useState(false);
+  const img = imageUrl && !imgError ? resolveAssetUrl(imageUrl) : null;
   return (
     <TouchableOpacity
       onPress={onPress}
@@ -314,7 +321,19 @@ function CategoryChip({ label, emoji, active, onPress, accent }) {
         { backgroundColor: active ? accent.vivid : accent.soft },
       ]}
     >
-      <Text style={{ fontSize: 16 }}>{emoji}</Text>
+      {img ? (
+        <Image
+          source={{ uri: img }}
+          onError={() => setImgError(true)}
+          style={{
+            width: 22, height: 22, borderRadius: 6,
+            backgroundColor: 'rgba(255,255,255,0.4)',
+          }}
+          resizeMode="cover"
+        />
+      ) : (
+        <Text style={{ fontSize: 16 }}>{emoji}</Text>
+      )}
       <Text style={[styles.catText, { color: active ? '#fff' : accent.on }]}>
         {label}
       </Text>
@@ -323,12 +342,21 @@ function CategoryChip({ label, emoji, active, onPress, accent }) {
 }
 
 function FeaturedProgramCard({ program, accent, onPress, onEnroll }) {
-  const img = resolveAssetUrl(program.image_url || program.thumbnail_url);
+  // Track image-load failure so a 404 or corrupted URL falls back to
+  // the branded sparkle placeholder instead of leaving a blank tile.
+  const [imgError, setImgError] = React.useState(false);
+  const rawUrl = program.image_url || program.thumbnail_url;
+  const img = rawUrl && !imgError ? resolveAssetUrl(rawUrl) : null;
   return (
     <TouchableOpacity onPress={onPress} activeOpacity={0.9} style={styles.featuredCard}>
       <View style={[styles.featuredImage, { backgroundColor: accent.soft }]}>
         {img ? (
-          <Image source={{ uri: img }} style={StyleSheet.absoluteFill} resizeMode="cover" />
+          <Image
+            source={{ uri: img }}
+            style={StyleSheet.absoluteFill}
+            resizeMode="cover"
+            onError={() => setImgError(true)}
+          />
         ) : (
           <View style={[styles.center, { flex: 1 }]}>
             <Sparkles size={36} color={accent.vivid} strokeWidth={2.2} />
@@ -356,12 +384,19 @@ function FeaturedProgramCard({ program, accent, onPress, onEnroll }) {
 }
 
 function GridProgramCard({ program, accent, onPress, onEnroll }) {
-  const img = resolveAssetUrl(program.image_url || program.thumbnail_url);
+  const [imgError, setImgError] = React.useState(false);
+  const rawUrl = program.image_url || program.thumbnail_url;
+  const img = rawUrl && !imgError ? resolveAssetUrl(rawUrl) : null;
   return (
     <TouchableOpacity onPress={onPress} activeOpacity={0.9} style={styles.gridCard}>
       <View style={[styles.gridImage, { backgroundColor: accent.soft }]}>
         {img ? (
-          <Image source={{ uri: img }} style={StyleSheet.absoluteFill} resizeMode="cover" />
+          <Image
+            source={{ uri: img }}
+            style={StyleSheet.absoluteFill}
+            resizeMode="cover"
+            onError={() => setImgError(true)}
+          />
         ) : (
           <View style={[styles.center, { flex: 1 }]}>
             <GraduationCap size={28} color={accent.vivid} strokeWidth={2.2} />

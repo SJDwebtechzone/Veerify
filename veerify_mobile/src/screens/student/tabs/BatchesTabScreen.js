@@ -133,14 +133,27 @@ export default function BatchesTabScreen({ navigation }) {
       });
       return;
     }
-    confirm({
-      title: 'Subscribe to Join',
-      message: 'You need an active subscription to enroll in a batch. Pick a plan from your Profile.',
-      variant: 'warning',
-      confirmText: 'View Plans',
-      cancelText: 'Not now',
-      onConfirm: () => navigation.navigate('Profile'),
-    });
+
+    // ── Route directly to the Course Enrollment Form ─────────────────
+    // Previously we blocked here with a "Subscribe to a plan" popup,
+    // but the enrollment form + payment flow is the real entry point:
+    // the form auto-fills the student profile, shows a summary of the
+    // batch they picked, validates the mandatory fields, then either
+    // hands off to the Razorpay screen (paid course) or shows an
+    // enrollment-success state (free course). MyEnrollments refreshes
+    // on focus so the new row shows up in "Enrolled Programs" as soon
+    // as the user lands back on that tab.
+    //
+    // We pass a synthetic `course` alongside the batch so the header
+    // subtitle + summary card can render fee + course name without a
+    // second fetch — every batch row already carries course_name +
+    // course_price from /institutions/:id/batches.
+    const course = {
+      id:    batch.course_id,
+      name:  batch.course_name || batch.program || 'Course',
+      price: batch.course_price ?? batch.price ?? 0,
+    };
+    navigation.navigate('EnrollmentForm', { batch, course });
   };
 
   // ─── No academy chosen ───

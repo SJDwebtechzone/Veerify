@@ -43,6 +43,14 @@ import PendingAnnouncementsScreen from '../screens/admin/PendingAnnouncementsScr
 import PendingAnnouncementDetailScreen from '../screens/PendingAnnouncementDetailScreen';
 import AdminTrainerLeavesScreen from '../screens/admin/AdminTrainerLeavesScreen';
 import AdminReferEarnScreen from '../screens/admin/AdminReferEarnScreen';
+import AdminCertificatesScreen from '../screens/admin/AdminCertificatesScreen';
+import CertificateTemplatesScreen from '../screens/admin/CertificateTemplatesScreen';
+import CertificateTemplateEditorScreen from '../screens/admin/CertificateTemplateEditorScreen';
+import StudentCertificatesScreen from '../screens/student/StudentCertificatesScreen';
+import StudentEnrolledProgramsScreen from '../screens/student/StudentEnrolledProgramsScreen';
+import StudentAttendanceScreen from '../screens/student/StudentAttendanceScreen';
+import StudentPaymentsScreen from '../screens/student/StudentPaymentsScreen';
+import StudentEditProfileScreen from '../screens/student/StudentEditProfileScreen';
 import SettingsScreen from '../screens/admin/SettingsScreen';
 import InstitutionBrandingScreen from '../screens/admin/InstitutionBrandingScreen';
 import BranchesListScreen from '../screens/admin/BranchesListScreen';
@@ -71,6 +79,7 @@ import StaffNotificationsScreen from '../screens/staff/StaffNotificationsScreen'
 import StaffAttendanceHistoryScreen from '../screens/staff/StaffAttendanceHistoryScreen';
 import StaffStudentDetailScreen from '../screens/staff/StaffStudentDetailScreen';
 import StaffLeaveRequestsScreen from '../screens/staff/StaffLeaveRequestsScreen';
+import StaffCompletedStudentsScreen from '../screens/staff/StaffCompletedStudentsScreen';
 import StaffSalaryScreen from '../screens/staff/StaffSalaryScreen';
 import StaffVideosScreen from '../screens/staff/StaffVideosScreen';
 import TrainerRequestLeaveScreen from '../screens/staff/TrainerRequestLeaveScreen';
@@ -338,6 +347,25 @@ export default function AppNavigator() {
             component={InstitutionBrandingScreen}
             options={{ headerShown: false }}
           />
+          {/* Institution → Certificates queue. Lists students awaiting
+              certificate + surfaces the trainer's belt-test remarks. */}
+          <Stack.Screen
+            name="AdminCertificates"
+            component={AdminCertificatesScreen}
+            options={{ headerShown: false }}
+          />
+          {/* Certificate Templates CRUD + editor. Institution admin
+              uploads a background, places placeholder pins, saves. */}
+          <Stack.Screen
+            name="CertificateTemplates"
+            component={CertificateTemplatesScreen}
+            options={{ headerShown: false }}
+          />
+          <Stack.Screen
+            name="CertificateTemplateEditor"
+            component={CertificateTemplateEditorScreen}
+            options={{ headerShown: false }}
+          />
           {/* Admin "Add Student" quick action opens the same enrollment
               form a student fills when buying a course. Both screens
               render their own headers so the native stack bar is hidden
@@ -429,6 +457,26 @@ export default function AppNavigator() {
           <Stack.Screen name="CertificateDetail"
             component={CertificateDetailScreen}
             options={{ headerShown: false }} />
+          {/* Full Certificates screen — awaiting section + issued list
+              with View / Download / Share. */}
+          <Stack.Screen name="StudentCertificates"
+            component={StudentCertificatesScreen}
+            options={{ headerShown: false }} />
+          {/* More-tab drill-ins */}
+          <Stack.Screen name="StudentEnrolledPrograms"
+            component={StudentEnrolledProgramsScreen}
+            options={{ headerShown: false }} />
+          <Stack.Screen name="StudentAttendance"
+            component={StudentAttendanceScreen}
+            options={{ headerShown: false }} />
+          <Stack.Screen name="StudentPayments"
+            component={StudentPaymentsScreen}
+            options={{ headerShown: false }} />
+          {/* Student self-service profile editor — name / DOB / gender
+              / contact / address / emergency / photo / password. */}
+          <Stack.Screen name="StudentEditProfile"
+            component={StudentEditProfileScreen}
+            options={{ headerShown: false }} />
         </Stack.Navigator>
       </NavigationContainer>
     );
@@ -468,6 +516,11 @@ export default function AppNavigator() {
           <Stack.Screen name="StaffAttendanceHistory" component={StaffAttendanceHistoryScreen} />
           <Stack.Screen name="StaffStudentDetail" component={StaffStudentDetailScreen} />
           <Stack.Screen name="StaffLeaveRequests" component={StaffLeaveRequestsScreen} />
+          {/* Post-curriculum queue — trainer records belt-test remarks
+              here after ticking the last curriculum lesson. Renders
+              its own header. */}
+          <Stack.Screen name="StaffCompletedStudents" component={StaffCompletedStudentsScreen}
+            options={{ headerShown: false }} />
           <Stack.Screen name="StaffSalary" component={StaffSalaryScreen} />
           {/* StaffVideosScreen renders its own header. */}
           <Stack.Screen name="StaffVideos" component={StaffVideosScreen}
@@ -503,6 +556,13 @@ export default function AppNavigator() {
             options={{ headerShown: false }} />
           <Stack.Screen name="AttendanceHistory" component={AttendanceHistoryScreen}
             options={{ headerShown: true, title: 'History' }} />
+          {/* Trainer notifications inbox — same screen the student /
+              admin / parent stacks use. Previously missing, which is
+              why the dashboard's bell silently no-op'd. */}
+          <Stack.Screen name="StaffNotifications" component={StaffNotificationsScreen}
+            options={{ headerShown: false }} />
+          <Stack.Screen name="SentNotifications" component={SentNotificationsScreen}
+            options={{ headerShown: false }} />
         </Stack.Navigator>
       </NavigationContainer>
     );

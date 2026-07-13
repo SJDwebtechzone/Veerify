@@ -35,17 +35,11 @@ import MyDashboard from '../MyDashboard';
 import NearbyLocationPicker from '../../../components/NearbyLocationPicker';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
-const ASSET_HOST = (apiClient.defaults.baseURL || '').replace(/\/api\/?$/, '');
-
-function resolveAssetUrl(src) {
-  if (!src) return null;
-  if (src.startsWith('data:')) return src;
-  if (src.startsWith('/uploads/')) return ASSET_HOST + src;
-  if (src.includes('://localhost:') || src.includes('://127.0.0.1:')) {
-    return src.replace(/:\/\/(localhost|127\.0\.0\.1)(?=[:\/])/, '://10.0.2.2');
-  }
-  return src;
-}
+// Shared resolver — also strips legacy embedded 10.0.2.2:5000 hosts
+// that got baked into DB rows before we started storing relative
+// /uploads/ paths. Keeping the legacy behavior in one place means old
+// course rows still render correctly.
+import resolveAssetUrl from '../../../utils/assetUrl';
 
 const MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
 function formatEventDate(iso) {
@@ -415,14 +409,15 @@ export default function HomeTabScreen({ navigation }) {
         )}
 
         {/* ── Subscription banner ─────────────────────────────
-            Hidden for guests entirely — the "Unlock premium" pitch
-            doesn't belong on the guest home; it's now reserved for
-            signed-in students who haven't subscribed yet. */}
-        {!isGuest && !isPaid && (
+            Fully hidden — the "Unlock Premium Access" pitch used to
+            render for signed-in-but-unpaid students; guests never saw
+            it. We've since removed it from every audience: enrolment
+            happens per-course via the course detail screen instead,
+            so a generic paywall on the home tab was redundant. */}
+        {false && (
           <View style={{ paddingHorizontal: spacing.xl, marginTop: spacing.xl }}>
             <SubscriptionBanner
               onPress={() => {
-                // Wired to plan selection / paywall in Phase 2
                 navigation.navigate('Profile');
               }}
               isGuest={false}
@@ -553,14 +548,20 @@ function BannerCard({ banner }) {
 }
 
 function CategoryChip({ category, accent, onPress }) {
-  // The web admin uploads a category image (mobile_categories.image_url) via
-  // POST /uploads and the backend stores the returned relative path. The
-  // /cms/categories endpoint hands that path back as `image_url`, which
-  // resolveAssetUrl expands to a full URL the mobile can render. Preference:
+  // The web admin uploads a category image (mobile_categories.image_url)
+  // via POST /uploads and the backend stores the returned relative path.
+  // /cms/categories hands that path back as `image_url`; resolveAssetUrl
+  // expands it to a device-reachable URL. Fallback ladder:
   //   1. uploaded image
   //   2. emoji if the row happens to carry one (future-proof)
   //   3. default 🥋 fallback so the chip is never empty
-  const img = resolveAssetUrl(category.image_url);
+  //
+  // We also track image-load failure via onError — if the URL 404s or
+  // times out we downgrade to the emoji instead of leaving a blank tile.
+  const [imgError, setImgError] = React.useState(false);
+  const img = category.image_url && !imgError
+    ? resolveAssetUrl(category.image_url)
+    : null;
   return (
     <TouchableOpacity onPress={onPress} activeOpacity={0.85} style={[styles.catChip, { backgroundColor: accent.soft }]}>
       {img ? (
@@ -568,6 +569,7 @@ function CategoryChip({ category, accent, onPress }) {
           source={{ uri: img }}
           style={styles.catImage}
           resizeMode="cover"
+          onError={() => setImgError(true)}
         />
       ) : (
         <Text style={{ fontSize: 18 }}>{category.emoji || '🥋'}</Text>
@@ -578,12 +580,21 @@ function CategoryChip({ category, accent, onPress }) {
 }
 
 function ProgramCard({ program, accent, onPress }) {
-  const img = resolveAssetUrl(program.image_url || program.thumbnail_url);
+  // Track load failure so a bad URL falls back to the branded sparkle
+  // placeholder rather than leaving a blank tile.
+  const [imgError, setImgError] = React.useState(false);
+  const rawUrl = program.image_url || program.thumbnail_url;
+  const img = rawUrl && !imgError ? resolveAssetUrl(rawUrl) : null;
   return (
     <TouchableOpacity onPress={onPress} activeOpacity={0.9} style={styles.programCard}>
       <View style={[styles.programImage, { backgroundColor: accent.soft }]}>
         {img ? (
-          <Image source={{ uri: img }} style={StyleSheet.absoluteFill} resizeMode="cover" />
+          <Image
+            source={{ uri: img }}
+            style={StyleSheet.absoluteFill}
+            resizeMode="cover"
+            onError={() => setImgError(true)}
+          />
         ) : (
           <View style={[styles.center, { flex: 1 }]}>
             <Sparkles size={28} color={accent.vivid} strokeWidth={2.2} />
