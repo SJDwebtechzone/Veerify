@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Building2, Search, Eye, RefreshCw, AlertCircle, Trash2, AlertTriangle,
@@ -73,6 +73,7 @@ export function InstitutionsList({
   const [deleting, setDeleting] = useState(false);
   const [successMsg, setSuccessMsg] = useState('');
 
+
   // ── Multi-select + bulk delete ─────────────────────────────────────
   // `selected` = ids of every institution currently checked. `bulkConfirmOpen`
   // shows the confirmation modal before firing the bulk DELETE loop. `bulkResults`
@@ -82,7 +83,16 @@ export function InstitutionsList({
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [bulkResults, setBulkResults] = useState<BulkDeleteResult[] | null>(null);
 
+  // Monotonic request id — bumped every time load() fires. Only the
+  // response whose id matches the LATEST value gets applied, so
+  // rapid filter toggling (All → Active → Expired) can never end up
+  // showing a slower stale response. Without this guard, whichever
+  // network request happens to resolve last wins — which might be
+  // from an earlier filter click.
+  const reqIdRef = useRef(0);
+
   const load = async (statusFilter: StatusFilter) => {
+    const reqId = ++reqIdRef.current;
     setLoading(true);
     setError('');
     try {
@@ -92,14 +102,49 @@ export function InstitutionsList({
       } else if (statusFilter !== 'all') {
         params.set('status', statusFilter);
       }
+      // Cache-buster query param — belt-and-suspenders against any
+      // browser / proxy layer that might dedupe /onboarding/all?* GETs
+      // between rapid filter switches. The backend ignores unknown
+      // query params, so this is safe.
+      params.set('_t', String(reqId));
       const res = await apiClient.get(`/onboarding/all?${params.toString()}`);
+      // Drop this response if a newer load() has started since.
+      if (reqId !== reqIdRef.current) return;
       setInstitutions(res.data.institutions || []);
     } catch (err: any) {
+      if (reqId !== reqIdRef.current) return;
       setError(err.response?.data?.message || 'Failed to load institutions');
+      setInstitutions([]);
     } finally {
-      setLoading(false);
+      if (reqId === reqIdRef.current) setLoading(false);
     }
   };
+
+  // ── Sidebar-route sync ──────────────────────────────────────────
+  // React Router v6 reuses the same component instance when two
+  // routes render the same component with different props (e.g.
+  // /institutions/active → /institutions/expired). useState only
+  // seeds `filter` on the very first mount, so without this effect
+  // the sidebar switch left the previous filter's dataset stale on
+  // screen. When `presetFilter` changes:
+  //   • flip `filter` to the new value (which triggers the load
+  //     effect below and fires a fresh request);
+  //   • clear every piece of state that belonged to the previous
+  //     view (rows, row selection, bulk-delete results, search box,
+  //     banners) so nothing carries over;
+  //   • show the spinner immediately so the user never sees a stale
+  //     row while the incoming batch is in flight.
+  useEffect(() => {
+    const next = presetFilter || 'all';
+    setFilter(next);
+    setInstitutions([]);
+    setSelected(new Set());
+    setBulkResults(null);
+    setSearch('');
+    setError('');
+    setSuccessMsg('');
+    setLoading(true);
+  }, [presetFilter]);
 
   useEffect(() => {
     load(filter);
