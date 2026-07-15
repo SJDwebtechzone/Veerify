@@ -20,8 +20,25 @@ router.get('/my-profile', verifyToken, requireRole('student'), enrollmentControl
 router.patch('/me/profile', verifyToken, requireRole('student'), enrollmentController.updateMyProfile);
 router.delete('/:id', verifyToken, requireRole('student'), enrollmentController.cancelEnrollment);
 router.patch('/:id/payment', verifyToken, requireRole('student'), enrollmentController.markPaid);
-// Mock payment - flips status to paid. Replace with Razorpay webhook later.
+// Mock payment — dev-only fallback for when Razorpay isn't configured.
+// The mobile invokes this ONLY when create-payment-link responded with
+// { mock: true }. In production this path is never hit.
 router.post('/:id/mock-pay', verifyToken, requireRole('student'), enrollmentController.mockPay);
+
+// NEW-enrollment payment — student completes the enrollment form, the
+// mobile POSTs /enrollments (row lands as payment_status='pending'),
+// then hits this endpoint to mint a Razorpay Payment Link. The mobile
+// opens the returned URL in the in-app browser; the shared Razorpay
+// webhook (/api/payments/webhook) flips the row to 'paid' via the
+// notes.action='enrollment_new' branch. Mobile polls /payment-status
+// after the browser returns to detect completion.
+router.post('/:id/create-payment-link',
+  verifyToken, requireRole('student'),
+  enrollmentController.createEnrollmentPaymentLink);
+router.get('/:id/payment-status',
+  verifyToken, requireRole('student'),
+  enrollmentController.paymentStatus);
+
 // Student-initiated renewal — mints a Razorpay payment link scoped to
 // the student. Mobile opens the returned URL in the browser; the
 // existing Razorpay webhook flips payment_status to 'paid' on success.

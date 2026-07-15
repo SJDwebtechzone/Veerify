@@ -308,7 +308,33 @@ function PreviewModal({
               {bg ? (
                 <Image source={{ uri: bg }} style={StyleSheet.absoluteFill} resizeMode="cover" />
               ) : null}
+              {/* Backend already dropped inactive pins from
+                  payload.placeholders in the prepare handler, so
+                  everything we iterate here MUST render. Image-backed
+                  placeholders (digital_signature / seal) render the
+                  uploaded image when pin.image_url is set; if not,
+                  they collapse silently instead of showing raw text
+                  ("[Signature]") on a real certificate. */}
               {(payload.placeholders || []).map((pin, i) => {
+                const isImage = pin.key === 'digital_signature' || pin.key === 'seal';
+                if (isImage) {
+                  if (!pin.image_url) return null;
+                  const w = Math.max(40, (pin.width  || 0.20) * CANVAS_W);
+                  const h = Math.max(24, (pin.height || 0.10) * canvasH);
+                  return (
+                    <Image
+                      key={i}
+                      source={{ uri: resolveAssetUrl(pin.image_url) }}
+                      style={{
+                        position: 'absolute',
+                        left: pin.x * CANVAS_W - w / 2,
+                        top:  pin.y * canvasH - h / 2,
+                        width: w, height: h,
+                      }}
+                      resizeMode="contain"
+                    />
+                  );
+                }
                 const est = Math.max(60, String(pin.value || pin.label).length * (pin.font_size || 16) * 0.55);
                 return (
                   <View

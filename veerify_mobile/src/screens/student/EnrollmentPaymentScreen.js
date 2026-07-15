@@ -1,22 +1,41 @@
 // src/screens/student/EnrollmentPaymentScreen.js
 //
-// Shown right after the EnrollmentFormScreen submits. Displays an order
-// summary (course / batch / amount) and a "Pay" button.
+// Reached from EnrollmentFormScreen after the form is submitted and
+// validated. Handles the REAL Razorpay payment for a self-enrolled
+// student. The row was already inserted by /enrollments as
+// payment_status='pending'; nothing on this screen ever flips it —
+// only the server-side webhook does after Razorpay confirms the
+// charge.
 //
-// For now the payment is mocked - POST /api/enrollments/:id/mock-pay flips
-// the enrollment from pending to paid and records a reference id. Once
-// Razorpay-for-fees lands we'll swap the button to open a Razorpay link.
+// Flow:
+//   1. Order summary + amount are rendered from route params.
+//   2. Tap "Pay Now" → POST /enrollments/:id/create-payment-link.
+//      The backend mints a Razorpay Payment Link and returns the
+//      short_url + the plink id.
+//   3. Linking.openURL(payment_url) opens Razorpay in the phone's
+//      browser. The student pays.
+//   4. AppState listener detects when the user comes BACK to the app
+//      and starts polling GET /enrollments/:id/payment-status. The
+//      poll checks up to ~30s waiting for the webhook to arrive.
+//   5. On payment_status='paid' → success screen + navigate to
+//      MyEnrollments.
+//   6. Timeout / user cancels / payment fails → row stays 'pending',
+//      screen shows a "Payment Pending" state with Retry + Back
+//      buttons. No enrollment is activated, matching the spec.
 //
-// Successful pay → "Enrollment Complete" screen → navigate to MyEnrollments
-// where the student sees their newly-paid enrollment listed.
+// Dev fallback: if Razorpay isn't configured (RAZORPAY_KEY_ID missing
+// in backend .env), the create-payment-link endpoint responds with
+// { mock: true } and we route through the existing /mock-pay
+// endpoint so local development still works end-to-end.
 
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
-  View, Text, ScrollView, TouchableOpacity, ActivityIndicator, Alert, StyleSheet,
+  View, Text, ScrollView, TouchableOpacity, ActivityIndicator,
+  StyleSheet, Alert, Linking, AppState,
 } from 'react-native';
 import {
   ArrowLeft, CheckCircle, CreditCard, Building2, Calendar, Clock,
-  Wallet, Star, BookOpen, Shield, ChevronRight,
+  Wallet, Star, BookOpen, Shield, ChevronRight, AlertCircle, RefreshCw,
 } from 'lucide-react-native';
 // Aliased to icons known to exist in older lucide versions:
 const CheckCircle2 = CheckCircle;
@@ -24,6 +43,7 @@ const Sparkles = Star;
 const ShieldCheck = Shield;
 
 import apiClient from '../../api/client';
+import { confirm } from '../../components/ConfirmDialog';
 
 // ─── Theme tokens ──────────────────────────────────────────────────────
 const BRAND = '#E63946';
@@ -34,6 +54,13 @@ const SURFACE = '#FFFFFF';
 const BG = '#F4F4F8';
 const BORDER = '#E5E7EB';
 const GREEN = '#10B981';
+const AMBER = '#F59E0B';
+
+// Polling budget after the user returns from the Razorpay browser.
+// The webhook usually lands within 3-5 seconds; 30s gives a wide
+// buffer for slow networks without leaving the user staring forever.
+const POLL_INTERVAL_MS = 2500;
+const POLL_MAX_MS      = 30_000;
 
 function fmtINR(n) {
   const v = Number(n) || 0;
@@ -43,23 +70,202 @@ function fmtINR(n) {
 export default function EnrollmentPaymentScreen({ route, navigation }) {
   const { enrollment, batch, course, amount: amt } = route?.params || {};
   const [paying, setPaying] = useState(false);
+  const [polling, setPolling] = useState(false);
   const [done, setDone] = useState(false);
   const [reference, setReference] = useState(null);
+  // Payment lifecycle stage — drives the render tree:
+  //   'idle'         → show summary + "Pay Now" button
+  //   'awaiting'     → student is in the Razorpay browser
+  //   'verifying'    → poll loop confirming with backend
+  //   'pending'      → poll timed out / user came back without paying
+  //   'done'         → verified paid (also flips `done` for legacy)
+  const [stage, setStage] = useState('idle');
+  const pollTimer  = useRef(null);
+  const pollStart  = useRef(0);
+  const appStateSub = useRef(null);
+  const sentToRzp  = useRef(false);
 
   const amount = Number(enrollment?.payment_amount) || Number(amt) || Number(batch?.course_price) || 0;
 
-  const handlePay = async () => {
+  // ── Cleanup on unmount ────────────────────────────────────────────
+  useEffect(() => {
+    return () => {
+      if (pollTimer.current) clearTimeout(pollTimer.current);
+      if (appStateSub.current) appStateSub.current.remove();
+    };
+  }, []);
+
+  // ── Poll payment status until webhook lands or timeout ────────────
+  const pollPaymentStatus = async () => {
     if (!enrollment?.id) return;
+    try {
+      const r = await apiClient.get(`/enrollments/${enrollment.id}/payment-status`);
+      const row = r.data?.enrollment;
+      if (row?.payment_status === 'paid') {
+        // Server confirmed. Now — and only now — is the student paid.
+        setReference(row.payment_reference || null);
+        setStage('done');
+        setDone(true);
+        setPolling(false);
+        return;
+      }
+    } catch (err) {
+      // Swallow — keep polling; a transient 500 shouldn't abort the loop.
+      // eslint-disable-next-line no-console
+      console.log('[EnrollPay] poll error:', err?.message);
+    }
+    // Not paid yet — schedule another tick if we still have budget.
+    if (Date.now() - pollStart.current < POLL_MAX_MS) {
+      pollTimer.current = setTimeout(pollPaymentStatus, POLL_INTERVAL_MS);
+    } else {
+      // Ran out of budget. The row stays payment_status='pending'
+      // on the server (webhook hasn't arrived / user didn't complete).
+      // Surface a "Payment Pending" state so the student can retry.
+      setStage('pending');
+      setPolling(false);
+    }
+  };
+
+  const startPolling = () => {
+    if (pollTimer.current) clearTimeout(pollTimer.current);
+    pollStart.current = Date.now();
+    setPolling(true);
+    setStage('verifying');
+    // Small initial delay to let the webhook race the return-to-app.
+    pollTimer.current = setTimeout(pollPaymentStatus, 800);
+  };
+
+  // Detect the user coming back to the app from the Razorpay browser
+  // and kick off the polling loop. We rely on AppState 'active' rather
+  // than any Razorpay callback because the Payment Link hosted page
+  // doesn't push a deep link back into the RN app.
+  useEffect(() => {
+    if (!sentToRzp.current) return;
+    const handleChange = (next) => {
+      if (next === 'active' && sentToRzp.current) {
+        sentToRzp.current = false;
+        startPolling();
+      }
+    };
+    appStateSub.current = AppState.addEventListener('change', handleChange);
+    return () => {
+      if (appStateSub.current) appStateSub.current.remove();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage]);
+
+  // ── Pay Now ───────────────────────────────────────────────────────
+  const handlePay = async () => {
+    if (!enrollment?.id) {
+      Alert.alert('No enrollment', 'Something went wrong. Go back and try again.');
+      return;
+    }
+    if (amount <= 0) {
+      Alert.alert('No amount', 'This course has no price configured.');
+      return;
+    }
     setPaying(true);
     try {
-      const res = await apiClient.post(`/enrollments/${enrollment.id}/mock-pay`);
-      setReference(res.data?.reference || res.data?.enrollment?.payment_reference || null);
-      setDone(true);
+      // Ask the backend to mint a Razorpay Payment Link.
+      const res = await apiClient.post(
+        `/enrollments/${enrollment.id}/create-payment-link`,
+      );
+      const data = res.data || {};
+
+      // Dev fallback — Razorpay creds missing in .env. Fall back to
+      // the mock-pay endpoint so local development still works. Only
+      // triggers when the backend explicitly signals { mock: true }.
+      if (data.mock) {
+        const mock = await apiClient.post(`/enrollments/${enrollment.id}/mock-pay`);
+        setReference(mock.data?.reference || mock.data?.enrollment?.payment_reference || null);
+        setStage('done');
+        setDone(true);
+        return;
+      }
+
+      // Already paid (defensive — the endpoint short-circuits when the
+      // webhook has landed for an earlier attempt).
+      if (data.already_paid) {
+        setReference(data.transaction_id || null);
+        setStage('done');
+        setDone(true);
+        return;
+      }
+
+      const url = data.payment_url;
+      if (!url) {
+        throw new Error('No payment URL returned from server');
+      }
+
+      // Open Razorpay in the OS browser. We flag sentToRzp so the
+      // AppState listener knows to start polling once the app returns.
+      const supported = await Linking.canOpenURL(url);
+      if (!supported) {
+        throw new Error('Cannot open payment link on this device');
+      }
+      sentToRzp.current = true;
+      setStage('awaiting');
+      await Linking.openURL(url);
     } catch (err) {
-      Alert.alert('Payment failed', err.response?.data?.message || 'Please try again.');
+      Alert.alert(
+        'Payment failed',
+        err?.response?.data?.message
+          || err?.message
+          || 'Could not start the payment. Please try again.',
+      );
+      // Keep the enrollment in 'pending' state — never mark paid
+      // client-side. The user can tap Pay Now again to retry.
+      setStage('idle');
+      sentToRzp.current = false;
     } finally {
       setPaying(false);
     }
+  };
+
+  // Manual "check status" for the pending screen — hits the same
+  // polling endpoint once so the user doesn't have to wait for the
+  // periodic tick if the webhook just arrived.
+  const recheckStatus = async () => {
+    if (!enrollment?.id) return;
+    setPolling(true);
+    setStage('verifying');
+    try {
+      const r = await apiClient.get(`/enrollments/${enrollment.id}/payment-status`);
+      const row = r.data?.enrollment;
+      if (row?.payment_status === 'paid') {
+        setReference(row.payment_reference || null);
+        setStage('done');
+        setDone(true);
+      } else {
+        setStage('pending');
+      }
+    } catch (err) {
+      setStage('pending');
+    } finally {
+      setPolling(false);
+    }
+  };
+
+  // Explicit cancel from the pending state. Doesn't mutate anything
+  // server-side — the row simply stays 'pending' and shows up in the
+  // student's "Pending Payment" list where they can retry later.
+  const cancelAndExit = () => {
+    confirm({
+      title: 'Cancel this enrolment?',
+      message: 'The enrolment will stay as "Pending Payment". You can complete it later from Enrolled Programs.',
+      variant: 'warning',
+      confirmText: 'Yes, exit',
+      cancelText: 'Keep waiting',
+      onConfirm: () => {
+        navigation.reset({
+          index: 0,
+          routes: [
+            { name: 'StudentTabs' },
+            { name: 'MyEnrollments' },
+          ],
+        });
+      },
+    });
   };
 
   // ── Success screen ───────────────────────────────────────────────────
@@ -109,6 +315,76 @@ export default function EnrollmentPaymentScreen({ route, navigation }) {
             <Text style={styles.btnGhostText}>Back to Home</Text>
           </TouchableOpacity>
         </ScrollView>
+      </View>
+    );
+  }
+
+  // ── Verifying — polling for the webhook after Razorpay ────────────
+  if (stage === 'awaiting' || stage === 'verifying') {
+    return (
+      <View style={[styles.screen, styles.centered]}>
+        <ActivityIndicator size="large" color={BRAND} />
+        <Text style={styles.verifyingTitle}>
+          {stage === 'awaiting' ? 'Waiting for payment…' : 'Verifying payment…'}
+        </Text>
+        <Text style={styles.verifyingSub}>
+          {stage === 'awaiting'
+            ? 'Complete the payment in your browser, then come back to Veerify.'
+            : "We're confirming your payment with Razorpay. This usually takes a few seconds."}
+        </Text>
+        {polling ? (
+          <Text style={styles.verifyingHint}>
+            Not marking your enrolment as paid until the server confirms.
+          </Text>
+        ) : null}
+      </View>
+    );
+  }
+
+  // ── Pending — poll timed out / user came back without paying ─────
+  if (stage === 'pending') {
+    return (
+      <View style={[styles.screen, styles.centered]}>
+        <View style={styles.pendingIconWrap}>
+          <AlertCircle size={44} color={AMBER} strokeWidth={2.2} />
+        </View>
+        <Text style={styles.pendingTitle}>Payment Pending</Text>
+        <Text style={styles.pendingSub}>
+          We couldn't confirm your payment. Your enrolment is saved as{' '}
+          <Text style={{ fontWeight: '800' }}>Pending Payment</Text> and{' '}
+          <Text style={{ fontWeight: '800' }}>not yet active</Text>. If you already
+          paid, tap Check again — the confirmation may still be on the way.
+        </Text>
+
+        <TouchableOpacity
+          style={[styles.btn, styles.btnPrimary, { marginTop: 20 }]}
+          onPress={recheckStatus}
+          activeOpacity={0.85}
+        >
+          <RefreshCw size={16} color="#fff" strokeWidth={2.4} />
+          <Text style={styles.btnPrimaryText}>Check again</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.btn, styles.btnGhost, { marginTop: 8 }]}
+          onPress={handlePay}
+          disabled={paying}
+          activeOpacity={0.85}
+        >
+          <Text style={styles.btnGhostText}>
+            {paying ? 'Please wait…' : 'Retry payment'}
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={{ marginTop: 12, paddingVertical: 8 }}
+          onPress={cancelAndExit}
+          activeOpacity={0.85}
+        >
+          <Text style={{ color: TEXT_MUTED, fontSize: 12, fontWeight: '700' }}>
+            I'll complete this later
+          </Text>
+        </TouchableOpacity>
       </View>
     );
   }
@@ -196,8 +472,8 @@ export default function EnrollmentPaymentScreen({ route, navigation }) {
             <PayMethodRow icon={CreditCard} title="UPI / Cards / Net Banking"
               sub="Secured by Razorpay" selected />
             <Text style={styles.methodHint}>
-              Mock payment is enabled for testing. Tap Pay below to instantly
-              complete the enrollment.
+              Tap Pay Now to open Razorpay in your browser. Your enrolment stays
+              as "Pending Payment" until we receive confirmation from Razorpay.
             </Text>
           </View>
         </View>
@@ -224,7 +500,7 @@ export default function EnrollmentPaymentScreen({ route, navigation }) {
           ) : (
             <>
               <Sparkles size={16} color="#fff" strokeWidth={2.4} />
-              <Text style={styles.btnPrimaryText}>Pay {fmtINR(amount)}</Text>
+              <Text style={styles.btnPrimaryText}>Pay Now · {fmtINR(amount)}</Text>
               <ChevronRight size={18} color="#fff" strokeWidth={2.6} />
             </>
           )}
@@ -291,6 +567,11 @@ function ReceiptRow({ label, value, strong, mono, valueColor }) {
 // ─── Styles ────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: BG },
+  centered: {
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
 
   header: {
     flexDirection: 'row', alignItems: 'center', gap: 10,
@@ -395,6 +676,38 @@ const styles = StyleSheet.create({
   btnPrimaryText: { fontSize: 14, fontWeight: '800', color: '#fff' },
   btnGhost: { backgroundColor: BG },
   btnGhostText: { fontSize: 14, fontWeight: '700', color: TEXT_MUTED },
+
+  // Verifying state
+  verifyingTitle: {
+    fontSize: 18, fontWeight: '800', color: TEXT,
+    marginTop: 20, textAlign: 'center',
+  },
+  verifyingSub: {
+    fontSize: 13, color: TEXT_MUTED, fontWeight: '600',
+    textAlign: 'center', marginTop: 8, lineHeight: 19,
+    maxWidth: 280,
+  },
+  verifyingHint: {
+    fontSize: 11, color: TEXT_MUTED, fontStyle: 'italic',
+    textAlign: 'center', marginTop: 12,
+  },
+
+  // Pending state
+  pendingIconWrap: {
+    width: 84, height: 84, borderRadius: 42,
+    backgroundColor: '#FFF7ED',
+    alignItems: 'center', justifyContent: 'center',
+    marginBottom: 8,
+  },
+  pendingTitle: {
+    fontSize: 20, fontWeight: '900', color: TEXT,
+    marginTop: 8,
+  },
+  pendingSub: {
+    fontSize: 13, color: TEXT_MUTED, fontWeight: '600',
+    textAlign: 'center', marginTop: 8, lineHeight: 20,
+    maxWidth: 300,
+  },
 
   // Success screen
   successBody: { padding: 24, paddingTop: 64, alignItems: 'center' },

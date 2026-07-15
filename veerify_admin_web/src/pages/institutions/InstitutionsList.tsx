@@ -270,11 +270,17 @@ export function InstitutionsList({
     const c = { all: institutions.length, active: 0, approved: 0, pending_approval: 0, rejected: 0, expired: 0 };
     const now = Date.now();
     institutions.forEach((i) => {
-      if (i.onboarding_status === 'active') c.active++;
+      // Matches the backend's strict definitions:
+      // • Active  = onboarding_status='active' + is_active=true + subscription still valid.
+      // • Expired = onboarding_status='active' + subscription_end in the past.
+      //   (Pending / approved / rejected rows never went live, so they
+      //   don't count as expired even if some stale end-date lingers.)
+      const subEnded = !!(i.subscription_end && new Date(i.subscription_end).getTime() < now);
+      if (i.onboarding_status === 'active' && i.is_active && !subEnded) c.active++;
       if (i.onboarding_status === 'approved') c.approved++;
       if (i.onboarding_status === 'pending_approval') c.pending_approval++;
       if (i.onboarding_status === 'rejected') c.rejected++;
-      if (i.subscription_end && new Date(i.subscription_end).getTime() < now) c.expired++;
+      if (i.onboarding_status === 'active' && subEnded) c.expired++;
     });
     return c;
   }, [institutions]);

@@ -70,8 +70,17 @@ exports.createTrainer = async (req, res) => {
       // it drives the row and derives the legacy columns; when absent,
       // the legacy columns are used as-is and skills is empty.
       skills: rawSkills,
+      // Trainer's Basic Salary (migration 058). Fills the read-only
+      // Basic Salary field on the admin's monthly payroll screen.
+      basic_salary,
     } = req.body;
     const adminId = req.user.id;
+
+    // Coerce basic_salary — reject NaN/negative, allow 0.
+    const cleanBasicSalary = (() => {
+      const n = Number(basic_salary);
+      return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : 0;
+    })();
 
     if (!name || !password) {
       return res.status(400).json({ message: 'Name and password are required' });
@@ -147,9 +156,10 @@ exports.createTrainer = async (req, res) => {
          gender, date_of_birth,
          govt_proof_type, govt_proof_number,
          photo_url, certificate_url,
-         skills
+         skills,
+         basic_salary
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14)
        RETURNING *`,
       [
         user.id, institutionId,
@@ -158,6 +168,7 @@ exports.createTrainer = async (req, res) => {
         govt_proof_type || null, govt_proof_number || null,
         photo_url || null, legacy.certificate_url,
         JSON.stringify(skillsArr || []),
+        cleanBasicSalary,
       ]
     );
 
@@ -442,6 +453,10 @@ exports.updateTrainer = async (req, res) => {
       govt_proof_type, govt_proof_number, photo_url, certificate_url,
       // NEW: structured multi-skill array (migration 046).
       skills: rawSkills,
+      // Trainer's Basic Salary (migration 058). Nullable in the request
+      // — when absent we keep the existing value, matching every other
+      // partial-update field on this endpoint.
+      basic_salary,
     } = req.body;
     const adminInstitutionId = await getAdminInstitutionId(req.user.id);
 
@@ -508,6 +523,14 @@ exports.updateTrainer = async (req, res) => {
           certificate_url,
         };
 
+    // Coerce basic_salary. `undefined` → keep existing (COALESCE null),
+    // any finite non-negative number → update, everything else → keep.
+    let cleanBasicSalary = null;
+    if (basic_salary !== undefined && basic_salary !== null && basic_salary !== '') {
+      const n = Number(basic_salary);
+      cleanBasicSalary = Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : null;
+    }
+
     // Trainer profile fields
     await client.query(
       `UPDATE trainers SET
@@ -521,8 +544,9 @@ exports.updateTrainer = async (req, res) => {
          govt_proof_number = COALESCE($8, govt_proof_number),
          photo_url         = COALESCE($9, photo_url),
          certificate_url   = COALESCE($10, certificate_url),
-         skills            = COALESCE($11::jsonb, skills)
-       WHERE id = $12`,
+         skills            = COALESCE($11::jsonb, skills),
+         basic_salary      = COALESCE($12, basic_salary)
+       WHERE id = $13`,
       [
         legacy.specialization || null, legacy.belt_level || null,
         legacy.experience_years != null ? Number(legacy.experience_years) : null,
@@ -531,6 +555,7 @@ exports.updateTrainer = async (req, res) => {
         govt_proof_type || null, govt_proof_number || null,
         photo_url || null, legacy.certificate_url || null,
         useSkillsArr ? JSON.stringify(skillsArr) : null,
+        cleanBasicSalary,
         id,
       ]
     );

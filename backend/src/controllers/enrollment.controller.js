@@ -560,9 +560,136 @@ exports.enrollInBatch = async (req, res) => {
   }
 };
 
-// MOCK PAYMENT - flips an enrollment from pending to paid. Used while
-// Razorpay-for-fees is still deferred. Replace this with a real Razorpay
-// webhook handler once the fees flow is wired.
+// ─── Student: create Razorpay payment link for a NEW enrollment ────────────
+// POST /api/enrollments/:id/create-payment-link
+//
+// The enrollment row is created by /enrollments as payment_status='pending'
+// (no Razorpay call happens at that point). This endpoint is called by the
+// mobile after the enrollment form is submitted + validated. It:
+//   1. Confirms the caller owns the enrollment and it isn't already paid.
+//   2. Mints a Razorpay Payment Link with notes.action='enrollment_new'
+//      so the webhook can flip the correct row on payment success.
+//   3. Stamps the link id on payment_reference so the webhook lookup works.
+//
+// Returns { payment_url, transaction_id, provider, amount }. On Razorpay
+// misconfiguration the response has `mock: true` and the mobile can
+// route through the dev mock-pay flow instead.
+//
+// Payment_status stays 'pending' until the webhook fires — NEVER flipped
+// by this endpoint. The mobile polls GET /:id/payment-status after
+// returning from the Razorpay browser.
+exports.createEnrollmentPaymentLink = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const studentId = req.user.id;
+
+    const enrol = await pool.query(
+      `SELECT e.id, e.student_id, e.institution_id, e.payment_amount,
+              e.payment_status,
+              c.name AS course_name, c.price AS course_price,
+              i.name AS institution_name,
+              u.name AS student_name, u.email AS student_email, u.phone AS student_phone
+         FROM enrollments e
+         JOIN batches b       ON b.id = e.batch_id
+         JOIN courses c       ON c.id = b.course_id
+         JOIN institutions i  ON i.id = e.institution_id
+         JOIN users u         ON u.id = e.student_id
+        WHERE e.id = $1`,
+      [id],
+    );
+    if (enrol.rows.length === 0) return res.status(404).json({ message: 'Enrollment not found' });
+    const row = enrol.rows[0];
+    if (row.student_id !== studentId) return res.status(403).json({ message: 'Not your enrollment' });
+    if (row.payment_status === 'paid') {
+      // Idempotent — already paid, tell the client to move on.
+      return res.json({
+        already_paid:   true,
+        message:        'This enrollment is already paid.',
+        payment_status: 'paid',
+      });
+    }
+
+    const amount = Number(row.payment_amount || row.course_price || 0);
+    if (amount <= 0) {
+      return res.status(400).json({
+        message: 'This course has no price configured — nothing to pay.',
+      });
+    }
+
+    const { createPaymentLink } = require('../utils/razorpay');
+    const link = await createPaymentLink({
+      amountInRupees: amount,
+      institution: {
+        id:          row.institution_id,
+        name:        row.institution_name,
+        owner_name:  row.student_name,
+        owner_email: row.student_email,
+        owner_phone: row.student_phone,
+        plan_name:   row.course_name,
+      },
+      notes: {
+        action:        'enrollment_new',
+        enrollment_id: String(row.id),
+        student_id:    String(studentId),
+      },
+    });
+
+    if (!link.ok) {
+      // Dev fallback — no Razorpay creds. The mobile drops back to mock-pay.
+      return res.json({
+        mock:    true,
+        message: link.error || 'Razorpay not configured — mock-pay available.',
+      });
+    }
+
+    // Stamp the pending link id so the webhook lookup succeeds.
+    await pool.query(
+      `UPDATE enrollments
+          SET payment_reference = $2,
+              payment_status    = 'pending'
+        WHERE id = $1`,
+      [row.id, link.link.id],
+    );
+
+    res.json({
+      payment_url:    link.link.short_url,
+      provider:       'razorpay',
+      transaction_id: link.link.id,
+      amount,
+      payment_status: 'pending',
+    });
+  } catch (err) {
+    console.error('createEnrollmentPaymentLink error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// GET /api/enrollments/:id/payment-status
+// Poll endpoint. The mobile hits this on an interval after returning
+// from the Razorpay checkout browser to detect when the webhook has
+// arrived and flipped the row to 'paid'.
+exports.paymentStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const studentId = req.user.id;
+    const r = await pool.query(
+      `SELECT id, student_id, payment_status, payment_amount, paid_at, payment_reference
+         FROM enrollments WHERE id = $1`, [id],
+    );
+    if (r.rows.length === 0) return res.status(404).json({ message: 'Not found' });
+    if (r.rows[0].student_id !== studentId) return res.status(403).json({ message: 'Not yours' });
+    res.json({ enrollment: r.rows[0] });
+  } catch (err) {
+    console.error('paymentStatus error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// MOCK PAYMENT - flips an enrollment from pending to paid. Kept ONLY for
+// dev-mode fallbacks when Razorpay isn't configured. Real production
+// flow must go through createEnrollmentPaymentLink → Razorpay hosted
+// page → webhook. The mobile invokes this only when the payment-link
+// call returned { mock: true }.
 exports.mockPay = async (req, res) => {
   try {
     const { id } = req.params;

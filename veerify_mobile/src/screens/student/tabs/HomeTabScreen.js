@@ -267,12 +267,21 @@ export default function HomeTabScreen({ navigation }) {
         />
 
         {/* ── Categories ──────────────────────────────────────── */}
+        {/* Horizontal card carousel matching the design reference.
+            Extra vertical padding (paddingVertical: 8) ensures the
+            card shadows aren't clipped by the ScrollView's own bounds
+            on either platform. gap: spacing.md keeps consistent
+            breathing room between cards regardless of screen size. */}
         {categories.length > 0 && (
           <Section title="Browse by Category">
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
-              contentContainerStyle={{ paddingHorizontal: spacing.xl, gap: spacing.sm }}
+              contentContainerStyle={{
+                paddingHorizontal: spacing.xl,
+                paddingVertical: 8,
+                gap: spacing.md,
+              }}
             >
               {categories.map((c, i) => (
                 <CategoryChip
@@ -548,33 +557,43 @@ function BannerCard({ banner }) {
 }
 
 function CategoryChip({ category, accent, onPress }) {
-  // The web admin uploads a category image (mobile_categories.image_url)
-  // via POST /uploads and the backend stores the returned relative path.
-  // /cms/categories hands that path back as `image_url`; resolveAssetUrl
-  // expands it to a device-reachable URL. Fallback ladder:
-  //   1. uploaded image
-  //   2. emoji if the row happens to carry one (future-proof)
-  //   3. default 🥋 fallback so the chip is never empty
+  // Rebuilt to match the reference: vertical white card, big circular
+  // cover-cropped image on top, dark bold name below, optional count.
   //
-  // We also track image-load failure via onError — if the URL 404s or
-  // times out we downgrade to the emoji instead of leaving a blank tile.
+  // Image resolution ladder (unchanged from the old horizontal pill):
+  //   1. uploaded image (mobile_categories.image_url via /cms/categories)
+  //   2. emoji if the row carries one
+  //   3. default 🥋 fallback so the tile is never blank
+  // onError downgrades to the emoji if the URL 404s.
+  //
+  // `accent.soft` tints the circular halo behind the image so different
+  // categories still feel visually distinct without breaking the white-
+  // card grid. Course/item count renders only when the API supplies it.
   const [imgError, setImgError] = React.useState(false);
   const img = category.image_url && !imgError
     ? resolveAssetUrl(category.image_url)
     : null;
+  const count = category.course_count ?? category.item_count ?? category.count;
   return (
-    <TouchableOpacity onPress={onPress} activeOpacity={0.85} style={[styles.catChip, { backgroundColor: accent.soft }]}>
-      {img ? (
-        <Image
-          source={{ uri: img }}
-          style={styles.catImage}
-          resizeMode="cover"
-          onError={() => setImgError(true)}
-        />
-      ) : (
-        <Text style={{ fontSize: 18 }}>{category.emoji || '🥋'}</Text>
-      )}
-      <Text style={[styles.catText, { color: accent.on }]}>{category.name}</Text>
+    <TouchableOpacity onPress={onPress} activeOpacity={0.85} style={styles.catCard}>
+      <View style={[styles.catImageWrap, { backgroundColor: accent.soft }]}>
+        {img ? (
+          <Image
+            source={{ uri: img }}
+            style={styles.catImage}
+            resizeMode="cover"
+            onError={() => setImgError(true)}
+          />
+        ) : (
+          <Text style={styles.catEmoji}>{category.emoji || '🥋'}</Text>
+        )}
+      </View>
+      <Text style={styles.catText} numberOfLines={1}>{category.name}</Text>
+      {count != null && Number.isFinite(Number(count)) ? (
+        <Text style={styles.catCount}>
+          {Number(count)} {Number(count) === 1 ? 'item' : 'items'}
+        </Text>
+      ) : null}
     </TouchableOpacity>
   );
 }
@@ -901,21 +920,49 @@ const styles = StyleSheet.create({
   },
   bannerCtaText: { ...type.caption, color: palette.text, fontWeight: '700' },
 
-  // Category chip
-  catChip: {
-    flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
-    // Slightly less padding on the left when we're rendering an image
-    // — the image itself already carries visual weight; the pill sat
-    // too wide before.
-    paddingLeft: 6, paddingRight: spacing.md,
-    paddingVertical: 5,
-    borderRadius: radius.pill,
+  // Category card (vertical layout — matches reference design)
+  // White rounded card, ~110 wide, with a circular image on top and
+  // the category name centered below. Sits in a horizontal ScrollView
+  // (see the `Browse by Category` section render). marginRight is set
+  // to spacing.sm; contentContainerStyle keeps consistent side padding.
+  catCard: {
+    width: 110,
+    backgroundColor: palette.surface,
+    borderRadius: radius.lg,
+    paddingVertical: spacing.md,
+    paddingHorizontal: 8,
+    alignItems: 'center',
+    // Subtle shadow so cards visually lift off the tab background;
+    // matches the reference's floating-card feel without going heavy.
+    ...shadows.card,
+  },
+  catImageWrap: {
+    // Soft accent halo behind the image so different categories still
+    // feel visually distinct — the card itself stays white.
+    width: 72, height: 72, borderRadius: 36,
+    alignItems: 'center', justifyContent: 'center',
+    marginBottom: spacing.sm,
+    overflow: 'hidden',
   },
   catImage: {
-    width: 32, height: 32, borderRadius: 16,
-    backgroundColor: 'rgba(255,255,255,0.6)',   // shows through if the PNG has alpha
+    // Cover-cropped photo. Fills the 72×72 circle exactly.
+    width: '100%', height: '100%',
   },
-  catText: { ...type.bodyBold, fontWeight: '700' },
+  catEmoji: { fontSize: 32 },
+  catText: {
+    ...type.bodyBold,
+    color: palette.text,
+    fontSize: 13,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  catCount: {
+    ...type.caption,
+    color: palette.textMuted,
+    fontSize: 11,
+    marginTop: 2,
+    textAlign: 'center',
+  },
 
   // Program card
   programCard: {

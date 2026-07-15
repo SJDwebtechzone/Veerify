@@ -10,6 +10,44 @@ import { useAuth } from '../../context/AuthContext';
 import { confirm } from '../../components/ConfirmDialog';
 import resolveAssetUrl from '../../utils/assetUrl';
 
+// ── Billing cycle catalogue ─────────────────────────────────────────
+// Order matters — pills render in this order. Months are used to work
+// out the "at monthly rate" extrapolation for the savings badge.
+const CYCLES = [
+  { term: 'monthly',     label: 'Monthly',     short: 'Mo',  months: 1  },
+  { term: 'quarterly',   label: 'Quarterly',   short: '3 Mo', months: 3  },
+  { term: 'half_yearly', label: 'Half-Yearly', short: '6 Mo', months: 6  },
+  { term: 'annual',      label: 'Annual',      short: '1 Yr', months: 12 },
+];
+
+// Turn plan.pricing_terms into a map keyed by billing_term for O(1)
+// lookups. Ignores disabled terms so the selector never offers
+// something the super admin has turned off.
+function termsMap(plan) {
+  const out = {};
+  (plan.pricing_terms || []).forEach((t) => {
+    if (t.is_enabled === false) return;
+    if (!Number.isFinite(Number(t.price))) return;
+    out[t.billing_term] = Number(t.price);
+  });
+  // Legacy fallback — very old plans without any pricing_terms row.
+  // Use the singleton price + billing_cycle so the card still renders.
+  if (Object.keys(out).length === 0 && plan.price != null) {
+    out[plan.billing_cycle || 'monthly'] = Number(plan.price);
+  }
+  return out;
+}
+
+// Savings percentage for a longer term vs. the monthly rate. Only
+// meaningful when both `monthly` and the target term are enabled.
+// Returns null when it can't be computed (no monthly, or no discount).
+function savingsPct(monthlyPrice, cyclePrice, months) {
+  if (!monthlyPrice || !cyclePrice || !months || months === 1) return null;
+  const straight = monthlyPrice * months;
+  if (cyclePrice >= straight) return null;
+  return Math.round(((straight - cyclePrice) / straight) * 100);
+}
+
 export default function PlanSelectionScreen({ navigation }) {
   const { logout } = useAuth();
 
@@ -17,6 +55,10 @@ export default function PlanSelectionScreen({ navigation }) {
   const [loading, setLoading] = useState(true);
   const [selecting, setSelecting] = useState(false);
   const [selectedPlanId, setSelectedPlanId] = useState(null);
+  // Per-plan selected billing term. Populated on load — defaults to
+  // monthly when enabled, otherwise the cheapest enabled term. Key is
+  // plan.id, value is the billing_term string (e.g. 'quarterly').
+  const [cycleByPlan, setCycleByPlan] = useState({});
 
   // Optional referral code — collapsible because most new admins won't have
   // one. The value is sent alongside plan_id to /onboarding/select-plan; the
@@ -58,7 +100,25 @@ export default function PlanSelectionScreen({ navigation }) {
   const loadPlans = async () => {
     try {
       const res = await apiClient.get('/plans');
-      setPlans(res.data.plans);
+      const rows = res.data.plans || [];
+      setPlans(rows);
+
+      // Seed default billing cycle per plan — prefer monthly when it's
+      // enabled (matches the mental model most admins bring to a plan
+      // page), else the cheapest enabled term. Runs once per load so
+      // switching plans doesn't reset the user's manual pick.
+      const seed = {};
+      rows.forEach((p) => {
+        const map = termsMap(p);
+        if (map.monthly != null) {
+          seed[p.id] = 'monthly';
+        } else {
+          const cheapest = Object.entries(map)
+            .sort((a, b) => a[1] - b[1])[0];
+          if (cheapest) seed[p.id] = cheapest[0];
+        }
+      });
+      setCycleByPlan(seed);
     } catch (err) {
       Alert.alert('Error', 'Failed to load plans. Please try again.');
     } finally {
@@ -70,7 +130,10 @@ export default function PlanSelectionScreen({ navigation }) {
     setSelecting(true);
     setSelectedPlanId(plan.id);
     try {
-      const body = { plan_id: plan.id };
+      const term = cycleByPlan[plan.id] || plan.billing_cycle || 'monthly';
+      const map = termsMap(plan);
+      const price = map[term] ?? Number(plan.price) ?? 0;
+      const body = { plan_id: plan.id, billing_term: term, price };
       const code = referralCode.trim().toUpperCase();
       if (code) body.referral_code = code;
       await apiClient.post('/onboarding/select-plan', body);
@@ -224,51 +287,46 @@ export default function PlanSelectionScreen({ navigation }) {
             </View>
           )}
 
-          {/* Plan header — image sits to the right of the plan name
-              AND price so it visually anchors the whole title block.
-              Falls back to a soft brand-tinted placeholder when no
-              image is uploaded so cards stay aligned. */}
+          {/* Plan header — image sits to the right of the plan name.
+              Price + billing-cycle selector live below the header now
+              because they occupy real vertical space with the new
+              4-cycle grid. Falls back to a soft brand-tinted
+              placeholder when no image is uploaded. */}
           <View style={styles.planHeader}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
               <View style={{ flex: 1 }}>
                 <Text style={styles.planName}>{plan.name}</Text>
-                {(() => {
-                  const price = Number(plan.price) || 0;
-                  const discountOn = !!plan.discount_enabled;
-                  const discountPct = Number(plan.discount_percent) || 0;
-                  const effective = discountOn && discountPct > 0
-                    ? Math.round(price * (1 - discountPct / 100))
-                    : price;
-                  return (
-                    <View style={styles.planPriceRow}>
-                      {discountOn && discountPct > 0 ? (
-                        <>
-                          <Text style={styles.planPriceStruck}>
-                            ₹{price.toLocaleString('en-IN')}
-                          </Text>
-                          <Text style={styles.planPriceDiscounted}>
-                            ₹{effective.toLocaleString('en-IN')}
-                          </Text>
-                        </>
-                      ) : (
-                        <Text style={styles.planPrice}>
-                          ₹{price.toLocaleString('en-IN')}
-                        </Text>
-                      )}
-                      <Text style={styles.planCycle}>/month</Text>
-                      {discountOn && discountPct > 0 ? (
-                        <View style={styles.discountPill}>
-                          <Text style={styles.discountPillText}>
-                            {discountPct}% OFF
-                          </Text>
-                        </View>
-                      ) : null}
-                    </View>
-                  );
-                })()}
+                <Text style={styles.planTagline}>
+                  Pick the billing cycle that suits you.
+                </Text>
               </View>
               <PlanImageThumb src={plan.image_url} />
             </View>
+
+            {/* ── Billing cycle selector ────────────────────────────
+                One pill per enabled term (Monthly / Quarterly /
+                Half-Yearly / Annual). Each pill shows the label + the
+                real ₹ price for that cycle. Longer cycles that cost
+                less than N × monthly display a "SAVE X%" chip. Only
+                the pill for the selected term is highlighted; tapping
+                a pill flips this plan's cycle and instantly updates
+                the total payable below. */}
+            <BillingCycleSelector
+              plan={plan}
+              selected={cycleByPlan[plan.id]}
+              onSelect={(term) =>
+                setCycleByPlan((prev) => ({ ...prev, [plan.id]: term }))
+              }
+            />
+
+            {/* ── Total payable ─────────────────────────────────────
+                Sits right under the selector so the amount the admin
+                is about to be charged updates the moment they tap a
+                different cycle pill. */}
+            <TotalPayable
+              plan={plan}
+              selected={cycleByPlan[plan.id]}
+            />
 
             {/* Trial + grace period pills */}
             {(Number(plan.trial_days) > 0 || Number(plan.grace_days) > 0) ? (
@@ -337,6 +395,82 @@ export default function PlanSelectionScreen({ navigation }) {
 
       <View style={{ height: 30 }} />
     </ScrollView>
+  );
+}
+
+// ── BillingCycleSelector ─────────────────────────────────────────────
+// Renders 4 pills (or fewer, if the super admin disabled some terms).
+// Each pill shows: cycle name, real ₹ price, and a "SAVE X%" chip if
+// the term is cheaper per month than the monthly rate. Tapping a pill
+// flips the selection — the parent hoists that into cycleByPlan.
+function BillingCycleSelector({ plan, selected, onSelect }) {
+  const map    = termsMap(plan);
+  const monthly = map.monthly ?? null;
+
+  return (
+    <View style={styles.cycleGrid}>
+      {CYCLES.map((c) => {
+        const price = map[c.term];
+        // Term is disabled or the plan doesn't offer it — skip.
+        if (price == null) return null;
+        const isSel = selected === c.term;
+        const save  = savingsPct(monthly, price, c.months);
+        return (
+          <TouchableOpacity
+            key={c.term}
+            onPress={() => onSelect(c.term)}
+            activeOpacity={0.85}
+            style={[styles.cyclePill, isSel && styles.cyclePillActive]}
+          >
+            <View style={styles.cyclePillHead}>
+              <Text style={[styles.cycleLabel, isSel && styles.cycleLabelActive]}>
+                {c.label}
+              </Text>
+              {save != null ? (
+                <View style={[styles.saveChip, isSel && styles.saveChipActive]}>
+                  <Text style={[styles.saveChipText, isSel && styles.saveChipTextActive]}>
+                    SAVE {save}%
+                  </Text>
+                </View>
+              ) : null}
+            </View>
+            <Text style={[styles.cyclePrice, isSel && styles.cyclePriceActive]}>
+              ₹{Math.round(price).toLocaleString('en-IN')}
+            </Text>
+            <Text style={[styles.cyclePer, isSel && styles.cyclePerActive]}>
+              per {c.label.toLowerCase()}
+            </Text>
+          </TouchableOpacity>
+        );
+      })}
+    </View>
+  );
+}
+
+// ── TotalPayable ─────────────────────────────────────────────────────
+// Big highlighted amount + a one-line breakdown ("₹9,600 billed once
+// every 12 months · Save 20% vs monthly"). Reactive to the selected
+// cycle above.
+function TotalPayable({ plan, selected }) {
+  const map     = termsMap(plan);
+  const cycle   = CYCLES.find((c) => c.term === selected) || CYCLES[0];
+  const price   = map[cycle.term] ?? 0;
+  const monthly = map.monthly ?? null;
+  const save    = savingsPct(monthly, price, cycle.months);
+
+  return (
+    <View style={styles.totalCard}>
+      <View style={{ flex: 1 }}>
+        <Text style={styles.totalLabel}>Total payable</Text>
+        <Text style={styles.totalBreakdown}>
+          Billed once every {cycle.months} {cycle.months === 1 ? 'month' : 'months'}
+          {save != null ? ` · Save ${save}% vs monthly` : ''}
+        </Text>
+      </View>
+      <Text style={styles.totalAmount}>
+        ₹{Math.round(price).toLocaleString('en-IN')}
+      </Text>
+    </View>
   );
 }
 
@@ -531,6 +665,116 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: '#166534',
     letterSpacing: 0.5,
+  },
+
+  // ── Billing cycle selector ──────────────────────────────────────
+  planTagline: {
+    fontSize: 12,
+    color: colors.textLight,
+    marginTop: 4,
+    fontWeight: '600',
+  },
+  cycleGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 14,
+  },
+  cyclePill: {
+    // Two per row on typical phone widths; wraps to 1-per-row on
+    // narrow devices. `flexBasis: '48%'` gives us a stable 2-col grid.
+    flexBasis: '48%',
+    flexGrow: 1,
+    minWidth: 140,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: '#E5E7EB',
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  cyclePillActive: {
+    borderColor: colors.primary,
+    backgroundColor: '#FFF1F2',
+  },
+  cyclePillHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 6,
+    marginBottom: 4,
+  },
+  cycleLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#374151',
+    letterSpacing: 0.3,
+  },
+  cycleLabelActive: { color: colors.primary },
+  cyclePrice: {
+    fontSize: 18,
+    fontWeight: '900',
+    color: '#111827',
+  },
+  cyclePriceActive: { color: colors.primary },
+  cyclePer: {
+    fontSize: 10,
+    color: colors.textLight,
+    marginTop: 1,
+    fontWeight: '600',
+    letterSpacing: 0.3,
+  },
+  cyclePerActive: { color: colors.primary, opacity: 0.85 },
+  saveChip: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 999,
+    backgroundColor: '#DCFCE7',
+  },
+  saveChipActive: {
+    backgroundColor: '#FEF3C7',
+  },
+  saveChipText: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: '#166534',
+    letterSpacing: 0.4,
+  },
+  saveChipTextActive: {
+    color: '#92400E',
+  },
+
+  // ── Total payable card ──────────────────────────────────────────
+  totalCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginTop: 14,
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: '#F9FAFB',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  totalLabel: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: colors.textLight,
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+  },
+  totalBreakdown: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#4B5563',
+    marginTop: 2,
+    lineHeight: 15,
+  },
+  totalAmount: {
+    fontSize: 22,
+    fontWeight: '900',
+    color: colors.primary,
+    letterSpacing: -0.4,
   },
 
   // Trial / grace pills below the price.

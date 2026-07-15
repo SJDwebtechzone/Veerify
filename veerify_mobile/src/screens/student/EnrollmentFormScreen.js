@@ -84,6 +84,32 @@ export default function EnrollmentFormScreen({ route, navigation }) {
   const { user } = useAuth();
   const { selectedInstitution } = useInstitution();
 
+  // ── Guest gate ──────────────────────────────────────────────────
+  // Belt-and-suspenders: BatchesTabScreen + CourseDetailScreen already
+  // pop the "Login to Continue" prompt for guests, but if this screen
+  // ever mounts without an authenticated user (deep link, state
+  // rehydration, etc.) we redirect to Login immediately so a guest
+  // can never reach the Pay button. Runs once on mount.
+  React.useEffect(() => {
+    if (user || adminMode) return;
+    // No user, no admin flag → this is a guest that slipped through.
+    confirm({
+      title: 'Sign in to enroll',
+      message: 'You need a Veerify account to enroll and pay. Sign in or create an account to continue.',
+      variant: 'destructive',
+      confirmText: 'Login',
+      cancelText: 'Not now',
+      onConfirm: () => {
+        try { navigation.navigate('Login'); return; } catch {}
+        try { navigation.getParent()?.navigate('Login'); } catch {}
+      },
+      onCancel: () => {
+        try { navigation.goBack(); } catch {}
+      },
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Admin-initiated path (from the Add Student quick action) doesn't
   // pre-bind to a batch — we let the admin pick a course first, then a
   // batch under that course via two cascading inline dropdowns.
@@ -302,22 +328,54 @@ export default function EnrollmentFormScreen({ route, navigation }) {
   };
 
   // ── Validation ─────────────────────────────────────────────────────
+  // Student-side self-enrolment is the paid-course entry point, so we
+  // require the FULL mandatory set before the Pay button can fire:
+  //   • Full Name
+  //   • Date of Birth
+  //   • Contact Number (10-digit Indian mobile)
+  //   • Email (valid format)
+  //   • Address
+  // Admin mode keeps the older, looser rules so the counter-enrolment
+  // flow doesn't slow down with fields the admin can't always see.
   const validate = () => {
     if (!form.full_name?.trim()) return 'Full Name is required';
-    if (form.email && !/\S+@\S+\.\S+/.test(form.email)) return 'Please enter a valid email';
-    // In admin mode the email is the student's login id, so it can't
-    // be skipped — we'd have nowhere to email the credentials.
-    if (adminMode && !form.email?.trim()) {
-      return 'Email is required so we can email the student their login.';
+
+    if (!adminMode) {
+      // Full mandatory-field enforcement for self-enrolling students —
+      // this is the guard the "Pay Now" flow depends on.
+      if (!form.date_of_birth) return 'Date of Birth is required';
+      if (!form.contact_number?.trim()) return 'Contact Number is required';
+      if (!/^[6-9]\d{9}$/.test(form.contact_number.replace(/\D/g, ''))) {
+        return 'Please enter a valid 10-digit Indian mobile (starts with 6-9)';
+      }
+      if (!form.email?.trim()) return 'Email is required';
+      if (!/\S+@\S+\.\S+/.test(form.email)) return 'Please enter a valid email';
+      if (!form.address?.trim()) return 'Address is required';
+    } else {
+      // Admin mode — legacy loose rules preserved.
+      if (form.email && !/\S+@\S+\.\S+/.test(form.email)) return 'Please enter a valid email';
+      if (!form.email?.trim()) {
+        return 'Email is required so we can email the student their login.';
+      }
+      if (form.contact_number && form.contact_number.length < 10) {
+        return 'Please enter a valid contact number';
+      }
     }
-    if (form.contact_number && form.contact_number.length < 10) {
-      return 'Please enter a valid contact number';
-    }
+
     if (form.belt_category === 'Other' && !form.belt_category_other.trim()) {
       return 'Please specify the belt level';
     }
     return null;
   };
+
+  // Live invalid state — powers the disabled "Pay Now" button below so
+  // the student CAN'T reach the payment gateway with a half-filled form.
+  const validationError = useMemo(() => validate(), [
+    form.full_name, form.date_of_birth, form.contact_number,
+    form.email, form.address, form.belt_category, form.belt_category_other,
+    adminMode,
+  ]);
+  const canSubmit = !validationError && !submitting;
 
   const submit = async () => {
     const err = validate();
@@ -953,9 +1011,15 @@ export default function EnrollmentFormScreen({ route, navigation }) {
           <Text style={styles.btnGhostText}>Cancel</Text>
         </TouchableOpacity>
         <TouchableOpacity
-          style={[styles.btn, styles.btnPrimary, submitting && { opacity: 0.6 }]}
+          // Disabled until the mandatory-field validator is clean, so
+          // the student cannot possibly reach the payment gateway with
+          // a half-filled form. Faded appearance signals the state.
+          style={[
+            styles.btn, styles.btnPrimary,
+            (!canSubmit) && { opacity: 0.45 },
+          ]}
           onPress={submit}
-          disabled={submitting}
+          disabled={!canSubmit}
           activeOpacity={0.85}
         >
           {submitting ? (
@@ -963,13 +1027,29 @@ export default function EnrollmentFormScreen({ route, navigation }) {
           ) : (
             <>
               <Text style={styles.btnPrimaryText}>
-                {adminMode ? 'Submit' : 'Continue to Pay'}
+                {adminMode ? 'Submit' : 'Pay Now'}
               </Text>
               <ChevronRight size={18} color="#fff" strokeWidth={2.6} />
             </>
           )}
         </TouchableOpacity>
       </View>
+      {/* Small hint under the disabled button so the student knows why
+          they can't proceed yet. Renders only in self-enrolment mode. */}
+      {!adminMode && validationError ? (
+        <View style={{
+          paddingHorizontal: 16,
+          paddingBottom: 8,
+          backgroundColor: SURFACE,
+        }}>
+          <Text style={{
+            fontSize: 11, color: TEXT_MUTED, textAlign: 'center',
+            fontStyle: 'italic',
+          }}>
+            {validationError}
+          </Text>
+        </View>
+      ) : null}
 
       {/* Plan-cap modal — fires when /enrollments returns 402
           PLAN_LIMIT_REACHED in admin mode. Dismissing keeps the user

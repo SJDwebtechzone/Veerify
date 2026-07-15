@@ -46,6 +46,9 @@ import AdminReferEarnScreen from '../screens/admin/AdminReferEarnScreen';
 import AdminCertificatesScreen from '../screens/admin/AdminCertificatesScreen';
 import CertificateTemplatesScreen from '../screens/admin/CertificateTemplatesScreen';
 import CertificateTemplateEditorScreen from '../screens/admin/CertificateTemplateEditorScreen';
+import AdminSalaryScreen from '../screens/admin/AdminSalaryScreen';
+import InstitutionLegalScreen from '../screens/admin/InstitutionLegalScreen';
+import LegalScreen from '../screens/shared/LegalScreen';
 import StudentCertificatesScreen from '../screens/student/StudentCertificatesScreen';
 import StudentEnrolledProgramsScreen from '../screens/student/StudentEnrolledProgramsScreen';
 import StudentAttendanceScreen from '../screens/student/StudentAttendanceScreen';
@@ -366,6 +369,30 @@ export default function AppNavigator() {
             component={CertificateTemplateEditorScreen}
             options={{ headerShown: false }}
           />
+          {/* Payroll — institution admin's monthly Salary workflow.
+              Reached from More → Salary. Renders its own header so we
+              hide the stack bar. */}
+          <Stack.Screen
+            name="AdminSalary"
+            component={AdminSalaryScreen}
+            options={{ headerShown: false }}
+          />
+          {/* Institution-scoped policy editor — one screen, four tiles.
+              route.params.slug picks the policy being edited. */}
+          <Stack.Screen
+            name="InstitutionLegal"
+            component={InstitutionLegalScreen}
+            options={{ headerShown: false }}
+          />
+          {/* Admin's read-only Platform Information viewer. Reuses
+              the shared LegalScreen with platformOnly=true so the
+              Academy shelf is hidden — those pages the admin edits
+              from the tiles above, not through this read-only view. */}
+          <Stack.Screen
+            name="Legal"
+            component={LegalScreen}
+            options={{ headerShown: false }}
+          />
           {/* Admin "Add Student" quick action opens the same enrollment
               form a student fills when buying a course. Both screens
               render their own headers so the native stack bar is hidden
@@ -425,6 +452,11 @@ export default function AppNavigator() {
             options={{ headerShown: true, title: 'My Courses' }} />
           <Stack.Screen name="ParentRequests" component={ParentRequestsScreen}
             options={{ headerShown: true, title: 'Parent Requests' }} />
+          {/* Student's read-only Legal viewer. The shared LegalScreen
+              lets students see T&C / Privacy / Refund / Child Safety
+              from the platform and Academy Rules from their institution. */}
+          <Stack.Screen name="Legal" component={LegalScreen}
+            options={{ headerShown: false }} />
           {/* Enrollment flow: form -> payment -> back to MyEnrollments. Both
               screens render their own headers so we hide the native stack bar. */}
           <Stack.Screen name="EnrollmentForm" component={EnrollmentFormScreen}
@@ -522,6 +554,11 @@ export default function AppNavigator() {
           <Stack.Screen name="StaffCompletedStudents" component={StaffCompletedStudentsScreen}
             options={{ headerShown: false }} />
           <Stack.Screen name="StaffSalary" component={StaffSalaryScreen} />
+          {/* Trainer's read-only Legal viewer. Backend already scopes
+              the returned pages to the trainer's role (T&C / Privacy
+              + Academy Rules / Belt Test Policy). */}
+          <Stack.Screen name="Legal" component={LegalScreen}
+            options={{ headerShown: false }} />
           {/* StaffVideosScreen renders its own header. */}
           <Stack.Screen name="StaffVideos" component={StaffVideosScreen}
             options={{ headerShown: false }} />

@@ -128,6 +128,12 @@ app.use('/api/marketplace-settings', marketplaceRoutes);
 // Feedback module — mobile submit + super-admin read.
 app.use('/api/feedback', require('./src/routes/feedback.routes'));
 
+// Legal / policy pages — platform-wide (super-admin) + per-institution
+// (institution admin). Consumer reads at /me/platform + /me/institution
+// are role-gated so students see only their four platform policies +
+// Academy Rules, trainers see T&C / Privacy + Academy Rules / Belt Test.
+app.use('/api/legal-pages', require('./src/routes/legalPage.routes'));
+
 // MSG91 email diagnostics — dev-only. GET /api/dev/email-test?to=addr@x
 // fires the "welcome" template at the supplied address and returns
 // MSG91's raw response so you can prove the AUTHKEY + template id

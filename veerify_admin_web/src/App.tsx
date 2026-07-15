@@ -29,6 +29,7 @@ import { SubscriptionPayments } from './pages/payments/SubscriptionPayments';
 import { ReferralSettings } from './pages/settings/ReferralSettings';
 import { Profile } from './pages/Profile';
 import { Feedback } from './pages/feedback/Feedback';
+import { LegalPageEditor } from './pages/legal/LegalPageEditor';
 
 export default function App() {
   return (
@@ -89,6 +90,11 @@ export default function App() {
 
         {/* Feedback — user feedback from every mobile role. */}
         <Route path="/feedback" element={<Feedback />} />
+
+        {/* Platform-wide Legal / policy pages — super-admin editor.
+            One route serves all five policies; the :slug URL param
+            selects which page the editor loads and saves. */}
+        <Route path="/legal/:slug" element={<LegalPageEditor />} />
 
         {/* Settings */}
         <Route path="/settings" element={<PlaceholderPage title="General Settings" icon={Settings} />} />

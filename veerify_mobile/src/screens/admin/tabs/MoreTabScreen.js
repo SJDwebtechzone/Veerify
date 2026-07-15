@@ -23,7 +23,7 @@ import {
   UserCog, BookOpen, Building2, CalendarRange, Bell, Megaphone,
   MessageSquare, BarChart3, Palette, CreditCard, Settings, LifeBuoy,
   LogOut, ChevronRight, Edit3, ShieldCheck, Layers, KeyRound, MapPin,
-  Award,
+  Award, FileText,
 } from 'lucide-react-native';
 
 import { useAuth } from '../../../context/AuthContext';
@@ -41,7 +41,17 @@ const MENU = [
   { key: 'branches',      label: 'Branches',         icon: Building2,      accent: palette.green  },
   { key: 'events',        label: 'Events',           icon: CalendarRange,  accent: palette.orange },
   { key: 'certificates',  label: 'Certificates',     icon: Award,          accent: palette.rose   },
-  { key: 'certificate_templates', label: 'Cert Templates', icon: Award,       accent: palette.purple },
+  // Salary — monthly payroll for the institution's trainers. Admin
+  // picks a trainer, sees their read-only Basic Salary from the
+  // trainer profile, enters Deductions, and saves a per-month slip.
+  { key: 'salary',        label: 'Salary',           icon: CreditCard,     accent: palette.teal   },
+  // ── Note: About Academy, Academy Rules, Attendance Policy, Belt
+  //    Test Policy, and Certificate Templates were previously here
+  //    in the main grid. They've all moved into their own "Academy"
+  //    section (rendered below the grid + right above the account
+  //    shortcuts card) so admins can find every academy-configuration
+  //    entry point in one place. Platform Information also moved out
+  //    — it's now the "Legal" row in the account shortcuts card.
   // { key: 'notifications', label: 'Notifications',    icon: Bell,           accent: palette.pink   },
   // { key: 'announcements', label: 'Announcements',    icon: Megaphone,      accent: palette.teal   },
   // { key: 'feedback',      label: 'Feedback',         icon: MessageSquare,  accent: palette.rose   },
@@ -50,6 +60,19 @@ const MENU = [
   { key: 'pricing',       label: 'Pricing & Plans',  icon: CreditCard,     accent: palette.green  },
   { key: 'settings',      label: 'Settings',         icon: Settings,       accent: palette.orange },
   { key: 'support',       label: 'Support',          icon: LifeBuoy,       accent: palette.pink   },
+];
+
+// ── Academy section — every institution-managed policy in one place.
+// Rendered as a labeled list card above the account shortcuts so admins
+// can find their 5 academy-configuration screens without hunting through
+// the main tile grid. Certificate Templates lives here too because it's
+// an academy-owned deliverable configuration.
+const ACADEMY_ITEMS = [
+  { key: 'about_academy',         label: 'About Academy',       accent: palette.blue   },
+  { key: 'academy_rules',         label: 'Academy Rules',       accent: palette.orange },
+  { key: 'attendance_policy',     label: 'Attendance Policy',   accent: palette.green  },
+  { key: 'belt_test_policy',      label: 'Belt Test Policy',    accent: palette.rose   },
+  { key: 'certificate_templates', label: 'Certificate Templates', accent: palette.purple },
 ];
 
 export default function MoreTabScreen({ navigation }) {
@@ -108,6 +131,9 @@ export default function MoreTabScreen({ navigation }) {
     // a trainer submits their belt-test remarks.
     certificates: 'AdminCertificates',
     certificate_templates: 'CertificateTemplates',
+    // Salary — per-month payroll workflow. Opens the trainer list;
+    // tapping a trainer expands the monthly slip editor inline.
+    salary:   'AdminSalary',
     // Pricing & Plans — shows current subscription + renewal + the
     // catalog of other plans (super admin defined). "Renew" on current
     // and "Upgrade/Downgrade/Switch" on alternates all route through to
@@ -118,7 +144,27 @@ export default function MoreTabScreen({ navigation }) {
     // trainer-only, or both.
     branding: 'InstitutionBranding',
   };
+  // Institution-scoped policy slugs are handled inline — they all
+  // route to the same InstitutionLegal editor with different slugs.
+  const LEGAL_SLUGS = new Set([
+    'about_academy', 'academy_rules', 'attendance_policy', 'belt_test_policy',
+  ]);
   const handleTile = (key, label) => {
+    if (LEGAL_SLUGS.has(key)) {
+      navigation.navigate('InstitutionLegal', { slug: key });
+      return;
+    }
+    // Legal → the shared LegalScreen in platform-only mode. Header
+    // matches the tap target so the user lands on a screen titled
+    // "Legal", not the internal "Platform Information" name.
+    if (key === 'platform_information') {
+      navigation.navigate('Legal', {
+        platformOnly: true,
+        pageTitle:    'Legal',
+        pageSubtitle: 'Veerify\'s platform policies. Updates by admin appear here automatically.',
+      });
+      return;
+    }
     const route = TILE_ROUTES[key];
     if (route) navigation.navigate(route);
     else placeholder(label);
@@ -204,13 +250,38 @@ export default function MoreTabScreen({ navigation }) {
           ))}
       </View>
 
-      {/* ───── Quick links list ───── */}
+      {/* ───── Academy section ─────
+          Every institution-configuration screen in one labeled group,
+          placed above the account shortcuts so admins know exactly
+          where their academy policies live. Certificate Templates
+          rounds out the group since it's also an academy-owned
+          deliverable configuration. */}
+      <Text style={styles.sectionLabel}>ACADEMY</Text>
+      <View style={styles.listCard}>
+        {ACADEMY_ITEMS.map((item, i) => (
+          <React.Fragment key={item.key}>
+            {i > 0 ? <View style={styles.divider} /> : null}
+            <ListRow
+              icon={FileText}
+              label={item.label}
+              accent={item.accent}
+              onPress={() => handleTile(item.key, item.label)}
+            />
+          </React.Fragment>
+        ))}
+      </View>
+
+      {/* ───── Account shortcuts ─────
+          Replaces the old "Privacy & Security" placeholder row with a
+          real "Legal" entry that opens the read-only Platform
+          Information viewer (T&C, Privacy, Refund, Child Safety,
+          Contact & Support). Rest of the account shortcuts stay put. */}
       <View style={styles.listCard}>
         <ListRow
           icon={ShieldCheck}
-          label="Privacy & Security"
+          label="Legal"
           accent={palette.green}
-          onPress={() => placeholder('Privacy & Security')}
+          onPress={() => handleTile('platform_information', 'Legal')}
         />
         {/* Update Location — sub-branch admins only. Lets them pin
             their branch's GPS + address so it lands correctly in the
@@ -381,6 +452,18 @@ const styles = StyleSheet.create({
     color: palette.text,
     fontWeight: '600',
     textAlign: 'center',
+  },
+
+  // Small uppercase section label — used above the Academy list card
+  // so the group has a visible heading matching the rest of the app.
+  sectionLabel: {
+    ...type.micro,
+    color: palette.textMuted,
+    fontWeight: '800',
+    letterSpacing: 0.6,
+    paddingHorizontal: 4,
+    marginBottom: spacing.sm,
+    marginTop: spacing.md,
   },
 
   // List card

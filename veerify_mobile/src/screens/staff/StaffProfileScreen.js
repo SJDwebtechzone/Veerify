@@ -24,7 +24,7 @@ import {
 import {
   ArrowLeft, Mail, Phone, Award, BookOpen, Briefcase, Lock,
   Wallet, LogOut, ChevronRight, X as XIcon, Eye, EyeOff,
-  GraduationCap, Users, Calendar, MessageSquare,
+  GraduationCap, Users, Calendar, MessageSquare, FileText,
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
@@ -211,20 +211,29 @@ export default function StaffProfileScreen({ navigation }) {
           )}
         </Card>
 
-        {/* Account settings — "Salary details" temporarily hidden by product
-            decision until the institution payout flow stabilises. Restore the
-            commented row below to bring it back. */}
+        {/* Account settings — Payments (salary) is now restored so the
+            trainer can see the current month's slip + full history the
+            moment their institution admin saves the monthly payroll. */}
         <Card title="Account settings" icon={Lock}>
-          {/*
           <SettingRow
             icon={Wallet}
             accent={palette.green}
-            label="Salary details"
-            description="View monthly salary, bonuses and history"
+            label="Payments"
+            description="Current month's slip + salary history"
             onPress={() => navigation.navigate('StaffSalary')}
           />
           <Divider />
-          */}
+          {/* Legal — trainer's read-only view. Backend returns T&C /
+              Privacy (platform) + Academy Rules / Belt Test Policy
+              (institution) per the role-scoped visibility matrix. */}
+          <SettingRow
+            icon={FileText}
+            accent={palette.teal}
+            label="Legal"
+            description="Terms, privacy, and academy policies"
+            onPress={() => navigation.navigate('Legal')}
+          />
+          <Divider />
           <SettingRow
             icon={Lock}
             accent={palette.blue}

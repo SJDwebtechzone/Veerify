@@ -19,7 +19,7 @@ import {
 import {
   LogIn, UserPlus, Sparkles, ChevronRight, GraduationCap, ClipboardCheck,
   Award, Wallet, Gift, Settings, LifeBuoy, LogOut, ShieldCheck, Edit3,
-  Crown, Lock, Star, KeyRound, MessageSquare,
+  Crown, Lock, Star, KeyRound, MessageSquare, FileText,
 } from 'lucide-react-native';
 
 import { useAuth } from '../../../context/AuthContext';
@@ -264,7 +264,17 @@ function LoggedInView({ user, subscription, selectedInstitution, onLogout, navig
 
       {/* List shortcuts */}
       <View style={styles.listCard}>
-        <ListRow icon={ShieldCheck} label="Privacy & Security" accent={palette.green} onPress={() => placeholder('Privacy & Security')} />
+        {/* Legal — replaces the old "Privacy & Security" placeholder
+            row. Opens the read-only viewer for T&C, Privacy, Refund,
+            Child Safety (platform) and Academy Rules (institution).
+            Backend gates visibility by role so the screen just renders
+            what it's given. */}
+        <ListRow
+          icon={FileText}
+          label="Legal"
+          accent={palette.green}
+          onPress={() => navigation.navigate('Legal')}
+        />
         <View style={styles.divider} />
         {/* Change Password — same screen the first-login dialog routes
             into. Lets students who picked "I'll do it later" rotate

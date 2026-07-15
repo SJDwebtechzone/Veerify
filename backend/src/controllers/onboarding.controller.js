@@ -21,12 +21,18 @@ function generateTempPassword() {
 // STEP 1: Admin selects a plan
 exports.selectPlan = async (req, res) => {
   try {
-    const { plan_id, referral_code } = req.body;
+    const { plan_id, referral_code, billing_term } = req.body;
     const userId = req.user.id;
 
     if (!plan_id) {
       return res.status(400).json({ message: 'Plan ID is required' });
     }
+
+    // Optional billing_term (mobile's plan card picks one of monthly /
+    // quarterly / half_yearly / annual). Anything else is coerced to
+    // null so the payment step falls back to plan.billing_cycle.
+    const VALID_TERMS = new Set(['monthly', 'quarterly', 'half_yearly', 'annual']);
+    const cleanTerm = VALID_TERMS.has(billing_term) ? billing_term : null;
 
     // Optional referral code — captured here on first plan selection. We
     // resolve it to a referrer institution and use it in the INSERT below.
@@ -83,17 +89,23 @@ exports.selectPlan = async (req, res) => {
       const PRE_SETUP = new Set(['registered', 'plan_selected', null, undefined]);
       const allowStatusReset = PRE_SETUP.has(current.onboarding_status);
 
+      // COALESCE keeps the previous billing_term when the client
+      // didn't send one (e.g. legacy mobile builds); when it did,
+      // the new pick overrides so the payment step uses the right price.
       const updated = await pool.query(
         allowStatusReset
           ? `UPDATE institutions
-               SET plan_id = $1, onboarding_status = 'plan_selected'
+               SET plan_id = $1,
+                   onboarding_status = 'plan_selected',
+                   selected_billing_term = COALESCE($3, selected_billing_term)
              WHERE owner_user_id = $2
              RETURNING *`
           : `UPDATE institutions
-               SET plan_id = $1
+               SET plan_id = $1,
+                   selected_billing_term = COALESCE($3, selected_billing_term)
              WHERE owner_user_id = $2
              RETURNING *`,
-        [plan_id, userId],
+        [plan_id, userId, cleanTerm],
       );
 
       // If a referral code was supplied AND this institution hasn't already
@@ -161,14 +173,14 @@ exports.selectPlan = async (req, res) => {
       });
     }
 
-    // Create new institution with plan selected
+    // Create new institution with plan selected + billing_term.
     const newInst = await pool.query(
       `INSERT INTO institutions
          (owner_user_id, plan_id, onboarding_status, name, status,
-          referred_by_institution_id)
-       VALUES ($1, $2, 'plan_selected', 'Unnamed Academy', 'pending', $3)
+          referred_by_institution_id, selected_billing_term)
+       VALUES ($1, $2, 'plan_selected', 'Unnamed Academy', 'pending', $3, $4)
        RETURNING *`,
-      [userId, plan_id, referredBy]
+      [userId, plan_id, referredBy, cleanTerm]
     );
 
     // If a referral code was applied, also insert a 'pending' referrals row
@@ -1140,11 +1152,36 @@ exports.getAllInstitutions = async (req, res) => {
     if (status) {
       params.push(status);
       where.push(`i.onboarding_status = $${params.length}`);
+      // "Active" on the super-admin dashboard means the academy is
+      // LIVE RIGHT NOW — subscription still within its window AND the
+      // admin hasn't toggled it off. Rows whose subscription has
+      // lapsed (or whose is_active flag is false) belong to the
+      // Expired / All views, not the Active view. Without this extra
+      // guard the "Active Institutions" page picked up any row still
+      // sitting at onboarding_status='active' even though its
+      // subscription had ended weeks ago.
+      if (status === 'active') {
+        where.push(`i.is_active = TRUE`);
+        where.push(`(i.subscription_end IS NULL OR i.subscription_end >= NOW())`);
+      }
     }
 
     if (expired === 'true') {
-      // Expired = active institutions whose subscription window has passed.
-      where.push(`i.subscription_end IS NOT NULL AND i.subscription_end < NOW()`);
+      // "Expired" on the super-admin dashboard means an academy that
+      // WAS live and whose subscription window has since ended. That
+      // rules out rows in pending_approval / approved / rejected
+      // states — those never went live in the first place, so calling
+      // them "expired" is misleading even if some early wizard row
+      // happens to carry a stale subscription_end value. We also
+      // exclude anything soft-deleted (the WHERE deleted_at IS NULL
+      // guard above already handles that, but the explicit
+      // onboarding_status check makes the intent obvious to the
+      // reader). Rows the admin has toggled off with is_active=FALSE
+      // are still surfaced here — being switched off doesn't stop the
+      // subscription from being past its end date.
+      where.push(`i.onboarding_status = 'active'`);
+      where.push(`i.subscription_end IS NOT NULL`);
+      where.push(`i.subscription_end < NOW()`);
     }
 
     const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
@@ -1769,6 +1806,35 @@ exports.handlePaymentWebhook = async (req, res) => {
       // eslint-disable-next-line no-console
       console.log('[webhook] enrollment_renew paid=', upd.rowCount, 'enrollment=', enrollmentId);
       return res.json({ ok: true, enrollment_renew: true, matched: upd.rowCount > 0 });
+    }
+
+    // ── NEW-enrollment branch ──────────────────────────────────────
+    // First-time student enrolments mint their link with
+    // notes.action='enrollment_new' + notes.enrollment_id via the
+    // /enrollments/:id/create-payment-link endpoint. This is the ONLY
+    // point at which a pending enrolment becomes paid — the mobile's
+    // "Pay Now" button never marks anything paid client-side. If the
+    // webhook never fires (user cancels or payment fails) the row
+    // stays payment_status='pending' and appears in the student's
+    // "Pending Payment" list until they retry.
+    if (notes.action === 'enrollment_new' && notes.enrollment_id) {
+      const enrollmentId = parseInt(notes.enrollment_id, 10);
+      if (!Number.isInteger(enrollmentId)) {
+        return res.status(400).json({ message: 'Invalid enrollment_id note' });
+      }
+      const upd = await pool.query(
+        `UPDATE enrollments
+            SET payment_status    = 'paid',
+                paid_at           = NOW(),
+                payment_reference = COALESCE($2, payment_reference)
+          WHERE id = $1
+            AND payment_status <> 'paid'
+          RETURNING id, student_id, payment_amount`,
+        [enrollmentId, paymentId || linkId],
+      );
+      // eslint-disable-next-line no-console
+      console.log('[webhook] enrollment_new paid=', upd.rowCount, 'enrollment=', enrollmentId);
+      return res.json({ ok: true, enrollment_new: true, matched: upd.rowCount > 0 });
     }
 
     // Look up by stored payment_link_id first; fall back to notes.institution_id

@@ -387,14 +387,24 @@ exports.sendCertificate = async (req, res) => {
     const certNo = `VRF-${row.institution_id}-${now.getFullYear()}-${
       Math.floor(Math.random() * 90000) + 10000
     }`;
+    // Defensive date coercion — pg normally returns TIMESTAMPTZ as
+    // JavaScript Date objects, but occasionally connection pools or
+    // middleware coerce them to strings. Calling .toISOString() on a
+    // string throws, and this used to bubble as "Server error". Now
+    // we accept string / Date / null and always emit YYYY-MM-DD.
+    const toISODate = (v) => {
+      if (!v) return now.toISOString().slice(0, 10);
+      const d = v instanceof Date ? v : new Date(v);
+      if (Number.isNaN(d.getTime())) return now.toISOString().slice(0, 10);
+      return d.toISOString().slice(0, 10);
+    };
     const values = {
       student_name:     row.student_name,
       course_name:      row.course_name,
       belt_name:        currentBelt || 'White Belt',
       institution_name: iRes.rows[0]?.name || '',
       venue:            iRes.rows[0]?.city || '',
-      completion_date:  (row.belt_test_completed_at || row.course_completed_at || now)
-                          .toISOString().slice(0, 10),
+      completion_date:  toISODate(row.belt_test_completed_at || row.course_completed_at),
       certificate_no:   certNo,
       instructor_name:  trainerRes.rows[0]?.name || '',
       digital_signature:'',
@@ -407,38 +417,56 @@ exports.sendCertificate = async (req, res) => {
 
     // Insert a matching row in the shared certificates table so the
     // student sees the certificate in their history and the verify
-    // page works out of the box. Best-effort — if the certificates
-    // table's schema differs, we swallow the error and still mark
-    // the completion done so the workflow isn't blocked.
+    // page works out of the box.
+    //
+    // IMPORTANT — this used to reference `verify_token` and `notes`,
+    // which don't exist on the certificates schema (migration 027 uses
+    // `qr_token` NOT NULL UNIQUE and `description`). The failing INSERT
+    // put the enclosing transaction into an aborted state, causing the
+    // next UPDATE course_completions to fail with "current transaction
+    // is aborted", which the outer catch surfaced as a generic 500.
+    // We now:
+    //   • Use a SAVEPOINT so an unexpected failure here doesn't poison
+    //     the outer transaction.
+    //   • Insert into columns that actually exist on certificates.
+    //   • Provide qr_token (NOT NULL) and instructor_name for the
+    //     verify page.
     let certId = null;
     try {
+      await client.query('SAVEPOINT cert_insert');
       const crypto = require('crypto');
-      const token = crypto.randomBytes(12).toString('hex');
+      const qrToken = crypto.randomBytes(12).toString('hex');
       const certRes = await client.query(
         `INSERT INTO certificates
-           (student_id, institution_id, kind, title, issue_date,
-            verify_token, notes,
-            template_id, placeholder_data, certificate_no,
-            course_id, trainer_remarks)
-         VALUES ($1, $2, 'completion', $3, CURRENT_DATE, $4, $5,
-                 $6, $7::jsonb, $8, $9, $10)
+           (student_id, institution_id, kind, title, description,
+            issue_date, instructor_name, certificate_no, qr_token,
+            template_id, placeholder_data, course_id, trainer_remarks)
+         VALUES ($1, $2, 'completion', $3, $4,
+                 CURRENT_DATE, $5, $6, $7,
+                 $8, $9::jsonb, $10, $11)
          RETURNING id`,
         [
-          row.student_id, row.institution_id,
+          row.student_id,
+          row.institution_id,
           `${row.course_name} — Course Completion`,
-          token,
           row.test_remarks || null,
+          trainerRes.rows[0]?.name || null,
+          certNo,
+          qrToken,
           template?.id || null,
           JSON.stringify(mergedPlaceholders),
-          certNo,
           row.course_id || null,
           row.test_remarks || null,
         ],
       );
       certId = certRes.rows[0]?.id || null;
+      await client.query('RELEASE SAVEPOINT cert_insert');
     } catch (certErr) {
+      // Roll back JUST the cert insert so the outer transaction stays
+      // alive and the completion status update below still succeeds.
       // eslint-disable-next-line no-console
-      console.log('[sendCertificate] certificates insert skipped:', certErr?.message);
+      console.warn('[sendCertificate] certificates insert failed, continuing without cert row:', certErr?.message);
+      try { await client.query('ROLLBACK TO SAVEPOINT cert_insert'); } catch (_) {}
     }
 
     const upd = await client.query(

@@ -16,11 +16,31 @@
 
 const pool = require('../config/db');
 
+// ── Placeholder catalogue ────────────────────────────────────────────
+// Full list of certificate fields the admin can toggle on/off per
+// template. Each pin the mobile draws MUST use a key from this list.
+// New keys (introduced with the field-visibility work):
+//   • issue_date       — when the cert was minted (defaults to today)
+//   • branch_name      — sub-branch of the institution
+//   • duration         — length of the course in months / weeks
+//   • verification_url — link the public verify page shows
+//   • seal             — academy seal / stamp (image-driven)
+//
+// digital_signature and seal are IMAGE placeholders — the renderer
+// swaps their text for template.signature_url / template.seal_url when
+// present AND the pin is active. Everything else is text.
 const PLACEHOLDER_KEYS = [
-  'student_name', 'course_name', 'belt_name', 'institution_name',
-  'venue', 'completion_date', 'certificate_no',
-  'instructor_name', 'digital_signature', 'qr_code',
+  'student_name', 'course_name', 'belt_name',
+  'certificate_no', 'issue_date', 'completion_date',
+  'instructor_name', 'institution_name', 'branch_name',
+  'venue', 'duration',
+  'qr_code', 'verification_url',
+  'seal', 'digital_signature',
 ];
+
+// Placeholders whose rendered form is an image (backed by the
+// template's signature_url / seal_url).
+const IMAGE_KEYS = new Set(['digital_signature', 'seal']);
 
 async function getMyInstitutionId(userId) {
   const r = await pool.query(
@@ -33,6 +53,10 @@ async function getMyInstitutionId(userId) {
 // Normalise a placeholder pin — drops unknown keys, clamps x/y to
 // [0, 1], enforces sane font size range. Silent about invalid values
 // so callers with older mobile builds don't crash the save.
+//
+// `active` — persisted per pin so the admin can hide a field on the
+// generated cert without removing the pin from the canvas. Defaults to
+// TRUE when the flag is omitted (older mobile builds don't send it).
 function sanitisePin(raw = {}) {
   if (!PLACEHOLDER_KEYS.includes(raw.key)) return null;
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, Number(v) || 0));
@@ -46,6 +70,14 @@ function sanitisePin(raw = {}) {
     align:     ['left', 'center', 'right'].includes(raw.align) ? raw.align : 'center',
     bold:      !!raw.bold,
     italic:    !!raw.italic,
+    // Explicit false means "hide on the generated cert"; every other
+    // value (undefined / null / true) reads as active so pre-existing
+    // pins keep rendering after the migration.
+    active:    raw.active === false ? false : true,
+    // Only meaningful for IMAGE_KEYS. width/height are relative to the
+    // canvas so the layout survives DPI changes.
+    width:     clamp(raw.width  ?? 0.20, 0.05, 1),
+    height:    clamp(raw.height ?? 0.10, 0.02, 1),
   };
 }
 function sanitisePlaceholders(list) {
@@ -104,8 +136,9 @@ exports.create = async (req, res) => {
         `INSERT INTO certificate_templates
            (institution_id, name, background_url, background_kind,
             canvas_width, canvas_height, placeholders,
+            signature_url, seal_url,
             is_default, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11)
          RETURNING *`,
         [
           institutionId,
@@ -115,6 +148,10 @@ exports.create = async (req, res) => {
           Number.isFinite(b.canvas_width)  ? b.canvas_width  : 1000,
           Number.isFinite(b.canvas_height) ? b.canvas_height : 700,
           JSON.stringify(sanitisePlaceholders(b.placeholders)),
+          // Signature + seal uploads land here. Blank strings collapse
+          // to NULL so the frontend can send '' to clear them.
+          b.signature_url ? String(b.signature_url).slice(0, 500) : null,
+          b.seal_url      ? String(b.seal_url).slice(0, 500)      : null,
           wantDefault,
           req.user.id,
         ],
@@ -151,6 +188,17 @@ exports.update = async (req, res) => {
     }
 
     const b = req.body || {};
+    // Signature / seal handling — three states:
+    //   • field absent         → keep existing
+    //   • field === ''         → clear (admin removed the upload)
+    //   • field === 'xxx'      → replace with new path
+    // We encode those into COALESCE-friendly nulls below by sending a
+    // sentinel for "clear" and letting the SQL blend it in via CASE.
+    const sigProvided  = Object.prototype.hasOwnProperty.call(b, 'signature_url');
+    const sealProvided = Object.prototype.hasOwnProperty.call(b, 'seal_url');
+    const sigValue     = sigProvided  ? (b.signature_url ? String(b.signature_url).slice(0, 500) : null) : undefined;
+    const sealValue    = sealProvided ? (b.seal_url      ? String(b.seal_url).slice(0, 500)      : null) : undefined;
+
     const r = await pool.query(
       `UPDATE certificate_templates SET
          name             = COALESCE($2, name),
@@ -159,6 +207,8 @@ exports.update = async (req, res) => {
          canvas_width     = COALESCE($5, canvas_width),
          canvas_height    = COALESCE($6, canvas_height),
          placeholders     = COALESCE($7::jsonb, placeholders),
+         signature_url    = CASE WHEN $9::boolean THEN $8 ELSE signature_url END,
+         seal_url         = CASE WHEN $11::boolean THEN $10 ELSE seal_url    END,
          updated_at       = NOW()
        WHERE id = $1
        RETURNING *`,
@@ -172,6 +222,8 @@ exports.update = async (req, res) => {
         Number.isFinite(b.canvas_height) ? b.canvas_height : null,
         Array.isArray(b.placeholders)
           ? JSON.stringify(sanitisePlaceholders(b.placeholders)) : null,
+        sigValue  ?? null, sigProvided,
+        sealValue ?? null, sealProvided,
       ],
     );
     res.json({ template: r.rows[0] });
@@ -272,19 +324,27 @@ exports.prepare = async (req, res) => {
     const completionId = parseInt(req.body?.completion_id, 10);
     let data = null;
     if (Number.isInteger(completionId)) {
+      // Extended query — pulls the branch name (from institutions.name
+      // when a batch pinned the enrolment to a sub-branch), course
+      // duration, and the trainer's name so the new placeholders have
+      // real values to merge against.
       const dRes = await pool.query(
         `SELECT
            cc.id, cc.certificate_sent_at, cc.course_completed_at,
            cc.belt_test_completed_at, cc.test_remarks,
            u.name  AS student_name,
            c.name  AS course_name,
+           c.duration_months     AS course_duration_months,
            i.name  AS institution_name,
            i.city  AS institution_city,
+           br.name AS branch_name,
            trainer.name AS trainer_name
          FROM course_completions cc
          JOIN users u    ON u.id = cc.student_id
          JOIN courses c  ON c.id = cc.course_id
          LEFT JOIN institutions i ON i.id = cc.institution_id
+         LEFT JOIN batches       b ON b.id = cc.batch_id
+         LEFT JOIN institutions br ON br.id = b.branch_id
          LEFT JOIN users trainer  ON trainer.id = cc.trainer_id
         WHERE cc.id = $1`,
         [completionId],
@@ -292,23 +352,60 @@ exports.prepare = async (req, res) => {
       data = dRes.rows[0] || null;
     }
 
+    // Public verify page — the QR / verification_url placeholders point
+    // here. process.env.APP_PUBLIC_URL is used when set (production) so
+    // the printed link is a real reachable URL, not localhost.
+    const verifyBase = process.env.APP_PUBLIC_URL
+      || process.env.APP_BASE_URL
+      || 'https://veerify.app';
+    const verifyUrl = Number.isInteger(completionId)
+      ? `${verifyBase.replace(/\/$/, '')}/verify/${completionId}`
+      : `${verifyBase.replace(/\/$/, '')}/verify`;
+
+    const durationMonths = data?.course_duration_months;
+    const durationLabel = durationMonths
+      ? `${durationMonths} ${durationMonths === 1 ? 'month' : 'months'}`
+      : '';
+
     // Build the map of {key: value}. Defaults keep the preview useful.
+    // Every placeholder key defined in PLACEHOLDER_KEYS must resolve to
+    // a value here — even if that value is an empty string — so the
+    // renderer never has to reach for `pin.key` that isn't present.
     const sample = {
       student_name:     data?.student_name     || 'Sample Student',
       course_name:      data?.course_name      || 'Sample Course',
       belt_name:        req.body?.belt_name     || 'White Belt',
-      institution_name: data?.institution_name || 'Sample Academy',
-      venue:            data?.institution_city  || 'Chennai',
-      completion_date:  formatDate(data?.belt_test_completed_at || data?.course_completed_at),
       certificate_no:   generateCertificateNo(institutionId),
+      issue_date:       formatDate(new Date()),                    // NEW — today
+      completion_date:  formatDate(data?.belt_test_completed_at || data?.course_completed_at),
       instructor_name:  data?.trainer_name     || '—',
-      digital_signature:'',   // rendered as a scripty text or image on mobile
-      qr_code:          '',   // mobile renders a QR from the completion id
+      institution_name: data?.institution_name || 'Sample Academy',
+      branch_name:      data?.branch_name      || '',              // NEW — sub-branch
+      venue:            data?.institution_city  || 'Chennai',
+      duration:         durationLabel,                             // NEW — course duration
+      qr_code:          verifyUrl,   // mobile renders a QR from this URL
+      verification_url: verifyUrl,   // NEW — printed as text alongside the QR
+      digital_signature:'',           // image-driven; renderer looks at template.signature_url
+      seal:             '',           // image-driven; renderer looks at template.seal_url
     };
 
-    const merged = (template.placeholders || []).map((pin) => ({
+    // Drop inactive pins BEFORE merging so the mobile renderer never
+    // sees a hidden field. This is the enforcement point for the spec:
+    // "Only fields marked Active should appear on generated certificates."
+    const active = (template.placeholders || []).filter(
+      (pin) => pin.active !== false,
+    );
+    const merged = active.map((pin) => ({
       ...pin,
       value: sample[pin.key] ?? '',
+      // Convenience — surface signature/seal URLs on the pin so the
+      // mobile renderer doesn't have to cross-reference the template
+      // payload for image placeholders.
+      image_url: pin.key === 'digital_signature'
+        ? (template.signature_url || null)
+        : pin.key === 'seal'
+          ? (template.seal_url || null)
+          : null,
     }));
 
     res.json({
@@ -318,6 +415,8 @@ exports.prepare = async (req, res) => {
         background_kind: template.background_kind,
         canvas_width:  template.canvas_width,
         canvas_height: template.canvas_height,
+        signature_url: template.signature_url || null,
+        seal_url:      template.seal_url      || null,
       },
       placeholders: merged,
       completion:   data,

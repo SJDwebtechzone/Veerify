@@ -11,6 +11,7 @@ import {
   Settings,
   Smartphone,
   MessageSquare,
+  Scale,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -108,6 +109,19 @@ export const navSections: NavSection[] = [
     label: 'Feedback',
     icon: MessageSquare,
     to: '/feedback',
+  },
+  // Platform-wide legal / policy pages. Super-admin only. Each entry
+  // routes to the same editor screen with a different `slug` param.
+  {
+    label: 'Legal',
+    icon: Scale,
+    children: [
+      { label: 'Terms & Conditions',           to: '/legal/terms_and_conditions' },
+      { label: 'Privacy Policy',               to: '/legal/privacy_policy' },
+      { label: 'Refund & Cancellation Policy', to: '/legal/refund_and_cancellation_policy' },
+      { label: 'Child Safety Policy',          to: '/legal/child_safety_policy' },
+      { label: 'Contact & Support',            to: '/legal/contact_and_support' },
+    ],
   },
   {
     label: 'Settings',

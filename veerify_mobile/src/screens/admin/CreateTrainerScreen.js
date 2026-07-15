@@ -128,6 +128,12 @@ export default function CreateTrainerScreen({ navigation, route }) {
       : '',
     // Bio (freeform).
     bio:              editingTrainer?.bio || '',
+    // Basic Salary (monthly, in ₹). Drives the read-only Basic Salary
+    // field on Institution → More → Salary. Persisted on the trainers
+    // profile; per-month deductions live on trainer_salaries rows.
+    basic_salary:     editingTrainer?.basic_salary != null
+      ? String(editingTrainer.basic_salary)
+      : '',
     // Photo — URL only (no local URI for previously-saved uploads).
     photo_url:        editingTrainer?.photo_url || '',
     photo_uri:        '',
@@ -540,6 +546,11 @@ export default function CreateTrainerScreen({ navigation, route }) {
           govt_proof_number: form.govt_proof_number.trim() || null,
           photo_url: form.photo_url || null,
           skills: skillsPayload,
+          // Basic salary (empty string → keep existing on the server;
+          // any number → overwrite). Handled by COALESCE upstream.
+          basic_salary: form.basic_salary.trim() !== ''
+            ? Number(form.basic_salary) || 0
+            : undefined,
         });
         confirm({
           title:       'Changes saved',
@@ -566,6 +577,9 @@ export default function CreateTrainerScreen({ navigation, route }) {
           govt_proof_number: form.govt_proof_number.trim() || null,
           photo_url: form.photo_url || null,
           skills: skillsPayload,
+          basic_salary: form.basic_salary.trim() !== ''
+            ? Number(form.basic_salary) || 0
+            : 0,
         });
         confirm({
           title:       'Trainer added',
@@ -917,6 +931,23 @@ export default function CreateTrainerScreen({ navigation, route }) {
             onChangeText={(v) => set('bio', v)}
             multiline
             textAlignVertical="top"
+          />
+        </Field>
+
+        {/* ── Section 6: Salary ── */}
+        {/* Monthly base pay. Read-only on the payroll screen, editable
+            here. Deductions per month are captured on Institution →
+            More → Salary and stored per-slip. */}
+        <SectionTitle icon={Briefcase} title="Compensation" />
+        <Field label="Basic Salary (per month, ₹)">
+          <TextInput
+            style={styles.input}
+            placeholder="e.g. 25000"
+            placeholderTextColor={TEXT_LIGHT}
+            value={form.basic_salary}
+            onChangeText={(v) => set('basic_salary', v.replace(/[^0-9.]/g, ''))}
+            keyboardType="decimal-pad"
+            maxLength={10}
           />
         </Field>
 
