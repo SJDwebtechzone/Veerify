@@ -180,7 +180,14 @@ exports.getMyBatches = async (req, res) => {
     }
 
     const result = await pool.query(
-      `SELECT b.*, c.name AS course_name, u.name AS trainer_name,
+      // c.price + c.duration_months are joined so every batch row carries
+      // the LATEST fee from the course. Without them, the admin's Add
+      // Student form used to receive undefined and render "₹0" on the
+      // Enrollment Details header — the bug this endpoint just fixed.
+      `SELECT b.*, c.name AS course_name,
+              c.price AS course_price,
+              c.duration_months AS course_duration_months,
+              u.name AS trainer_name,
               -- Branch label: sub-branch name for pinned batches,
               -- 'Main Institution' for batches with branch_id IS NULL.
               COALESCE(bi.name, 'Main Institution') AS branch_name,

@@ -201,8 +201,11 @@ export default function MoreTabScreen({ navigation }) {
       </View>
 
       {/* ───── Profile card ─────
-          Tapping opens the full Academy Profile screen (view mode by
-          default; pencil in the top-right toggles edit mode). */}
+          Tapping the whole card opens the Academy Profile screen in
+          edit mode. The small pencil chip on the right is a visual
+          affordance so the admin knows the section is editable at a
+          glance — it fires the same navigation onPress the parent
+          card does. */}
       <TouchableOpacity
         style={styles.profileCard}
         onPress={() => navigation.navigate('AcademyProfile')}
@@ -223,9 +226,13 @@ export default function MoreTabScreen({ navigation }) {
             <Text style={styles.planBadgeText}>{planLabel}</Text>
           </View>
         </View>
-        {/* Edit pencil removed per user request — the profile card
-            itself is still tappable, but the small right-side icon was
-            redundant with that and not yet wired to an edit screen. */}
+        <View
+          // hitSlop-style padding via the parent TouchableOpacity — the
+          // whole card is already tappable, so this is purely visual.
+          style={styles.profileEditIcon}
+        >
+          <Edit3 size={16} color={palette.purple.vivid} strokeWidth={2.4} />
+        </View>
       </TouchableOpacity>
 
       {/* ───── Grid menu ─────
@@ -420,6 +427,15 @@ const styles = StyleSheet.create({
     marginTop: 6,
   },
   planBadgeText: { ...type.micro, color: palette.purple.on, fontWeight: '700' },
+  // Small round pencil chip on the right side of the profile card.
+  // Purely visual — the whole card is already tappable, so no
+  // separate press handler is needed.
+  profileEditIcon: {
+    width: 34, height: 34, borderRadius: 17,
+    backgroundColor: palette.purple.soft,
+    alignItems: 'center', justifyContent: 'center',
+    marginLeft: spacing.sm,
+  },
   profileEditButton: {
     width: 36, height: 36, borderRadius: 18,
     backgroundColor: palette.borderSoft,

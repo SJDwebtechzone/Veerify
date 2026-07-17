@@ -117,19 +117,30 @@ export default function AdminDashboardScreen({ navigation }) {
   // the hero.
   const [subscription, setSubscription] = useState(null);
 
+  // Today's institution-wide attendance %, powering the dedicated
+  // dashboard card. Kept separate from `data` so a failure fetching
+  // it doesn't wipe out the other stats.
+  const [todayAtt, setTodayAtt] = useState(null);
+
   const load = useCallback(async () => {
     try {
-      // Both the dashboard summary and the subscription phase ride the same
-      // refresh — pull in parallel so pull-to-refresh updates the banner too.
-      const [dashRes, subRes] = await Promise.all([
+      // All three ride the same refresh so pull-to-refresh updates
+      // everything at once. .catch on the non-critical ones keeps the
+      // dashboard from failing entirely if any single endpoint hiccups.
+      const [dashRes, subRes, attRes] = await Promise.all([
         apiClient.get('/admin/dashboard'),
         apiClient.get('/onboarding/subscription-status').catch((err) => {
           console.log('[AdminDashboard] subscription-status error:', err.message);
           return null;
         }),
+        apiClient.get('/attendance/institution/today').catch((err) => {
+          console.log('[AdminDashboard] today attendance error:', err.message);
+          return null;
+        }),
       ]);
       setData(dashRes.data || {});
       if (subRes && subRes.data) setSubscription(subRes.data);
+      setTodayAtt(attRes?.data?.today || null);
     } catch (err) {
       // Leave the previous snapshot in place on transient errors so the
       // screen doesn't flash zeros.
@@ -222,16 +233,27 @@ export default function AdminDashboardScreen({ navigation }) {
       onPress: () => navigation.navigate('Earnings'),
     },
     {
-      label: 'Attendance',
-      value: counts.attendance_pct == null ? '—' : `${counts.attendance_pct}%`,
-      delta: counts.attendance_pct == null ? 'No data yet' : 'This month',
+      // Today's attendance % across every active batch/branch. The
+      // number is derived from live attendance records marked by
+      // trainers / branch admins so it refreshes the moment marks land.
+      // Delta line surfaces the raw counts so admins can eyeball what
+      // the % actually represents ("12 of 20 marked today").
+      label: "Today's Attendance",
+      value: todayAtt == null
+        ? '—'
+        : `${todayAtt.percentage}%`,
+      delta: todayAtt == null
+        ? 'No data yet'
+        : todayAtt.marked === 0
+          ? 'Nothing marked yet today'
+          : `${todayAtt.present} / ${todayAtt.marked} marked today`,
       accent: palette.teal,
       icon: ClipboardCheck,
       // Attendance is recorded per batch — open the batch list so the
-      // admin can pick a batch and drill into its attendance history.
+      // admin can pick a batch and drill into its attendance summary.
       onPress: () => navigation.navigate('BatchesList'),
     },
-  ]), [counts, navigation]);
+  ]), [counts, navigation, todayAtt]);
 
   // Revenue chart from the rolling 6-month series. The chart kit needs at
   // least one non-zero datum or it draws a flat line; if every month is 0

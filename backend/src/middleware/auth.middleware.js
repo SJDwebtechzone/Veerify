@@ -1,14 +1,22 @@
 const jwt = require('jsonwebtoken');
 
-// Verify JWT token from Authorization header
+// Verify JWT token. Reads from either:
+//   1. Authorization: Bearer <token> header (default)
+//   2. ?token=<token> query param (needed for browser-initiated GETs
+//      like PDF downloads, since the browser won't send the header
+//      when you Linking.openURL a signed URL).
 exports.verifyToken = (req, res, next) => {
+  let token = null;
   const authHeader = req.headers.authorization;
-
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ message: 'No token provided' });
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    token = authHeader.split(' ')[1];
+  } else if (req.query && typeof req.query.token === 'string' && req.query.token) {
+    token = req.query.token;
   }
 
-  const token = authHeader.split(' ')[1];
+  if (!token) {
+    return res.status(401).json({ message: 'No token provided' });
+  }
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);

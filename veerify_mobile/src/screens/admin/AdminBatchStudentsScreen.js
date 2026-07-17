@@ -161,12 +161,13 @@ export default function AdminBatchStudentsScreen({ route, navigation }) {
               : `${enrollments.length} student${enrollments.length === 1 ? '' : 's'} enrolled`}
           </Text>
         </View>
-        {/* Mark Attendance shortcut — opens the same bulk-marking screen
-            the trainer uses. Backend accepts admin role (branch admins
-            can mark for their own branch's batches) and audits every
-            create/update into attendance_history. */}
+        {/* Attendance shortcut — opens the READ-ONLY summary screen
+            (Today's % + current-month %). Institution admins never
+            reach the trainer's marking screen from here per spec;
+            marking stays with the trainer or branch admin from their
+            own dedicated flow. */}
         <TouchableOpacity
-          onPress={() => navigation.navigate('BatchStudents', {
+          onPress={() => navigation.navigate('AdminAttendanceSummary', {
             batchId: batchId,
             batchName: batch?.name || 'Batch',
           })}

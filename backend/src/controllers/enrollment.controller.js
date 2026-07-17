@@ -118,6 +118,9 @@ exports.getEnrollmentsForMyInstitution = async (req, res) => {
          e.payment_mode,
          e.paid_at,
          e.payment_reference,
+         e.payment_link_enabled,
+         e.payment_link_url,
+         e.payment_link_sent_at,
 
          u.id    AS student_id,
          u.name  AS student_name,
@@ -272,7 +275,20 @@ exports.enrollInBatch = async (req, res) => {
         }
         studentId = u.id;
       } else {
-        // Create a fresh student account with a temp password.
+        // Create a fresh student account. Two paths:
+        //
+        //   • Payment link ON  → account lands as status='pending' with
+        //     a random unusable password. NO credentials email or
+        //     welcome SMS goes out yet — they're deferred until the
+        //     Razorpay webhook confirms payment, at which point
+        //     activateStudentAfterPayment() rotates the password,
+        //     flips status='active', and mails everything.
+        //
+        //   • Payment link OFF → existing behaviour: status='active',
+        //     temp password mailed immediately.
+        //
+        // The flag is read here so the two paths share the same INSERT.
+        const linkEnabled = req.body?.enable_payment_link === true;
         const tempPassword = generateTempPassword();
         const hashed = await bcrypt.hash(tempPassword, 10);
         // Find the admin's institution so we link the new student to it.
@@ -281,30 +297,38 @@ exports.enrollInBatch = async (req, res) => {
           [req.user.id],
         );
         const institutionId = adminInst.rows[0]?.institution_id || null;
-        // must_change_password=TRUE — admin-mode enrolment generated the
-        // student's password and emails it to them, so the mobile pops
-        // the first-login "set a new password" dialog on their next sign-in.
+        // status: 'pending' when payment link — the login controller
+        //         short-circuits with PAYMENT_PENDING so the student
+        //         can't sign in until the webhook activates them.
+        //         'active' otherwise (offline payment_mode branch).
+        // must_change_password=TRUE either way — the student receives
+        //         the temp password after payment (or right now, on
+        //         the offline path) and the first-login dialog fires.
         const insertUser = await pool.query(
           `INSERT INTO users (name, email, phone, password, role, institution_id,
-                              must_change_password)
-           VALUES ($1, $2, $3, $4, 'student', $5, TRUE)
+                              must_change_password, status)
+           VALUES ($1, $2, $3, $4, 'student', $5, TRUE, $6)
            RETURNING id, name, email`,
           [cleanName, cleanEmail,
            String(contact_number || '').trim() || null,
-           hashed, institutionId],
+           hashed, institutionId,
+           linkEnabled ? 'pending' : 'active'],
         );
         studentId = insertUser.rows[0].id;
-        // Defer the send until after the transaction commits so we
-        // don't email / SMS a student whose enrollment ultimately fails.
-        // We also stash the phone here so the welcome SMS has somewhere
-        // to land — falls back to null if the admin didn't collect one.
-        createdStudentCreds = {
-          to: cleanEmail,
-          name: cleanName,
-          loginEmail: cleanEmail,
-          password: tempPassword,
-          phone: String(contact_number || '').trim() || null,
-        };
+        // ONLY stash the credentials-send payload when we intend to
+        // send it immediately (offline path). When the payment link is
+        // enabled, we deliberately leave createdStudentCreds null so
+        // the post-transaction send-block below is skipped — the
+        // webhook path fires the mail after payment.
+        if (!linkEnabled) {
+          createdStudentCreds = {
+            to: cleanEmail,
+            name: cleanName,
+            loginEmail: cleanEmail,
+            password: tempPassword,
+            phone: String(contact_number || '').trim() || null,
+          };
+        }
       }
     }
 
@@ -412,16 +436,110 @@ exports.enrollInBatch = async (req, res) => {
       [studentId, batch_id, batch.institution_id, batch.course_price || null]
     );
 
-    // ── Offline payment branch ───────────────────────────────────────
-    // When an admin enrols a student and supplies a payment_mode (cash,
-    // upi, bank, cheque), we treat the fee as collected at the counter
-    // and flip the enrolment to 'paid' in the same transaction. This
-    // skips the Razorpay / mock-pay step and lets the admin record the
-    // sale in one shot. Self-enrolled students never set this branch —
-    // they continue through the existing online-pay flow.
+    // ── Admin-mode: pick the payment path ────────────────────────
+    // Two branches now, driven by req.body.enable_payment_link:
+    //
+    //   • ON  → mint a Razorpay Payment Link, email it to the student,
+    //          leave the enrolment as payment_status='pending'. The
+    //          webhook flips it to 'paid' only when Razorpay confirms.
+    //          Marked revenue_channel='wallet' so downstream reporting
+    //          knows the (eventual) settlement belongs on the
+    //          institution/branch wallet after platform + gateway
+    //          deductions.
+    //
+    //   • OFF → existing offline-payment_mode flow. Money never
+    //          touched the platform, so revenue_channel='revenue':
+    //          the fee appears in Institution/Branch Revenue only
+    //          and never affects the wallet balance.
     const ALLOWED_MODES = ['cash', 'upi', 'bank', 'cheque'];
     const rawMode = String(req.body?.payment_mode || '').trim().toLowerCase();
-    if (req.body?.admin_mode === true && rawMode) {
+    const linkEnabled = req.body?.enable_payment_link === true;
+    const isAdminMode = req.body?.admin_mode === true;
+
+    if (isAdminMode && linkEnabled) {
+      // ── Payment-link path ────────────────────────────────────
+      // Mint a Razorpay Payment Link tied to this enrolment with
+      // notes.action='enrollment_new' so the existing webhook
+      // (/api/payments/webhook) flips the row to 'paid' on success.
+      const enrollmentId = result.rows[0].id;
+      const amount = Number(batch.course_price) || 0;
+      if (amount <= 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          message: 'This course has no price configured — cannot mint a payment link.',
+        });
+      }
+      // Look up the student + institution for the Razorpay customer.
+      const stu = await client.query(
+        `SELECT u.name, u.email, u.phone FROM users u WHERE u.id = $1`,
+        [studentId],
+      );
+      const inst = await client.query(
+        `SELECT id, name FROM institutions WHERE id = $1`,
+        [batch.institution_id],
+      );
+      const { createPaymentLink } = require('../utils/razorpay');
+      const link = await createPaymentLink({
+        amountInRupees: amount,
+        institution: {
+          id:          inst.rows[0]?.id,
+          name:        inst.rows[0]?.name || 'Veerify Academy',
+          owner_name:  stu.rows[0]?.name,
+          owner_email: stu.rows[0]?.email,
+          owner_phone: stu.rows[0]?.phone,
+          plan_name:   batch.course_name || 'Course fee',
+        },
+        notes: {
+          action:        'enrollment_new',
+          enrollment_id: String(enrollmentId),
+          student_id:    String(studentId),
+        },
+      });
+      if (!link.ok) {
+        await client.query('ROLLBACK');
+        return res.status(502).json({
+          message: link.error || 'Could not create payment link. Please try again.',
+        });
+      }
+      const upd = await client.query(
+        `UPDATE enrollments SET
+           payment_status       = 'pending',
+           payment_reference    = $1,
+           payment_link_enabled = TRUE,
+           payment_link_url     = $2,
+           payment_link_sent_at = NOW(),
+           payment_amount       = COALESCE(payment_amount, $3),
+           revenue_channel      = 'wallet'
+         WHERE id = $4
+         RETURNING *`,
+        [link.link.id, link.link.short_url, amount, enrollmentId],
+      );
+      result.rows[0] = upd.rows[0];
+
+      // Fire-and-forget email to the student with the Razorpay link.
+      // We build the message inline here rather than adding another
+      // mailer helper — the copy is one paragraph and one link.
+      try {
+        const { sendMail } = require('../utils/mailer');
+        if (typeof sendMail === 'function' && stu.rows[0]?.email) {
+          sendMail({
+            to:      stu.rows[0].email,
+            subject: `Complete your enrolment payment — ${inst.rows[0]?.name || 'Veerify'}`,
+            text:
+              `Hi ${stu.rows[0].name || 'there'},\n\n` +
+              `You've been enrolled in ${batch.course_name || 'a course'} at ${inst.rows[0]?.name || 'Veerify'}.\n\n` +
+              `Please complete your payment using the link below:\n\n` +
+              `${link.link.short_url}\n\n` +
+              `Amount payable: ₹${amount}\n\n` +
+              `Once your payment is confirmed we'll email your login credentials + a welcome guide so you can start learning right away. ` +
+              `Your enrolment stays in Pending Payment status until then — no account access before payment.`,
+          }).catch((e) => console.warn('[enroll] link email failed:', e?.message));
+        }
+      } catch (mailErr) {
+        console.warn('[enroll] mailer helper unavailable:', mailErr?.message);
+      }
+    } else if (isAdminMode && rawMode) {
+      // ── Offline-payment path (unchanged behaviour) ──────────────
       if (!ALLOWED_MODES.includes(rawMode)) {
         await client.query('ROLLBACK');
         return res.status(400).json({
@@ -436,13 +554,27 @@ exports.enrollInBatch = async (req, res) => {
            payment_mode      = $1,
            payment_reference = $2,
            payment_amount    = COALESCE(payment_amount, $3),
-           paid_at           = NOW()
+           paid_at           = NOW(),
+           revenue_channel   = 'revenue'
          WHERE id = $4
          RETURNING *`,
         [rawMode, reference, amount, result.rows[0].id]
       );
       // Replace the row we return below so the caller sees the paid state.
       result.rows[0] = paid.rows[0];
+
+      // Generate + email the invoice for this offline sale. Fire after
+      // the transaction commits (below) so we don't do disk IO inside
+      // the txn — deferred via setImmediate.
+      const paidEnrollmentId = paid.rows[0].id;
+      setImmediate(async () => {
+        try {
+          const { generateEnrollmentInvoice } = require('../utils/invoiceService');
+          await generateEnrollmentInvoice({ enrollmentId: paidEnrollmentId });
+        } catch (e) {
+          console.error('[enroll] offline invoice failed:', e?.message);
+        }
+      });
     }
 
     // Update student's institution_id (if not set)
@@ -660,6 +792,210 @@ exports.createEnrollmentPaymentLink = async (req, res) => {
     });
   } catch (err) {
     console.error('createEnrollmentPaymentLink error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// activateStudentAfterPayment — called by the Razorpay webhook right
+// after enrollment_new flips payment_status='paid'. Rotates the temp
+// password, activates the users row, then fires the credentials email
+// and welcome SMS. Idempotent — subsequent calls for the same
+// enrollment are a no-op (status stays 'active', no duplicate mail).
+//
+// Returns { ok, sent } — used by the webhook only for logging; the
+// webhook always acks 200 to Razorpay regardless.
+exports.activateStudentAfterPayment = async function (enrollmentId) {
+  try {
+    const r = await pool.query(
+      `SELECT e.id, e.student_id, e.payment_amount,
+              c.name AS course_name,
+              i.name AS institution_name,
+              u.name AS student_name, u.email AS student_email,
+              u.phone AS student_phone, u.status AS user_status
+         FROM enrollments e
+         JOIN batches b       ON b.id = e.batch_id
+         JOIN courses c       ON c.id = b.course_id
+         JOIN institutions i  ON i.id = e.institution_id
+         JOIN users u         ON u.id = e.student_id
+        WHERE e.id = $1`,
+      [enrollmentId],
+    );
+    if (r.rows.length === 0) return { ok: false, error: 'Enrollment not found' };
+    const row = r.rows[0];
+
+    // Idempotency guard — if the student is already active, they've
+    // already been credential-mailed. A webhook retry from Razorpay
+    // shouldn't send a fresh password over an active account (that
+    // would silently rotate the student's password after they may
+    // have already logged in and set their own).
+    if (row.user_status === 'active') {
+      return { ok: true, sent: false, alreadyActive: true };
+    }
+
+    // Rotate the temp password so a NEW random one is emailed. The
+    // password set at enrolment time was never sent to the student
+    // (that mail was deferred pending payment), so nothing is lost.
+    const tempPassword = generateTempPassword();
+    const hashed = await bcrypt.hash(tempPassword, 10);
+    await pool.query(
+      `UPDATE users SET
+         password             = $1,
+         status               = 'active',
+         must_change_password = TRUE,
+         updated_at           = NOW()
+       WHERE id = $2`,
+      [hashed, row.student_id],
+    );
+
+    // Send credentials email — same helper the offline / trainer
+    // flows already use, so the copy stays consistent.
+    try {
+      await sendStudentCredentialsEmail({
+        to:              row.student_email,
+        name:            row.student_name,
+        loginEmail:      row.student_email,
+        password:        tempPassword,
+        institutionName: row.institution_name,
+        courseName:      row.course_name,
+      });
+    } catch (mailErr) {
+      console.warn('[activateStudent] credentials mail failed:', mailErr?.message);
+    }
+
+    // Welcome SMS (fire-and-forget). Falls through silently when the
+    // student has no phone.
+    if (row.student_phone) {
+      dispatchWelcomeSms({
+        phone:        row.student_phone,
+        name:         row.student_name,
+        role:         'student',
+        loginId:      row.student_email,
+        tempPassword,
+      });
+    }
+
+    return { ok: true, sent: true };
+  } catch (err) {
+    console.error('[activateStudent] error:', err);
+    return { ok: false, error: err?.message || 'Activate failed' };
+  }
+};
+
+// POST /api/enrollments/:id/resend-payment-link
+//
+// Admin re-mints the Razorpay Payment Link for an enrolment that's
+// still pending. Useful when the original email got lost or the
+// student wants a fresh URL. Only works when payment_link_enabled=TRUE
+// AND the row hasn't been paid yet. Returns { payment_url } so the
+// admin UI can also render a copy button.
+exports.resendPaymentLink = async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) return res.status(400).json({ message: 'Invalid id' });
+
+    // Institution scope — the caller's institution must own the batch
+    // this enrolment belongs to.
+    const u = await pool.query(
+      `SELECT institution_id FROM users WHERE id = $1`, [req.user.id],
+    );
+    const adminInst = u.rows[0]?.institution_id;
+    if (!adminInst) return res.status(403).json({ message: 'No institution linked' });
+
+    const e = await pool.query(
+      `SELECT e.*, c.name AS course_name, c.price AS course_price,
+              i.name AS institution_name,
+              u.name AS student_name, u.email AS student_email, u.phone AS student_phone
+         FROM enrollments e
+         JOIN batches b ON b.id = e.batch_id
+         JOIN courses c ON c.id = b.course_id
+         JOIN institutions i ON i.id = e.institution_id
+         JOIN users u ON u.id = e.student_id
+        WHERE e.id = $1`,
+      [id],
+    );
+    if (e.rows.length === 0) return res.status(404).json({ message: 'Enrollment not found' });
+    const row = e.rows[0];
+    // The caller can be the main-institution admin OR a sub-branch
+    // admin whose branch owns the batch's institution row.
+    if (row.institution_id !== adminInst) {
+      const parent = await pool.query(
+        `SELECT 1 FROM institutions
+          WHERE id = $1 AND parent_institution_id = $2`,
+        [row.institution_id, adminInst],
+      );
+      if (parent.rows.length === 0) {
+        return res.status(403).json({ message: 'Not your enrollment' });
+      }
+    }
+    if (!row.payment_link_enabled) {
+      return res.status(400).json({
+        message: 'Payment Link is not enabled for this enrolment. Toggle it on and re-enrol to send a link.',
+      });
+    }
+    if (row.payment_status === 'paid') {
+      return res.status(400).json({ message: 'This enrolment is already paid.' });
+    }
+
+    const amount = Number(row.payment_amount || row.course_price || 0);
+    const { createPaymentLink } = require('../utils/razorpay');
+    const link = await createPaymentLink({
+      amountInRupees: amount,
+      institution: {
+        id:          row.institution_id,
+        name:        row.institution_name,
+        owner_name:  row.student_name,
+        owner_email: row.student_email,
+        owner_phone: row.student_phone,
+        plan_name:   row.course_name,
+      },
+      notes: {
+        action:        'enrollment_new',
+        enrollment_id: String(row.id),
+        student_id:    String(row.student_id),
+      },
+    });
+    if (!link.ok) {
+      return res.status(502).json({
+        message: link.error || 'Could not regenerate the payment link.',
+      });
+    }
+    const upd = await pool.query(
+      `UPDATE enrollments
+          SET payment_reference    = $2,
+              payment_link_url     = $3,
+              payment_link_sent_at = NOW(),
+              payment_status       = 'pending'
+        WHERE id = $1
+        RETURNING *`,
+      [row.id, link.link.id, link.link.short_url],
+    );
+
+    // Fire the email again (best-effort).
+    try {
+      const { sendMail } = require('../utils/mailer');
+      if (typeof sendMail === 'function' && row.student_email) {
+        sendMail({
+          to:      row.student_email,
+          subject: `Payment reminder — ${row.institution_name}`,
+          text:
+            `Hi ${row.student_name || 'there'},\n\n` +
+            `Here's a fresh link to complete your enrolment payment:\n\n` +
+            `${link.link.short_url}\n\n` +
+            `Amount payable: ₹${amount}\n\n` +
+            `Your enrolment stays as Pending Payment until the gateway confirms your transaction.`,
+        }).catch((e) => console.warn('[resendPaymentLink] mail failed:', e?.message));
+      }
+    } catch (mailErr) {
+      console.warn('[resendPaymentLink] mailer helper unavailable:', mailErr?.message);
+    }
+
+    res.json({
+      message:      'Payment link regenerated and emailed to the student.',
+      payment_url:  link.link.short_url,
+      enrollment:   upd.rows[0],
+    });
+  } catch (err) {
+    console.error('resendPaymentLink error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
@@ -962,6 +1298,12 @@ exports.updateMyProfile = async (req, res) => {
 };
 
 // GET my enrollments (student)
+//
+// Includes course_image_url + institution_logo_url so the mobile
+// Enrolled Programs cards can render the real thumbnail per course.
+// The mobile falls back through course image → institution logo →
+// branded placeholder, so any missing image degrades gracefully
+// without breaking the card layout.
 exports.getMyEnrollments = async (req, res) => {
   try {
     const studentId = req.user.id;
@@ -970,7 +1312,9 @@ exports.getMyEnrollments = async (req, res) => {
       `SELECT e.*,
               b.name AS batch_name, b.course_id, b.days_of_week, b.start_time, b.end_time, b.mode,
               c.name AS course_name, c.price AS course_price,
+              c.image_url AS course_image_url,
               i.name AS institution_name, i.city AS institution_city,
+              i.logo_url AS institution_logo_url,
               u.name AS trainer_name
        FROM enrollments e
        JOIN batches b ON e.batch_id = b.id

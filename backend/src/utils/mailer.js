@@ -831,6 +831,30 @@ async function sendBranchSetupEmail({
   }
 }
 
+// Generic sendMail — used by ad-hoc transactional flows (payment
+// link, resend link) that don't warrant a dedicated template. Accepts
+// { to, subject, text?, html? }. Returns { ok, messageId } on success
+// or { ok: false, error } on failure. Never throws.
+async function sendMail({ to, subject, text, html }) {
+  try {
+    const t = getTransporter();
+    if (!t) return { ok: false, error: 'SMTP not configured' };
+    const from = `"${FROM_NAME}" <${SMTP_USER}>`;
+    const finalText = text || (html ? toPlainText(html) : '');
+    const info = await t.sendMail({
+      from, to, subject,
+      text:    finalText,
+      html:    html || undefined,
+      replyTo: SUPPORT_EMAIL,
+      headers: transactionalHeaders(),
+    });
+    return { ok: true, messageId: info.messageId };
+  } catch (err) {
+    console.warn('[mailer.sendMail] failed:', err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
 module.exports = {
   sendApprovalEmail,
   sendActivationEmail,
@@ -838,5 +862,6 @@ module.exports = {
   sendTrainerCredentialsEmail,
   sendStudentCredentialsEmail,
   sendBranchSetupEmail,
+  sendMail,
   verifyTransporter,
 };

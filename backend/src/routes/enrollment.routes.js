@@ -39,6 +39,13 @@ router.get('/:id/payment-status',
   verifyToken, requireRole('student'),
   enrollmentController.paymentStatus);
 
+// Admin re-mints and re-emails the Razorpay Payment Link for a
+// pending enrolment. Powers the "Resend link" button on the admin
+// Students / enrolment details screens.
+router.post('/:id/resend-payment-link',
+  verifyToken, requireRole('admin'),
+  enrollmentController.resendPaymentLink);
+
 // Student-initiated renewal — mints a Razorpay payment link scoped to
 // the student. Mobile opens the returned URL in the browser; the
 // existing Razorpay webhook flips payment_status to 'paid' on success.

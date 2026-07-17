@@ -25,9 +25,11 @@ import {
 } from 'lucide-react-native';
 import { launchImageLibrary, launchCamera } from 'react-native-image-picker';
 
+import { useFocusEffect } from '@react-navigation/native';
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 import { confirm } from '../../components/ConfirmDialog';
+import TrainerPicker from '../../components/TrainerPicker';
 
 // Resolve a stored /uploads/<file> path to an absolute URL that works on the
 // Android emulator (which can't reach localhost — it maps to 10.0.2.2).
@@ -108,6 +110,32 @@ export default function CreateCourseScreen({ navigation, route }) {
   const [loading, setLoading] = useState(false);
   const [timeModalVisible, setTimeModalVisible] = useState(false);
   const [activeTimeField, setActiveTimeField] = useState(null); // 'class_start_time' | 'class_end_time'
+
+  // Trainer roster used by the searchable dropdown. Reloaded on
+  // screen focus so newly-added trainers appear without the admin
+  // having to leave and re-enter Create Course.
+  const [trainers, setTrainers] = useState([]);
+  const [trainersLoading, setTrainersLoading] = useState(true);
+  useFocusEffect(
+    React.useCallback(() => {
+      let cancelled = false;
+      (async () => {
+        setTrainersLoading(true);
+        try {
+          const r = await apiClient.get('/trainers');
+          const rows = r.data?.trainers || [];
+          if (!cancelled) setTrainers(rows);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.log('[CreateCourse] trainers load error:', err?.message);
+          if (!cancelled) setTrainers([]);
+        } finally {
+          if (!cancelled) setTrainersLoading(false);
+        }
+      })();
+      return () => { cancelled = true; };
+    }, []),
+  );
   const [form, setForm] = useState({
     // basic
     name:                  existing?.name              || '',
@@ -164,6 +192,10 @@ export default function CreateCourseScreen({ navigation, route }) {
     // free-text input stored in badge_custom.
     badge:                 existing?.badge             || 'new',
     badge_custom:          existing?.badge_custom      || '',
+    // trainer_id — foreign key to trainers.id (migration 064). The
+    // picker below saves the id; trainer_name is auto-derived server-
+    // side so this form no longer needs to carry both.
+    trainer_id:            existing?.trainer_id != null ? String(existing.trainer_id) : '',
     trainer_name:          existing?.trainer_name      || '',
     // Branch name is prefilled from the academy's institution name on
     // first open via a useEffect below; existing courses keep their own.
@@ -313,6 +345,14 @@ export default function CreateCourseScreen({ navigation, route }) {
         price:           form.price ? parseFloat(form.price) : 0,
         admission_fee:   admissionFeeVal,
         additional_fees: cleanFees,
+        // Trainer — send trainer_id (server derives trainer_name
+        // from it so the label + FK stay in sync). Blank string → null
+        // so the row can be cleared.
+        trainer_id:      form.trainer_id ? parseInt(form.trainer_id, 10) || null : null,
+        // Legacy trainer_name is intentionally dropped from the outgoing
+        // payload — the server ignores it when trainer_id is present
+        // and derives the label from the trainer's users.name.
+        trainer_name:    undefined,
         // Resolve the badge: when "Other" is picked we send the custom
         // text the admin typed; otherwise the canonical key (new /
         // popular / kids_special).
@@ -685,7 +725,22 @@ export default function CreateCourseScreen({ navigation, route }) {
           />
         ) : null}
 
-        <Field label="Trainer name" value={form.trainer_name} onChange={(v) => update('trainer_name', v)} placeholder="Sensei Arun" />
+        {/* Trainer — searchable dropdown populated from /trainers.
+            Only the trainer_id is saved; the label is derived at
+            render time so renames / skill edits show up instantly. */}
+        <View style={styles.fieldWrap}>
+          <Text style={styles.label}>Trainer</Text>
+          <TrainerPicker
+            value={form.trainer_id}
+            onChange={(id) => update('trainer_id', id != null ? String(id) : '')}
+            trainers={trainers}
+            loading={trainersLoading}
+            placeholder="Select a trainer"
+          />
+          <Text style={styles.helperText}>
+            {/* Trainer roster refreshes each time you open this form. Add trainers from More → Trainers. */}
+          </Text>
+        </View>
 
         {/* Branch name — read-only display. The value is pulled from the
             academy setup so admins don't have to retype it and can't

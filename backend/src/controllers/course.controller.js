@@ -54,6 +54,13 @@ function sanitizeCoursePayload(body) {
     intro_video_url:        body.intro_video_url || null,
     curriculum,
     badge:                  ALLOWED_BADGES.has(body.badge) ? body.badge : null,
+    // trainer_id — foreign key to trainers.id (migration 064). When
+    // set, we derive trainer_name from the row so the label + FK stay
+    // in sync automatically. Falls back to body.trainer_name for
+    // legacy callers still sending a free-text name.
+    trainer_id:             body.trainer_id != null && body.trainer_id !== ''
+      ? parseInt(body.trainer_id, 10) || null
+      : null,
     trainer_name:           body.trainer_name || null,
     branch_name:            body.branch_name || null,
     mode:                   ALLOWED_MODES.has(body.mode) ? body.mode : 'offline',
@@ -78,6 +85,25 @@ exports.createCourse = async (req, res) => {
       });
     }
 
+    // If a trainer_id was picked from the searchable dropdown, resolve
+    // the trainer's display name so trainer_name stays in sync. When
+    // no trainer_id was sent (legacy path or admin left it blank), we
+    // keep whatever body.trainer_name was on the payload.
+    if (p.trainer_id) {
+      const tr = await pool.query(
+        `SELECT u.name FROM trainers t
+           JOIN users u ON u.id = t.user_id
+          WHERE t.id = $1 AND t.institution_id = $2`,
+        [p.trainer_id, institutionId],
+      );
+      if (tr.rows.length === 0) {
+        return res.status(400).json({
+          message: 'Selected trainer does not belong to your academy.',
+        });
+      }
+      p.trainer_name = tr.rows[0].name;
+    }
+
     const result = await pool.query(
       `INSERT INTO courses (
          institution_id, name, short_description, description, category,
@@ -88,7 +114,7 @@ exports.createCourse = async (req, res) => {
          belt_system, certificate_available,
          image_url, intro_video_url, curriculum,
          badge, trainer_name, branch_name,
-         mode, status
+         mode, status, trainer_id
        )
        VALUES (
          $1, $2, $3, $4, $5,
@@ -99,7 +125,7 @@ exports.createCourse = async (req, res) => {
          $17, $18,
          $19, $20, $21::jsonb,
          $22, $23, $24,
-         $25, $26
+         $25, $26, $27
        )
        RETURNING *`,
       [
@@ -111,7 +137,7 @@ exports.createCourse = async (req, res) => {
         p.belt_system, p.certificate_available,
         p.image_url, p.intro_video_url, JSON.stringify(p.curriculum),
         p.badge, p.trainer_name, p.branch_name,
-        p.mode, p.status,
+        p.mode, p.status, p.trainer_id,
       ],
     );
 
@@ -285,6 +311,36 @@ exports.updateCourse = async (req, res) => {
     const status = has('status') ? (ALLOWED_STATUS.has(body.status)  ? body.status : null) : null;
     const badge  = has('badge')  ? (ALLOWED_BADGES.has(body.badge)   ? body.badge  : null) : null;
 
+    // trainer_id — when present, ensure the trainer belongs to this
+    // institution and derive trainer_name so the label stays in sync.
+    let trainerIdParam = null;
+    let trainerNameParam = has('trainer_name') ? body.trainer_name : null;
+    if (has('trainer_id')) {
+      trainerIdParam = body.trainer_id != null && body.trainer_id !== ''
+        ? (parseInt(body.trainer_id, 10) || null)
+        : null;
+      if (trainerIdParam) {
+        // Scope-check: the trainer must be in the admin's institution.
+        const adminInstRes = await pool.query(
+          'SELECT institution_id FROM users WHERE id = $1',
+          [req.user.id],
+        );
+        const adminInst = adminInstRes.rows[0]?.institution_id;
+        const tr = await pool.query(
+          `SELECT u.name FROM trainers t
+             JOIN users u ON u.id = t.user_id
+            WHERE t.id = $1 AND t.institution_id = $2`,
+          [trainerIdParam, adminInst],
+        );
+        if (tr.rows.length === 0) {
+          return res.status(400).json({
+            message: 'Selected trainer does not belong to your academy.',
+          });
+        }
+        trainerNameParam = tr.rows[0].name;
+      }
+    }
+
     const result = await pool.query(
       `UPDATE courses SET
          name                  = COALESCE($1,  name),
@@ -311,7 +367,8 @@ exports.updateCourse = async (req, res) => {
          trainer_name          = COALESCE($22, trainer_name),
          branch_name           = COALESCE($23, branch_name),
          mode                  = COALESCE($24, mode),
-         status                = COALESCE($25, status)
+         status                = COALESCE($25, status),
+         trainer_id            = COALESCE($27, trainer_id)
        WHERE id = $26
        RETURNING *`,
       [
@@ -337,11 +394,12 @@ exports.updateCourse = async (req, res) => {
         // curriculum needs the JSONB normaliser; if absent, COALESCE keeps existing.
         has('curriculum')            ? JSON.stringify(sanitizeCoursePayload(body).curriculum) : null,
         badge,
-        has('trainer_name')          ? body.trainer_name                                      : null,
+        trainerNameParam,
         has('branch_name')           ? body.branch_name                                       : null,
         mode,
         status,
         id,
+        trainerIdParam,
       ],
     );
 

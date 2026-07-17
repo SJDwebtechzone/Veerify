@@ -134,6 +134,11 @@ app.use('/api/feedback', require('./src/routes/feedback.routes'));
 // Academy Rules, trainers see T&C / Privacy + Academy Rules / Belt Test.
 app.use('/api/legal-pages', require('./src/routes/legalPage.routes'));
 
+// Invoices — auto-generated after every successful Razorpay / offline
+// payment. GET /:id/pdf streams the file behind a role + ownership
+// check so guessed URLs can't leak someone else's invoice.
+app.use('/api/invoices', require('./src/routes/invoice.routes'));
+
 // MSG91 email diagnostics — dev-only. GET /api/dev/email-test?to=addr@x
 // fires the "welcome" template at the supplied address and returns
 // MSG91's raw response so you can prove the AUTHKEY + template id

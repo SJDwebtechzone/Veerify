@@ -280,7 +280,11 @@ export default function PaymentsTabScreen() {
         stickyHeaderIndices={[]}
       >
         {/* Header — wallet was here as a chip; it now lives in the teaser
-            card below the header so it gets the visual weight it deserves. */}
+            card below the header so it gets the visual weight it deserves.
+            The top-right Filter (SlidersHorizontal) icon has been removed
+            — it was a placeholder that didn't do anything real yet, and
+            leaving it in confused users into thinking there was hidden
+            filtering behind it. Bring it back once real filters are wired. */}
         <View style={styles.header}>
           <View style={{ flex: 1 }}>
             <Text style={styles.title}>Earnings</Text>
@@ -288,13 +292,6 @@ export default function PaymentsTabScreen() {
               {fmt(totals.collected)} collected this month
             </Text>
           </View>
-          <TouchableOpacity
-            onPress={() => placeholder('Filter')}
-            style={styles.iconButton}
-            activeOpacity={0.8}
-          >
-            <SlidersHorizontal size={20} color={palette.text} strokeWidth={2.2} />
-          </TouchableOpacity>
         </View>
 
         {/* ───── Wallet teaser card ─────

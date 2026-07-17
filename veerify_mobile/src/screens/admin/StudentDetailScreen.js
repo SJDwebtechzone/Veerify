@@ -21,16 +21,18 @@
 import React, { useEffect, useState } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, Image,
-  StyleSheet, StatusBar, Alert,
+  StyleSheet, StatusBar, Alert, ActivityIndicator,
 } from 'react-native';
 import apiClient from '../../api/client';
 import {
   ArrowLeft, MoreHorizontal, Edit3, Phone, Mail, MapPin,
   CalendarRange, GraduationCap, ClipboardCheck, Wallet, TrendingUp,
   ChevronRight, MessageCircle, Award, CheckCircle2, XCircle, Clock,
+  Send,
 } from 'lucide-react-native';
 
 import { palette, spacing, radius, shadows, type } from '../../theme';
+import { confirm } from '../../components/ConfirmDialog';
 
 // ─── Placeholder timeline / payments — replaced when wired to backend ────────
 // Placeholder rows have been removed. Until the real
@@ -62,6 +64,50 @@ export default function StudentDetailScreen({ navigation, route }) {
   // Distinct batches this student is enrolled in — powers the "Batches"
   // quick-stat tile. Previously hard-coded to 2 for every student.
   const [batchCount, setBatchCount] = useState(0);
+  // Which enrolment id is currently having its payment link resent
+  // (drives the spinner + disabled state on the resend chip).
+  const [resendingId, setResendingId] = useState(null);
+
+  // POST /api/enrollments/:id/resend-payment-link — regenerates the
+  // Razorpay link and re-emails the student. Best-effort with a friendly
+  // alert either way. Refreshes the local rows on success so the admin
+  // sees the "Fresh link sent" state without a manual reload.
+  const handleResend = async (enrollmentId, studentEmail) => {
+    if (!enrollmentId || resendingId) return;
+    setResendingId(enrollmentId);
+    try {
+      const r = await apiClient.post(
+        `/enrollments/${enrollmentId}/resend-payment-link`,
+      );
+      confirm({
+        title: 'Payment link sent',
+        message:
+          `A fresh payment link has been emailed${studentEmail ? ` to ${studentEmail}` : ''}. ` +
+          `The previous link is now invalid — only the newest one accepts payment.`,
+        variant:     'success',
+        confirmText: 'Got it',
+        hideCancel:  true,
+      });
+      // Bump the local `date` so the UI reflects that we just resent,
+      // even before the next enrollments refresh.
+      setPayments((prev) => prev.map((p) => (
+        p.id === enrollmentId
+          ? { ...p, last_resent: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) }
+          : p
+      )));
+    } catch (err) {
+      confirm({
+        title: 'Could not resend link',
+        message: err?.response?.data?.message
+          || 'The Razorpay call failed. Check the backend logs and try again.',
+        variant:     'warning',
+        confirmText: 'OK',
+        hideCancel:  true,
+      });
+    } finally {
+      setResendingId(null);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -78,6 +124,10 @@ export default function StudentDetailScreen({ navigation, route }) {
           amount: Number(e.payment_amount) || 0,
           status: e.payment_status || 'pending',
           mode:   e.payment_mode || null,
+          // Extra fields for the Resend Payment Link action — only
+          // exposed on pending rows where the admin toggled the
+          // link path (payment_link_enabled=true).
+          payment_link_enabled: !!e.payment_link_enabled,
           date:   e.paid_at
             ? new Date(e.paid_at).toLocaleDateString('en-IN', {
                 day: '2-digit', month: 'short', year: 'numeric',
@@ -334,7 +384,12 @@ export default function StudentDetailScreen({ navigation, route }) {
         <Card title="Recent Payments" subtitle={payments.length ? 'Most recent first' : 'No payments yet'}>
           {payments.map((p, idx) => (
             <View key={p.id}>
-              <PaymentRow payment={p} />
+              <PaymentRow
+                payment={p}
+                studentEmail={student?.email}
+                onResend={handleResend}
+                resending={resendingId === p.id}
+              />
               {idx < payments.length - 1 ? <Divider /> : null}
             </View>
           ))}
@@ -436,28 +491,58 @@ function PaySummaryItem({ label, value, color }) {
   );
 }
 
-function PaymentRow({ payment }) {
+function PaymentRow({ payment, studentEmail, onResend, resending }) {
   const map = {
     paid:    { color: palette.green,  label: 'Paid'    },
     pending: { color: palette.orange, label: 'Pending' },
     overdue: { color: palette.rose,   label: 'Overdue' },
     failed:  { color: palette.rose,   label: 'Failed'  },
+    expired: { color: palette.rose,   label: 'Expired' },
   };
   const m = map[payment.status] || map.pending;
   const modeLabel = payment.mode ? (PAYMENT_MODE_LABELS[payment.mode] || payment.mode) : null;
   const subtitle = payment.status === 'paid'
     ? `${modeLabel ? `${modeLabel} • ` : ''}${payment.date ? `Paid on ${payment.date}` : 'Paid'}`
-    : 'Due';
+    : payment.last_resent
+      ? `Due · Fresh link sent at ${payment.last_resent}`
+      : 'Due';
+
+  // Resend button only makes sense on rows that were minted with a
+  // payment link AND are still awaiting payment. Offline payment_mode
+  // rows or already-paid rows never show this action.
+  const canResend =
+    payment.payment_link_enabled &&
+    (payment.status === 'pending' || payment.status === 'failed' || payment.status === 'expired');
+
   return (
-    <View style={styles.payRow}>
-      <View style={{ flex: 1 }}>
-        <Text style={styles.payMonth}>{payment.course || 'Enrolment'}</Text>
-        <Text style={styles.payDate}>{subtitle}</Text>
+    <View>
+      <View style={styles.payRow}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.payMonth}>{payment.course || 'Enrolment'}</Text>
+          <Text style={styles.payDate}>{subtitle}</Text>
+        </View>
+        <Text style={styles.payAmount}>{formatRupees(payment.amount)}</Text>
+        <View style={[styles.payPill, { backgroundColor: m.color.soft }]}>
+          <Text style={[styles.payPillText, { color: m.color.on }]}>{m.label}</Text>
+        </View>
       </View>
-      <Text style={styles.payAmount}>{formatRupees(payment.amount)}</Text>
-      <View style={[styles.payPill, { backgroundColor: m.color.soft }]}>
-        <Text style={[styles.payPillText, { color: m.color.on }]}>{m.label}</Text>
-      </View>
+      {canResend ? (
+        <TouchableOpacity
+          onPress={() => onResend?.(payment.id, studentEmail)}
+          disabled={resending}
+          activeOpacity={0.85}
+          style={[styles.resendBtn, resending && { opacity: 0.7 }]}
+        >
+          {resending ? (
+            <ActivityIndicator size="small" color="#fff" />
+          ) : (
+            <Send size={13} color="#fff" strokeWidth={2.6} />
+          )}
+          <Text style={styles.resendBtnText}>
+            {resending ? 'Sending fresh link…' : 'Resend payment link'}
+          </Text>
+        </TouchableOpacity>
+      ) : null}
     </View>
   );
 }
@@ -693,4 +778,29 @@ const styles = StyleSheet.create({
     borderRadius: radius.pill,
   },
   payPillText: { ...type.micro, fontWeight: '700' },
+
+  // Resend Payment Link chip — sits under a pending row so the admin
+  // can mint a fresh Razorpay URL without leaving the profile. Filled
+  // vivid purple button reads as a clear CTA and matches every other
+  // primary action across the admin screens.
+  resendBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    alignSelf: 'stretch',
+    marginTop: spacing.sm,
+    marginBottom: spacing.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 10,
+    borderRadius: 10,
+    backgroundColor: palette.purple.vivid,
+    ...shadows.card,
+  },
+  resendBtnText: {
+    color: '#fff',
+    fontWeight: '800',
+    fontSize: 12,
+    letterSpacing: 0.3,
+  },
 });

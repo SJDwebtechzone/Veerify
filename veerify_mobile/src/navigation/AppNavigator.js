@@ -47,6 +47,7 @@ import AdminCertificatesScreen from '../screens/admin/AdminCertificatesScreen';
 import CertificateTemplatesScreen from '../screens/admin/CertificateTemplatesScreen';
 import CertificateTemplateEditorScreen from '../screens/admin/CertificateTemplateEditorScreen';
 import AdminSalaryScreen from '../screens/admin/AdminSalaryScreen';
+import AdminAttendanceSummaryScreen from '../screens/admin/AdminAttendanceSummaryScreen';
 import InstitutionLegalScreen from '../screens/admin/InstitutionLegalScreen';
 import LegalScreen from '../screens/shared/LegalScreen';
 import StudentCertificatesScreen from '../screens/student/StudentCertificatesScreen';
@@ -375,6 +376,15 @@ export default function AppNavigator() {
           <Stack.Screen
             name="AdminSalary"
             component={AdminSalaryScreen}
+            options={{ headerShown: false }}
+          />
+          {/* Read-only Attendance Summary for institution admins.
+              Replaces the trainer's marking screen when opened from
+              the Batch Students header — institutions have read-only
+              access per spec. */}
+          <Stack.Screen
+            name="AdminAttendanceSummary"
+            component={AdminAttendanceSummaryScreen}
             options={{ headerShown: false }}
           />
           {/* Institution-scoped policy editor — one screen, four tiles.

@@ -141,7 +141,55 @@ export default function EnrollmentFormScreen({ route, navigation }) {
   }, [adminBatches, pickedCourseId]);
 
   const batchId = pickedBatch?.id || paramBatchId || batch?.id;
-  const coursePrice = pickedBatch?.course_price || batch?.course_price || course?.price || 0;
+
+  // Refresh the picked batch's course fee on every selection change so
+  // the header + fee card show the LATEST value from the course row.
+  // Falls back to whatever `pickedBatch.course_price` was already in
+  // memory when the network fetch fails, so switching batches never
+  // leaves the header showing a stale price.
+  const [freshBatch, setFreshBatch] = useState(null);
+  useEffect(() => {
+    if (!batchId) { setFreshBatch(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await apiClient.get(`/batches/${batchId}`);
+        if (!cancelled) setFreshBatch(r?.data?.batch || null);
+      } catch (err) {
+        if (!cancelled) setFreshBatch(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [batchId]);
+
+  // Course fee resolution — always prefer the freshest source. Returns
+  // a Number when a real fee is configured (may be 0), null when we
+  // genuinely don't know yet (nothing picked / all sources undefined).
+  const coursePrice = useMemo(() => {
+    const raw =
+      freshBatch?.course_price ??
+      pickedBatch?.course_price ??
+      batch?.course_price ??
+      course?.price ??
+      null;
+    if (raw == null || raw === '') return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  }, [freshBatch, pickedBatch, batch, course]);
+
+  // Configured means "admin set a real positive fee". A stored 0 is
+  // treated as "not configured" for display purposes — a fresh course
+  // row defaults to price=0 in Postgres so there's no way to
+  // distinguish "explicit 0" from "never set" without a schema change,
+  // and no academy sets a real 0 fee intentionally.
+  const feeConfigured = coursePrice != null && coursePrice > 0;
+  const feeLabel = feeConfigured
+    ? `₹${Number(coursePrice).toLocaleString('en-IN')}`
+    : 'Fee Not Configured';
+  // Amount actually sent to the payment link + enrollment record.
+  // Zero when not configured so a Razorpay call fails cleanly rather
+  // than minting a ₹0 link.
+  const paymentAmount = feeConfigured ? Number(coursePrice) : 0;
 
   // When opened from admin "Add Student", fetch the institution's batches
   // so we can populate the inline picker.
@@ -187,6 +235,11 @@ export default function EnrollmentFormScreen({ route, navigation }) {
     // payload only includes this when adminMode=true, so self-enrolled
     // students never trip the offline-paid branch on the server.
     payment_mode: 'cash',
+    // Admin-mode only: when TRUE the backend mints a Razorpay Payment
+    // Link + emails the student, and the enrolment stays as Pending
+    // Payment until the webhook fires. When FALSE we fall through to
+    // the offline payment_mode branch as before.
+    enable_payment_link: false,
   });
   const [submitting, setSubmitting] = useState(false);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
@@ -202,11 +255,27 @@ export default function EnrollmentFormScreen({ route, navigation }) {
   // Pre-fill from existing profile (subsequent enrollments) with a
   // fallback to the current user's account row when this is the
   // student's first enrolment (nothing in /enrollments/my-profile yet).
-  // Guarantees Full Name, Mobile Number and Email are auto-populated
-  // on the very first Join Batch tap, matching the spec.
+  //
+  // ── Admin mode carve-out ─────────────────────────────────────────
+  // When an admin opens Add Student, the `useAuth()` user IS the admin
+  // — their name is the academy name and their email is the academy's
+  // admin email. Falling back to those values used to pre-fill the
+  // student's Personal Details with the INSTITUTION's info, which was
+  // the reason the form kept showing "Damakka Academy" as the student
+  // name. We now short-circuit: in admin mode the form starts EMPTY
+  // and the admin types the student's details in manually. Only the
+  // self-enrolment path (adminMode=false) uses the AuthContext
+  // fallback, and there the `user` really is the student.
   useEffect(() => {
     (async () => {
       try {
+        if (adminMode) {
+          // Admin adding a new student — the form must NOT pre-fill
+          // with the admin's / institution's data. Skip both the
+          // profile fetch and the user fallback so the fields start
+          // clean and the admin captures the student's own info.
+          return;
+        }
         const res = await apiClient.get('/enrollments/my-profile');
         const p = res.data?.profile;
         if (p) {
@@ -240,7 +309,8 @@ export default function EnrollmentFormScreen({ route, navigation }) {
           }));
         } else {
           // No profile at all yet — seed the three auto-fill fields
-          // straight from the AuthContext user.
+          // straight from the AuthContext user (the STUDENT, since we
+          // already returned early when adminMode is true).
           setForm((prev) => ({
             ...prev,
             full_name:      user?.name  || '',
@@ -251,19 +321,22 @@ export default function EnrollmentFormScreen({ route, navigation }) {
       } catch (err) {
         // First-time enroller / API hiccup — still try to auto-fill the
         // three headline fields from the AuthContext user so the form is
-        // never empty on the very first Join Batch tap.
-        setForm((prev) => ({
-          ...prev,
-          full_name:      prev.full_name      || user?.name  || '',
-          contact_number: prev.contact_number || user?.phone || '',
-          email:          prev.email          || user?.email || '',
-        }));
+        // never empty on the very first Join Batch tap. Not applicable
+        // in admin mode; we already returned early above.
+        if (!adminMode) {
+          setForm((prev) => ({
+            ...prev,
+            full_name:      prev.full_name      || user?.name  || '',
+            contact_number: prev.contact_number || user?.phone || '',
+            email:          prev.email          || user?.email || '',
+          }));
+        }
       } finally {
         setLoadingProfile(false);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id]);
+  }, [user?.id, adminMode]);
 
   const age = useMemo(() => ageFromDob(form.date_of_birth), [form.date_of_birth]);
 
@@ -418,7 +491,16 @@ export default function EnrollmentFormScreen({ route, navigation }) {
         // Only attach payment_mode when the admin actually chose one —
         // self-enrolled students must still flow through the online-pay
         // path on the next screen.
-        payment_mode: adminMode ? (form.payment_mode || 'cash') : undefined,
+        // Payment path — only one of the two branches applies:
+        //   • enable_payment_link=true → server mints a Razorpay link,
+        //     emails the student, enrolment stays Pending until paid.
+        //   • enable_payment_link=false → server records payment_mode
+        //     (cash/upi/bank/cheque) and marks paid immediately.
+        enable_payment_link: adminMode ? !!form.enable_payment_link : undefined,
+        payment_mode:
+          adminMode && !form.enable_payment_link
+            ? (form.payment_mode || 'cash')
+            : undefined,
         full_name:      form.full_name.trim(),
         date_of_birth:  form.date_of_birth || null,
         father_name:    form.father_name.trim() || null,
@@ -440,30 +522,50 @@ export default function EnrollmentFormScreen({ route, navigation }) {
       });
       const enrollment = res.data?.enrollment;
 
-      // Admin-mode short-circuit: the backend has already marked the
-      // enrolment paid with the chosen offline mode, so we skip the
-      // EnrollmentPayment screen entirely and bounce back to the
-      // Students tab with a confirmation.
+      // Admin-mode short-circuit: skip the online-pay screen and
+      // bounce back to Students with a confirmation. Two variants:
+      //   • Payment link enabled → tell admin we emailed the student
+      //     and enrolment stays as Pending Payment.
+      //   • Payment link disabled → recorded as offline sale under
+      //     Institution / Branch Revenue with the chosen mode.
       if (adminMode) {
-        const modeLabel = {
-          cash:   'Cash',
-          upi:    'UPI',
-          bank:   'Bank Transfer',
-          cheque: 'Cheque',
-        }[(form.payment_mode || 'cash').toLowerCase()] || 'Offline';
-        confirm({
-          title: 'Student enrolled',
-          message: `${form.full_name.trim()} has been enrolled and the fee was recorded as ${modeLabel}.`,
-          variant: 'success',
-          confirmText: 'Done',
-          hideCancel: true,
-          onConfirm: () => navigation.goBack(),
-        });
+        const name = form.full_name.trim();
+        if (form.enable_payment_link) {
+          const url = enrollment?.payment_link_url;
+          confirm({
+            title: 'Payment link sent',
+            message:
+              `${name} has been enrolled and a payment link has been emailed to ${form.email.trim()}.\n\n` +
+              `The account stays as Pending Payment until Razorpay confirms. Login credentials + welcome email go out automatically after payment is verified — nothing before then.` +
+              (url ? `\n\nLink: ${url}` : ''),
+            variant: 'success',
+            confirmText: 'Done',
+            hideCancel: true,
+            onConfirm: () => navigation.goBack(),
+          });
+        } else {
+          const modeLabel = {
+            cash:   'Cash',
+            upi:    'UPI',
+            bank:   'Bank Transfer',
+            cheque: 'Cheque',
+          }[(form.payment_mode || 'cash').toLowerCase()] || 'Offline';
+          confirm({
+            title: 'Student enrolled',
+            message:
+              `${name} has been enrolled and the fee was recorded as ${modeLabel}. ` +
+              `The amount is booked under Institution Revenue.`,
+            variant: 'success',
+            confirmText: 'Done',
+            hideCancel: true,
+            onConfirm: () => navigation.goBack(),
+          });
+        }
         return;
       }
 
       navigation.replace('EnrollmentPayment', {
-        enrollment, batch, course, amount: coursePrice,
+        enrollment, batch, course, amount: paymentAmount,
       });
     } catch (e) {
       // Plan-limit safety net: backend returns 402 PLAN_LIMIT_REACHED with
@@ -521,8 +623,16 @@ export default function EnrollmentFormScreen({ route, navigation }) {
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
           <Text style={styles.headerTitle}>Enrollment Details</Text>
+          {/* Course · Fee. The fee updates automatically whenever the
+              admin picks a different batch (see freshBatch useEffect
+              above) and reads "Fee Not Configured" when the course
+              row has no positive price set. */}
           <Text style={styles.headerSub} numberOfLines={1}>
-            {course?.name || batch?.course_name || 'Course'} · ₹{Number(coursePrice).toLocaleString('en-IN')}
+            {(freshBatch?.course_name
+              || pickedBatch?.course_name
+              || course?.name
+              || batch?.course_name
+              || 'Course')} · {feeLabel}
           </Text>
         </View>
       </View>
@@ -732,15 +842,15 @@ export default function EnrollmentFormScreen({ route, navigation }) {
                 return pickedBatch.duration || '';
               })()}
             />
-            {/* Fee — always render the actual course price. The value
-                is joined into the batch row by the backend so it's
-                populated even on first load. Renders "Free" only when
-                the course really does have a price of 0. */}
+            {/* Fee — reads the LATEST price from the picked batch's
+                course. The `freshBatch` useEffect above re-fetches the
+                batch every time the selection changes so an updated
+                fee at the academy end shows up here without an app
+                restart. Renders "Fee Not Configured" when no positive
+                fee is on file. */}
             <SummaryRow
               label="Fee"
-              value={coursePrice
-                ? `₹${Number(coursePrice).toLocaleString('en-IN')}`
-                : 'Free'}
+              value={feeLabel}
               emphasise
               alwaysShow
             />
@@ -960,42 +1070,95 @@ export default function EnrollmentFormScreen({ route, navigation }) {
           />
         </Field>
 
-        {/* Admin-mode only: how the fee was collected at the counter.
-            Self-enrolled students don't see this — they continue to the
-            online Razorpay / mock-pay screen on submit. */}
+        {/* Admin-mode only: Payment path chooser.
+            The Enable Payment Link toggle switches between:
+              • ON  → server mints a Razorpay link, emails the student,
+                     enrolment stays as Pending Payment. Amount will
+                     land on the Institution / Branch Wallet after
+                     platform + gateway deductions.
+              • OFF → admin picks Cash / UPI / Bank / Cheque, enrolment
+                     is marked Paid immediately and booked under
+                     Institution / Branch Revenue only. */}
         {adminMode ? (
-          <Field
-            label="Mode of Payment *"
-            hint="How was the fee collected? The enrolment will be marked paid immediately."
-          >
-            <View style={styles.payModeRow}>
-              {[
-                { v: 'cash',   label: 'Cash' },
-                { v: 'upi',    label: 'UPI' },
-                { v: 'bank',   label: 'Bank Transfer' },
-                { v: 'cheque', label: 'Cheque' },
-              ].map((opt) => {
-                const active = form.payment_mode === opt.v;
-                return (
-                  <TouchableOpacity
-                    key={opt.v}
-                    style={[styles.payModeChip, active && styles.payModeChipActive]}
-                    onPress={() => set('payment_mode', opt.v)}
-                    activeOpacity={0.85}
-                  >
-                    <Text
-                      style={[
-                        styles.payModeChipText,
-                        active && styles.payModeChipTextActive,
-                      ]}
-                    >
-                      {opt.label}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
+          <>
+            <View style={styles.linkToggleCard}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.linkToggleTitle}>Enable Payment Link</Text>
+                <Text style={styles.linkToggleHint}>
+                  {form.enable_payment_link
+                    ? 'A Razorpay link will be emailed to the student. Their enrolment stays Pending Payment until verified.'
+                    : 'Record an offline payment collected at the counter. Booked under Institution Revenue.'}
+                </Text>
+              </View>
+              {/* Simple two-state pill so we don't pull in <Switch> — matches the app's pill aesthetic. */}
+              <TouchableOpacity
+                onPress={() => set('enable_payment_link', !form.enable_payment_link)}
+                activeOpacity={0.85}
+                style={[
+                  styles.linkTogglePill,
+                  form.enable_payment_link && styles.linkTogglePillActive,
+                ]}
+              >
+                <View
+                  style={[
+                    styles.linkTogglePillDot,
+                    form.enable_payment_link && styles.linkTogglePillDotActive,
+                  ]}
+                />
+              </TouchableOpacity>
             </View>
-          </Field>
+
+            {/* Read-only Payment Link field. Auto-filled with the URL
+                returned by the backend after the enrolment is saved.
+                Rendered here so the admin knows what will be sent AND
+                so we visually enforce the spec's "Payment Link field"
+                requirement even before Save. */}
+            {form.enable_payment_link ? (
+              <Field
+                label="Payment Link"
+                hint="Automatically generated after Save and emailed to the student. Refresh their record to copy the URL later."
+              >
+                <View style={styles.linkPreview}>
+                  <Text style={styles.linkPreviewText} numberOfLines={1}>
+                    Will be generated on save · sent to {form.email.trim() || 'the student email'}
+                  </Text>
+                </View>
+              </Field>
+            ) : (
+              <Field
+                label="Mode of Payment *"
+                hint="How was the fee collected? The enrolment will be marked paid immediately."
+              >
+                <View style={styles.payModeRow}>
+                  {[
+                    { v: 'cash',   label: 'Cash' },
+                    { v: 'upi',    label: 'UPI' },
+                    { v: 'bank',   label: 'Bank Transfer' },
+                    { v: 'cheque', label: 'Cheque' },
+                  ].map((opt) => {
+                    const active = form.payment_mode === opt.v;
+                    return (
+                      <TouchableOpacity
+                        key={opt.v}
+                        style={[styles.payModeChip, active && styles.payModeChipActive]}
+                        onPress={() => set('payment_mode', opt.v)}
+                        activeOpacity={0.85}
+                      >
+                        <Text
+                          style={[
+                            styles.payModeChipText,
+                            active && styles.payModeChipTextActive,
+                          ]}
+                        >
+                          {opt.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </Field>
+            )}
+          </>
         ) : null}
 
         <View style={{ height: 16 }} />
@@ -1457,6 +1620,48 @@ const styles = StyleSheet.create({
   },
   payModeChipText: { fontSize: 13, color: TEXT, fontWeight: '700' },
   payModeChipTextActive: { color: BRAND, fontWeight: '800' },
+
+  // Enable Payment Link toggle — sits above the payment-mode / link
+  // preview sections. Card layout keeps the label + hint aligned and
+  // the toggle pill anchored to the right.
+  linkToggleCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: SURFACE,
+    borderWidth: 1, borderColor: BORDER,
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 14,
+  },
+  linkToggleTitle: { fontSize: 14, fontWeight: '800', color: TEXT },
+  linkToggleHint: {
+    fontSize: 11, color: TEXT_MUTED, marginTop: 3, lineHeight: 15,
+    fontWeight: '600',
+  },
+  linkTogglePill: {
+    width: 40, height: 22, borderRadius: 999,
+    backgroundColor: BORDER,
+    padding: 2,
+    justifyContent: 'center',
+  },
+  linkTogglePillActive: { backgroundColor: BRAND },
+  linkTogglePillDot: {
+    width: 18, height: 18, borderRadius: 9,
+    backgroundColor: SURFACE,
+  },
+  linkTogglePillDotActive: {
+    transform: [{ translateX: 18 }],
+  },
+  linkPreview: {
+    backgroundColor: BG,
+    borderWidth: 1, borderColor: BORDER,
+    borderRadius: 10,
+    paddingHorizontal: 12, paddingVertical: 12,
+  },
+  linkPreviewText: {
+    fontSize: 12, color: TEXT_MUTED, fontStyle: 'italic', fontWeight: '600',
+  },
 
   // Sticky bottom action bar — Cancel on the left, primary submit on
   // the right.

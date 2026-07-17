@@ -157,6 +157,17 @@ const result = await pool.query(
       return res.status(401).json({ message: 'Invalid email or password' });
     }
 
+    // Block sign-in for pending-payment accounts (created by an admin
+    // via "Enable Payment Link" but never activated). Once the
+    // Razorpay webhook flips the enrolment to paid, activateStudentAfterPayment
+    // upgrades the row to status='active' and mails the temp password.
+    if (user.status === 'pending') {
+      return res.status(403).json({
+        code:    'PAYMENT_PENDING',
+        message: 'Your account is pending payment. Once payment is confirmed you\'ll receive an email with your login details.',
+      });
+    }
+
     // Generate JWT
     const token = jwt.sign(
       {

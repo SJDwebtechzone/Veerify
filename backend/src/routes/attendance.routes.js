@@ -22,6 +22,20 @@ router.get('/batch/:id', verifyToken, requireRole('admin', 'trainer'), attendanc
 // with access to the parent batch (trainer or admin).
 router.get('/:id/history', verifyToken, requireRole('admin', 'trainer'), attendanceController.getAttendanceHistory);
 
+// Read-only attendance summary for a single batch — powers the
+// institution admin's Attendance Summary screen (spec: institutions
+// have read-only access; marking is trainer / branch-admin only).
+router.get('/batch/:id/summary',
+  verifyToken, requireRole('admin', 'trainer'),
+  attendanceController.getBatchAttendanceSummary);
+
+// Institution-wide today's attendance percentage. Powers the
+// dashboard "Today's Attendance" card. Sub-branch admins see their
+// own branch; main admins see the aggregate across every branch.
+router.get('/institution/today',
+  verifyToken, requireRole('admin'),
+  attendanceController.getInstitutionTodayAttendance);
+
 // Student route
 router.get('/my', verifyToken, requireRole('student'), attendanceController.getMyAttendance);
 

@@ -37,6 +37,7 @@ import {
 import apiClient from '../../api/client';
 import { confirm } from '../../components/ConfirmDialog';
 import resolveAssetUrl from '../../utils/assetUrl';
+import DownloadInvoiceButton from '../../components/DownloadInvoiceButton';
 
 const BRAND       = '#E63946';
 const BRAND_SOFT  = '#FFE4E6';
@@ -529,6 +530,20 @@ function CurrentPlanCard({ status, onAction }) {
           <RefreshCw size={16} color="#fff" strokeWidth={2.4} />
           <Text style={styles.primaryCtaText}>{phaseInfo.action}</Text>
         </TouchableOpacity>
+      ) : null}
+
+      {/* Download Invoice — only meaningful for phases that have an
+          actual paid subscription. The backend returns 404 for others
+          and the button surfaces a friendly "will be available…" hint. */}
+      {phase === 'paid' && status?.institution_id ? (
+        <View style={{ alignItems: 'center', marginTop: 12 }}>
+          <DownloadInvoiceButton
+            kind="subscription"
+            refId={status.institution_id}
+            label="Download last invoice"
+            compact
+          />
+        </View>
       ) : null}
     </View>
   );

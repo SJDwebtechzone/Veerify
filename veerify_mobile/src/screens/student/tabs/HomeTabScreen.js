@@ -33,6 +33,7 @@ import { useInstitution } from '../../../context/InstitutionContext';
 import { palette, spacing, radius, shadows, type } from '../../../theme';
 import MyDashboard from '../MyDashboard';
 import NearbyLocationPicker from '../../../components/NearbyLocationPicker';
+import { confirm } from '../../../components/ConfirmDialog';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 // Shared resolver — also strips legacy embedded 10.0.2.2:5000 hosts
@@ -125,13 +126,19 @@ export default function HomeTabScreen({ navigation }) {
                 : { lat: nearbyOrigin.lat, lng: nearbyOrigin.lng, limit: 8 })
             : { limit: 8 },
         ).toString()).catch(() => ({ data: { results: [] } })),
-        // Institution-specific banners — only for logged-in students.
-        // Guests don't have an institution_id on their token yet, so we
-        // pass the currently-picked academy via ?institution_id=.
+        // Academy branding banners:
+        //   • Logged-in student → /for-me returns published banners
+        //     targeted at the student's own institution (auth-gated).
+        //   • Guest with a picked academy → /public/:institutionId
+        //     bypasses auth so the branded hero still loads. The
+        //     public endpoint returns the same active banners any
+        //     guest browsing this academy is meant to see.
+        //   • Guest with no academy picked → empty. The default hero
+        //     copy takes over below.
         user
           ? apiClient.get('/institution-banners/for-me').catch(() => ({ data: { banners: [] } }))
           : selectedInstitution?.id
-            ? apiClient.get(`/institution-banners/for-me?institution_id=${selectedInstitution.id}`).catch(() => ({ data: { banners: [] } }))
+            ? apiClient.get(`/institution-banners/public/${selectedInstitution.id}`).catch(() => ({ data: { banners: [] } }))
             : Promise.resolve({ data: { banners: [] } }),
       ]);
       // Merge institution-specific banners in front of the global CMS
@@ -243,7 +250,35 @@ export default function HomeTabScreen({ navigation }) {
           </View>
           <TouchableOpacity
             style={styles.bellButton}
-            onPress={() => navigation.navigate('StaffNotifications')}
+            onPress={() => {
+              // Guests can browse the app but can't hold notifications
+              // — nothing is scoped to a user for them. Instead of
+              // opening an empty list we surface a login prompt with
+              // two paths: Login (existing account) or Sign up (new
+              // account). Once authenticated the bell resumes its
+              // normal behaviour of routing to StaffNotifications.
+              if (isGuest) {
+                confirm({
+                  title:       'Sign in for notifications',
+                  message:
+                    'Login to receive notifications about courses, batches, ' +
+                    'events, offers, announcements, and more.',
+                  variant:     'destructive',
+                  confirmText: 'Login',
+                  cancelText:  'Sign up',
+                  onConfirm: () => {
+                    try { navigation.navigate('Login'); return; } catch {}
+                    try { navigation.getParent()?.navigate('Login'); } catch {}
+                  },
+                  onCancel: () => {
+                    try { navigation.navigate('Register'); return; } catch {}
+                    try { navigation.getParent()?.navigate('Register'); } catch {}
+                  },
+                });
+                return;
+              }
+              navigation.navigate('StaffNotifications');
+            }}
             activeOpacity={0.85}
           >
             <Bell size={20} color={palette.text} strokeWidth={2.2} />

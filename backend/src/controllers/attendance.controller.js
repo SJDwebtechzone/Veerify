@@ -372,6 +372,176 @@ exports.getAttendanceHistory = async (req, res) => {
   }
 };
 
+// GET /api/attendance/batch/:id/summary
+//
+// Institution / branch admin's READ-ONLY attendance summary for a
+// batch. Returns two percentages:
+//
+//   • today.percentage  = how many enrolled students were marked
+//                          present (or late) TODAY, out of the total
+//                          enrolled in the batch.
+//   • month.percentage  = across every attendance record for this
+//                          batch in the CURRENT calendar month, what
+//                          share was marked present (or late).
+//
+// The counts backing each percentage are returned alongside so the
+// mobile can render "12 / 20 students · 60%" style breakdowns without
+// having to redo the math.
+exports.getBatchAttendanceSummary = async (req, res) => {
+  try {
+    const batchId = parseInt(req.params.id, 10);
+    if (!Number.isInteger(batchId)) {
+      return res.status(400).json({ message: 'Invalid batch id' });
+    }
+
+    // Institution scope check — the caller's users.institution_id must
+    // match the batch's institution_id (or its parent institution when
+    // this is a sub-branch). Reuses the same shape as verifyAdminOwnsBatch
+    // but only for read; branch admins may also inspect their own batches.
+    const admin = await verifyAdminOwnsBatch(req.user.id, batchId);
+    if (!admin.ok) {
+      return res.status(admin.status || 403).json({ message: admin.message });
+    }
+
+    // Total enrolled — denominator for today.percentage.
+    const enrolled = await pool.query(
+      `SELECT COUNT(*)::int AS n
+         FROM enrollments
+        WHERE batch_id = $1`,
+      [batchId],
+    );
+    const totalEnrolled = enrolled.rows[0]?.n || 0;
+
+    // Today's counts. 'present' and 'late' count as "attended".
+    const today = await pool.query(
+      `SELECT
+         COUNT(*)::int                                          AS marked,
+         COUNT(*) FILTER (WHERE status IN ('present','late'))::int AS present
+        FROM attendance
+       WHERE batch_id = $1
+         AND date     = CURRENT_DATE`,
+      [batchId],
+    );
+    const todayMarked  = today.rows[0]?.marked  || 0;
+    const todayPresent = today.rows[0]?.present || 0;
+    const todayPct = totalEnrolled > 0
+      ? Math.round((todayPresent / totalEnrolled) * 100)
+      : 0;
+
+    // Month-to-date counts. Denominator is total records marked this
+    // month (a stable, natural yardstick — students who weren't
+    // scheduled don't get counted as absent).
+    const month = await pool.query(
+      `SELECT
+         COUNT(*)::int                                          AS marked,
+         COUNT(*) FILTER (WHERE status IN ('present','late'))::int AS present
+        FROM attendance
+       WHERE batch_id = $1
+         AND date_trunc('month', date) = date_trunc('month', CURRENT_DATE)`,
+      [batchId],
+    );
+    const monthMarked  = month.rows[0]?.marked  || 0;
+    const monthPresent = month.rows[0]?.present || 0;
+    const monthPct = monthMarked > 0
+      ? Math.round((monthPresent / monthMarked) * 100)
+      : 0;
+
+    res.json({
+      today: {
+        percentage:     todayPct,
+        present:        todayPresent,
+        marked:         todayMarked,
+        total_enrolled: totalEnrolled,
+      },
+      month: {
+        percentage: monthPct,
+        present:    monthPresent,
+        marked:     monthMarked,
+      },
+    });
+  } catch (err) {
+    console.error('Get batch attendance summary error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// GET /api/attendance/institution/today
+//
+// Institution-wide TODAY's attendance percentage across every active
+// batch. Powers the Institution Home Dashboard "Today's Attendance"
+// card. Sub-branch admins see the number for their own branch only;
+// main-institution admins see the aggregate across every branch.
+//
+// Formula: sum of present records today / sum of enrollments across
+// all batches whose attendance was marked today × 100. Batches with
+// no attendance marked today don't contribute to either side (so a
+// day with 0 batches marked reports 0% rather than dividing by 0).
+exports.getInstitutionTodayAttendance = async (req, res) => {
+  try {
+    // Resolve the caller's institution + branch scope.
+    const u = await pool.query(
+      `SELECT institution_id FROM users WHERE id = $1`, [req.user.id],
+    );
+    const instId = u.rows[0]?.institution_id;
+    if (!instId) {
+      return res.status(403).json({ message: 'No institution linked' });
+    }
+    const scope = await getBranchScope(req.user.id);
+
+    // Determine which batches count. Sub-branch admins → only their
+    // own branch's batches. Main-institution admins → every batch
+    // across the root institution + its sub-branches.
+    const params = [instId];
+    let batchWhere = '';
+    if (scope?.type === 'sub_branch') {
+      params.push(instId); // sub-branch's own id is same as institution_id from the JWT
+      batchWhere = `AND b.branch_id = $${params.length}`;
+    }
+
+    const summary = await pool.query(
+      `WITH scoped_batches AS (
+         SELECT b.id
+           FROM batches b
+           JOIN institutions i ON i.id = b.institution_id
+          WHERE (i.id = $1 OR i.parent_institution_id = $1)
+            ${batchWhere}
+       ),
+       today_att AS (
+         SELECT batch_id,
+                COUNT(*)::int AS marked,
+                COUNT(*) FILTER (WHERE status IN ('present','late'))::int AS present
+           FROM attendance
+          WHERE date = CURRENT_DATE
+            AND batch_id IN (SELECT id FROM scoped_batches)
+          GROUP BY batch_id
+       )
+       SELECT
+         COALESCE(SUM(marked),  0)::int AS marked,
+         COALESCE(SUM(present), 0)::int AS present,
+         COUNT(*)::int                   AS batches_marked
+       FROM today_att`,
+      params,
+    );
+
+    const row = summary.rows[0] || { marked: 0, present: 0, batches_marked: 0 };
+    const percentage = row.marked > 0
+      ? Math.round((row.present / row.marked) * 100)
+      : 0;
+
+    res.json({
+      today: {
+        percentage,
+        present:        row.present,
+        marked:         row.marked,
+        batches_marked: row.batches_marked,
+      },
+    });
+  } catch (err) {
+    console.error('Get institution today attendance error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
 // GET my attendance (student)
 exports.getMyAttendance = async (req, res) => {
   try {

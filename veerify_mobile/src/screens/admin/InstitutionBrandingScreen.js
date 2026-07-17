@@ -129,7 +129,7 @@ export default function InstitutionBrandingScreen({ navigation }) {
         <View style={{ flex: 1 }}>
           <Text style={styles.headerTitle}>Branding · Banners</Text>
           <Text style={styles.headerSub}>
-            Promo strips shown on student & trainer dashboards
+            Promo strips shown on Guest User Banner
           </Text>
         </View>
       </View>
@@ -192,9 +192,6 @@ export default function InstitutionBrandingScreen({ navigation }) {
 // ─── Row ───────────────────────────────────────────────────────────────
 function BannerRow({ banner, onEdit, onDelete, onToggleActive }) {
   const uri = resolveAssetUrl(banner.image_url);
-  const audienceLabel = (
-    AUDIENCE_OPTIONS.find((a) => a.key === banner.audience) || AUDIENCE_OPTIONS[2]
-  ).label;
   return (
     <View style={[styles.row, !banner.is_active && { opacity: 0.6 }]}>
       <View style={styles.rowMedia}>
@@ -211,10 +208,11 @@ function BannerRow({ banner, onEdit, onDelete, onToggleActive }) {
         {banner.subtitle ? (
           <Text style={styles.rowSub} numberOfLines={1}>{banner.subtitle}</Text>
         ) : null}
+        {/* Audience chip removed. Every banner here is the academy's
+            public branding shown to guests + students + trainers, so
+            an audience selector was misleading. Only the Active /
+            Hidden pill remains. */}
         <View style={styles.rowMeta}>
-          <View style={[styles.audChip, audChipStyle(banner.audience)]}>
-            <Text style={[styles.audChipText, audChipText(banner.audience)]}>{audienceLabel}</Text>
-          </View>
           <Text style={styles.statusText}>
             {banner.is_active ? '● Active' : '○ Hidden'}
           </Text>
@@ -260,7 +258,10 @@ function BannerEditorSheet({ initial, onClose, onSaved }) {
   const [title, setTitle]         = useState(initial?.title || '');
   const [subtitle, setSubtitle]   = useState(initial?.subtitle || '');
   const [linkUrl, setLinkUrl]     = useState(initial?.link_url || '');
-  const [audience, setAudience]   = useState(initial?.audience || 'both');
+  // Audience is no longer user-configurable — every banner is the
+  // academy's public branding, visible to guests + students + trainers.
+  // Kept as a constant so the payload the backend expects is unchanged.
+  const audience = 'both';
   const [uploading, setUploading] = useState(false);
   const [saving, setSaving]       = useState(false);
 
@@ -538,31 +539,12 @@ function BannerEditorSheet({ initial, onClose, onSaved }) {
               maxLength={500}
             />
 
-            {/* Audience picker */}
-            <Text style={styles.label}>Show to *</Text>
-            <View style={styles.audRow}>
-              {AUDIENCE_OPTIONS.map((opt) => {
-                const Icon = opt.icon;
-                const active = audience === opt.key;
-                return (
-                  <TouchableOpacity
-                    key={opt.key}
-                    onPress={() => setAudience(opt.key)}
-                    style={[styles.audBtn, active && styles.audBtnActive]}
-                    activeOpacity={0.85}
-                  >
-                    <Icon
-                      size={14}
-                      color={active ? '#fff' : TEXT_MUTED}
-                      strokeWidth={2.4}
-                    />
-                    <Text style={[styles.audBtnText, active && styles.audBtnTextActive]}>
-                      {opt.label}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
+            {/* Audience picker removed — every banner uploaded here
+                is now used as the academy's public branding and
+                appears on the Guest → Home hero for anyone browsing
+                this academy. The `audience` field stays fixed at
+                'both' in the payload so the existing backend + web
+                admin readers keep working. */}
           </ScrollView>
 
           {/* Footer */}

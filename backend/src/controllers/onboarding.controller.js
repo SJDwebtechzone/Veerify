@@ -1834,6 +1834,32 @@ exports.handlePaymentWebhook = async (req, res) => {
       );
       // eslint-disable-next-line no-console
       console.log('[webhook] enrollment_new paid=', upd.rowCount, 'enrollment=', enrollmentId);
+      if (upd.rowCount > 0) {
+        // Activate the student (rotates temp password, sets
+        // status='active', mails credentials + welcome SMS). Idempotent —
+        // a Razorpay retry won't re-rotate an already-active password.
+        (async () => {
+          try {
+            const {
+              activateStudentAfterPayment,
+            } = require('./enrollment.controller');
+            const r = await activateStudentAfterPayment(enrollmentId);
+            // eslint-disable-next-line no-console
+            console.log('[webhook] enrollment_new activated:', r);
+          } catch (e) {
+            console.error('[webhook] student activation failed:', e?.message);
+          }
+        })();
+        // Invoice generation — guarded by its own idempotency check.
+        (async () => {
+          try {
+            const { generateEnrollmentInvoice } = require('../utils/invoiceService');
+            await generateEnrollmentInvoice({ enrollmentId });
+          } catch (e) {
+            console.error('[webhook] enrollment invoice failed:', e?.message);
+          }
+        })();
+      }
       return res.json({ ok: true, enrollment_new: true, matched: upd.rowCount > 0 });
     }
 
@@ -1983,9 +2009,41 @@ exports.handlePaymentWebhook = async (req, res) => {
         subscriptionEnd: updated.rows[0].subscription_end,
       }).catch((e) => console.error('[webhook] activation email failed:', e.message));
 
+      // Fire-and-forget subscription invoice. Idempotent — a webhook
+      // retry with the same payment_id won't create a duplicate.
+      (async () => {
+        try {
+          const { generateSubscriptionInvoice } = require('../utils/invoiceService');
+          await generateSubscriptionInvoice({
+            institutionId:    institution.id,
+            paymentReference: paymentId || linkId,
+            amount:           Number(institution.plan_price) || Number(institution.payment_amount) || 0,
+            planName:         institution.plan_name,
+          });
+        } catch (e) {
+          console.error('[webhook] subscription invoice failed:', e?.message);
+        }
+      })();
+
       console.log(`[webhook] activated institution ${institution.id} (${institution.name}) via payment ${paymentId}`);
       return res.json({ ok: true, activated: true, institution_id: institution.id });
     }
+
+    // Renewal / plan-change branch — fire an invoice here too so
+    // every institution payment has a matching PDF.
+    (async () => {
+      try {
+        const { generateSubscriptionInvoice } = require('../utils/invoiceService');
+        await generateSubscriptionInvoice({
+          institutionId:    institution.id,
+          paymentReference: paymentId || linkId,
+          amount:           Number(institution.plan_price) || 0,
+          planName:         institution.plan_name,
+        });
+      } catch (e) {
+        console.error('[webhook] renewal invoice failed:', e?.message);
+      }
+    })();
 
     console.log(`[webhook] ${action} institution ${institution.id} → ${updated.rows[0].subscription_end}`);
     return res.json({ ok: true, action, institution_id: institution.id });

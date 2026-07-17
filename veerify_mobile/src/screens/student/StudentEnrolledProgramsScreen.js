@@ -24,6 +24,7 @@ import {
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 import resolveAssetUrl from '../../utils/assetUrl';
+import DownloadInvoiceButton from '../../components/DownloadInvoiceButton';
 
 function fmtDate(iso) {
   if (!iso) return '—';
@@ -130,6 +131,60 @@ export default function StudentEnrolledProgramsScreen({ navigation }) {
   );
 }
 
+// ── Course thumbnail with fallback ladder ────────────────────────
+// Ladder:
+//   1. course.image_url (if present + loads)
+//   2. institution.logo_url (if present + loads)
+//   3. Branded purple placeholder tile with the BookOpen icon
+//
+// resolveAssetUrl handles the emulator / prod host swap and legacy
+// embedded hosts (10.0.2.2, localhost, 127.0.0.1). We track two
+// separate error flags so a broken course image cleanly downgrades to
+// the institution logo rather than skipping straight to the icon.
+// A tiny spinner shows while the image is loading so a slow network
+// doesn't leave the card looking blank.
+function CourseThumb({ courseImage, institutionLogo }) {
+  const [loading, setLoading] = React.useState(true);
+  const [courseErr, setCourseErr] = React.useState(false);
+  const [logoErr,   setLogoErr]   = React.useState(false);
+
+  const courseUrl = courseImage && !courseErr ? resolveAssetUrl(courseImage) : null;
+  const logoUrl   = institutionLogo && !logoErr ? resolveAssetUrl(institutionLogo) : null;
+  const src = courseUrl || logoUrl || null;
+
+  if (!src) {
+    return (
+      <View style={styles.thumbPlaceholder}>
+        <BookOpen size={18} color={palette.purple.vivid} strokeWidth={2.4} />
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.thumbWrap}>
+      <Image
+        source={{ uri: src }}
+        style={styles.thumb}
+        resizeMode="cover"
+        onLoadStart={() => setLoading(true)}
+        onLoadEnd={()   => setLoading(false)}
+        onError={() => {
+          setLoading(false);
+          // Downgrade: fail the current step in the ladder so the
+          // next render tries the next source.
+          if (src === courseUrl) setCourseErr(true);
+          else                    setLogoErr(true);
+        }}
+      />
+      {loading ? (
+        <View style={styles.thumbSpinner}>
+          <ActivityIndicator size="small" color={palette.purple.vivid} />
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
 function ProgramCard({ row, beltName, progress, onPress }) {
   const statusMeta = STATUS_META[row.payment_status] || STATUS_META.pending;
   const total = progress?.total || 0;
@@ -139,9 +194,10 @@ function ProgramCard({ row, beltName, progress, onPress }) {
   return (
     <TouchableOpacity onPress={onPress} activeOpacity={0.9} style={styles.card}>
       <View style={styles.cardHead}>
-        <View style={styles.iconTile}>
-          <BookOpen size={16} color={palette.purple.vivid} strokeWidth={2.4} />
-        </View>
+        <CourseThumb
+          courseImage={row.course_image_url}
+          institutionLogo={row.institution_logo_url}
+        />
         <View style={{ flex: 1, minWidth: 0 }}>
           <Text style={styles.courseName} numberOfLines={1}>{row.course_name}</Text>
           <View style={styles.metaRow}>
@@ -198,6 +254,15 @@ function ProgramCard({ row, beltName, progress, onPress }) {
           />
         </View>
       </View>
+
+      {/* Download Invoice — only shows on paid enrolments. Backend
+          returns 404 for pending / offline-not-yet-invoiced rows and
+          the button surfaces a friendly hint instead of erroring. */}
+      {row.payment_status === 'paid' ? (
+        <View style={styles.invoiceRow}>
+          <DownloadInvoiceButton kind="enrollment" refId={row.id} compact />
+        </View>
+      ) : null}
 
       <View style={styles.footer}>
         <Text style={styles.footerText}>Open</Text>
@@ -263,6 +328,25 @@ const styles = StyleSheet.create({
     backgroundColor: palette.purple.soft,
     alignItems: 'center', justifyContent: 'center',
   },
+  // Course thumbnail — same 40×40 footprint as iconTile so the header
+  // stays visually aligned across cards with and without images.
+  thumbWrap: {
+    width: 44, height: 44, borderRadius: 12,
+    overflow: 'hidden',
+    backgroundColor: palette.borderSoft,   // shows through if the PNG has alpha
+    position: 'relative',
+  },
+  thumb: { width: '100%', height: '100%' },
+  thumbSpinner: {
+    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.5)',
+  },
+  thumbPlaceholder: {
+    width: 44, height: 44, borderRadius: 12,
+    backgroundColor: palette.purple.soft,
+    alignItems: 'center', justifyContent: 'center',
+  },
   courseName: { ...type.bodyBold, color: palette.text, fontSize: 15 },
   metaRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 },
   metaText: { ...type.micro, color: palette.textMuted, fontWeight: '700', flexShrink: 1 },
@@ -295,6 +379,8 @@ const styles = StyleSheet.create({
     ...type.bodyBold, color: palette.text, fontSize: 12,
     marginTop: 3,
   },
+
+  invoiceRow: { marginTop: spacing.md },
 
   progressBlock: { marginTop: spacing.md },
   progressHead: {
