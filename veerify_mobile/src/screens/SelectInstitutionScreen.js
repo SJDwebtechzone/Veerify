@@ -1,13 +1,41 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity, TextInput,
   StyleSheet, ActivityIndicator, RefreshControl, Image, Alert,
+  Platform, PermissionsAndroid, Linking,
 } from 'react-native';
 import { MapPin, Search, ChevronRight, Building2, Locate, Check } from 'lucide-react-native';
 
 import { useInstitution } from '../context/InstitutionContext';
 import apiClient from '../api/client';
 import { palette, spacing, radius, shadows, type } from '../theme';
+import { confirm } from '../components/ConfirmDialog';
+
+// Lazy require so the app still boots on a fresh checkout that hasn't
+// linked the native module yet. Same pattern the NearbyLocationPicker
+// component uses.
+let Geolocation = null;
+try {
+  const mod = require('react-native-geolocation-service');
+  Geolocation = (mod && mod.default) || mod || null;
+} catch (_) {
+  Geolocation = null;
+}
+
+// Haversine — used to decide whether the watchPosition update is far
+// enough from the last fetch to warrant a fresh API call. Prevents
+// GPS jitter from spamming /institutions/nearby every second.
+function distanceKm(a, b) {
+  if (!a || !b) return Infinity;
+  const toRad = (v) => (v * Math.PI) / 180;
+  const R = 6371;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const s =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.atan2(Math.sqrt(s), Math.sqrt(1 - s));
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SelectInstitutionScreen
@@ -45,8 +73,36 @@ export default function SelectInstitutionScreen({ navigation, route }) {
   const [search, setSearch] = useState('');
   const [busy, setBusy] = useState(false);
 
+  // GPS lifecycle state:
+  //   • coords         — latest lat/lng from the OS
+  //   • locating       — true while permission prompt or first fix is
+  //                      in flight (drives the button spinner)
+  //   • locationActive — true when the watchPosition subscription is
+  //                      live; drives the "Using your location" pill
+  const [coords, setCoords] = useState(null);
+  const [locating, setLocating] = useState(false);
+  const [locationActive, setLocationActive] = useState(false);
+  // watchId comes back from Geolocation.watchPosition. Kept in a ref
+  // so the cleanup effect can clear it without triggering re-renders.
+  const watchIdRef = useRef(null);
+  // Track the last-fetched coords so watchPosition doesn't refire the
+  // API for every 5-metre GPS wobble. We only re-fetch when the user
+  // has moved > 100 m.
+  const lastFetchedRef = useRef(null);
+
   // Fetch on mount (without GPS for now).
   useEffect(() => { refreshList(); }, [refreshList]);
+
+  // Clear the watchPosition subscription on unmount so the OS doesn't
+  // keep spinning the GPS after the user navigates away.
+  useEffect(() => {
+    return () => {
+      if (watchIdRef.current != null && Geolocation?.clearWatch) {
+        try { Geolocation.clearWatch(watchIdRef.current); } catch (_) { /* noop */ }
+        watchIdRef.current = null;
+      }
+    };
+  }, []);
 
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -67,13 +123,146 @@ export default function SelectInstitutionScreen({ navigation, route }) {
     if (navigation?.canGoBack?.()) navigation.goBack();
   };
 
-  // Stub for GPS auto-pick. We wire react-native-geolocation-service in a
-  // follow-up step (needs a native rebuild). For now this just nudges users
-  // toward manual picking.
-  const handleUseMyLocation = () => {
-    Alert.alert(
-      'Location coming soon',
-      "We'll auto-pick the nearest academy once GPS is wired up. For now, please choose one from the list below.",
+  // Shared "denied / disabled" handler. Uses the app's branded
+  // confirm() dialog so the copy sits alongside the rest of the
+  // student flows instead of the raw OS Alert. Confirm = open OS
+  // settings, Cancel = fall back to manual search.
+  const promptEnableLocation = (message) => {
+    setLocating(false);
+    confirm({
+      title:       'Location access needed',
+      message:     message ||
+        'Veerify uses your location to find academies near you. ' +
+        'Enable location permission or continue searching manually.',
+      variant:     'destructive',
+      confirmText: 'Open settings',
+      cancelText:  'Search manually',
+      onConfirm:   () => {
+        try { Linking.openSettings(); } catch (_) { /* noop */ }
+      },
+    });
+  };
+
+  // Ask for location permission on both platforms. Returns true iff
+  // the OS granted access.
+  const requestLocationPermission = async () => {
+    if (!Geolocation) return false;
+    if (Platform.OS === 'android') {
+      try {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+          {
+            title:            'Location permission',
+            message:          'Veerify uses your location to show academies near you.',
+            buttonPositive:   'Allow',
+            buttonNegative:   'Deny',
+            buttonNeutral:    'Ask later',
+          },
+        );
+        return granted === PermissionsAndroid.RESULTS.GRANTED;
+      } catch (_) {
+        return false;
+      }
+    }
+    // iOS
+    if (typeof Geolocation.requestAuthorization === 'function') {
+      try {
+        const r = await Geolocation.requestAuthorization('whenInUse');
+        return r === 'granted';
+      } catch (_) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  // Tap handler for "Use my location". Requests permission, gets a
+  // first fix, refetches the nearby list, then starts watchPosition
+  // so the results stay live if the user moves.
+  const handleUseMyLocation = async () => {
+    if (locating) return;
+    if (!Geolocation) {
+      confirm({
+        title:       'GPS not available',
+        message:
+          'This build is missing the location module. ' +
+          'Search manually below.',
+        variant:     'warning',
+        confirmText: 'Got it',
+        hideCancel:  true,
+      });
+      return;
+    }
+    setLocating(true);
+    const ok = await requestLocationPermission();
+    if (!ok) {
+      promptEnableLocation();
+      return;
+    }
+    // First fix — a one-shot getCurrentPosition. This is the value we
+    // pass to refreshList so the list re-sorts immediately.
+    Geolocation.getCurrentPosition(
+      async (pos) => {
+        const c = pos?.coords || {};
+        if (typeof c.latitude !== 'number' || typeof c.longitude !== 'number') {
+          setLocating(false);
+          confirm({
+            title:       'Could not read your location',
+            message:
+              'Try again in a moment, or search manually below.',
+            variant:     'warning',
+            confirmText: 'Got it',
+            hideCancel:  true,
+          });
+          return;
+        }
+        const next = { lat: c.latitude, lng: c.longitude };
+        setCoords(next);
+        lastFetchedRef.current = next;
+        await refreshList(next.lat, next.lng);
+        setLocating(false);
+        setLocationActive(true);
+
+        // Kick off watchPosition so the results stay accurate as the
+        // user moves. We refetch only when they've moved > 100 m so
+        // GPS jitter doesn't hammer the API.
+        if (watchIdRef.current != null && Geolocation.clearWatch) {
+          try { Geolocation.clearWatch(watchIdRef.current); } catch (_) {}
+          watchIdRef.current = null;
+        }
+        if (typeof Geolocation.watchPosition === 'function') {
+          watchIdRef.current = Geolocation.watchPosition(
+            (upd) => {
+              const u = upd?.coords || {};
+              if (typeof u.latitude !== 'number' || typeof u.longitude !== 'number') return;
+              const now = { lat: u.latitude, lng: u.longitude };
+              setCoords(now);
+              const moved = distanceKm(lastFetchedRef.current, now);
+              if (moved > 0.1) {
+                lastFetchedRef.current = now;
+                refreshList(now.lat, now.lng).catch(() => {});
+              }
+            },
+            (_err) => { /* silent — first fix already succeeded */ },
+            {
+              enableHighAccuracy: true,
+              distanceFilter:     50,   // meters — OS-level throttle
+              interval:           10000,
+              fastestInterval:    5000,
+            },
+          );
+        }
+      },
+      (err) => {
+        setLocating(false);
+        // Permission denied at OS level or GPS off. Guide the user.
+        promptEnableLocation(
+          err?.code === 1
+            ? 'Location permission was denied. Enable it from Settings to see academies near you.'
+            : 'Could not read your location. Check that GPS is enabled on your device.',
+        );
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 },
     );
   };
 
@@ -96,15 +285,42 @@ export default function SelectInstitutionScreen({ navigation, route }) {
         </Text>
       </View>
 
-      {/* GPS CTA */}
+      {/* GPS CTA — three states:
+             idle   → shows the Locate icon + "Use my location"
+             busy   → shows spinner + "Finding your location…"
+             active → filled purple + "Using your location" + checkmark.
+                       Tapping while active re-runs the flow (fresh fix). */}
       <TouchableOpacity
         onPress={handleUseMyLocation}
         activeOpacity={0.85}
-        style={styles.gpsButton}
+        style={[styles.gpsButton, locationActive && styles.gpsButtonActive]}
+        disabled={locating}
       >
-        <Locate size={18} color={palette.purple.vivid} strokeWidth={2.4} />
-        <Text style={styles.gpsText}>Use my location</Text>
-        <Text style={styles.gpsBadge}>Soon</Text>
+        {locating ? (
+          <ActivityIndicator
+            size="small"
+            color={locationActive ? '#fff' : palette.purple.vivid}
+          />
+        ) : locationActive ? (
+          <Check size={18} color="#fff" strokeWidth={2.6} />
+        ) : (
+          <Locate size={18} color={palette.purple.vivid} strokeWidth={2.4} />
+        )}
+        <Text
+          style={[
+            styles.gpsText,
+            locationActive && { color: '#fff' },
+          ]}
+        >
+          {locating
+            ? 'Finding your location…'
+            : locationActive
+              ? 'Using your location'
+              : 'Use my location'}
+        </Text>
+        {locationActive && coords ? (
+          <Text style={[styles.gpsBadge, styles.gpsBadgeActive]}>Live</Text>
+        ) : null}
       </TouchableOpacity>
 
       {/* Search */}
@@ -224,6 +440,11 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: palette.purple.vivid + '30',
   },
+  // Filled brand-purple treatment for when location is live.
+  gpsButtonActive: {
+    backgroundColor: palette.purple.vivid,
+    borderColor: palette.purple.vivid,
+  },
   gpsText: { flex: 1, ...type.bodyBold, color: palette.purple.on },
   gpsBadge: {
     fontSize: 10, fontWeight: '700',
@@ -231,6 +452,12 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.6)',
     paddingHorizontal: 8, paddingVertical: 2,
     borderRadius: radius.pill,
+  },
+  // "Live" pill on the active button — reversed color so it pops
+  // against the filled purple background.
+  gpsBadgeActive: {
+    color: palette.purple.vivid,
+    backgroundColor: '#fff',
   },
 
   searchWrap: {

@@ -30,6 +30,7 @@ import apiClient from '../../../api/client';
 import { useAuth } from '../../../context/AuthContext';
 import { useInstitution } from '../../../context/InstitutionContext';
 import { palette, spacing, radius, shadows, type } from '../../../theme';
+import { useBellScrollHandler } from '../../../components/bellScrollBus';
 import { confirm } from '../../../components/ConfirmDialog';
 
 // Shared resolver — strips legacy embedded dev hosts (10.0.2.2:5000,
@@ -182,6 +183,8 @@ export default function ProgramsTabScreen({ navigation }) {
       <ScrollView
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{ paddingBottom: 40 }}
+        onScroll={useBellScrollHandler()}
+        scrollEventThrottle={16}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}

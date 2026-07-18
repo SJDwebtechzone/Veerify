@@ -7,6 +7,7 @@ import { ChildProvider } from './src/context/ChildContext';
 import { NotificationAlertProvider } from './src/context/NotificationAlertContext';
 import AppNavigator from './src/navigation/AppNavigator';
 import { ConfirmDialogHost } from './src/components/ConfirmDialog';
+import GlobalNotificationBell from './src/components/GlobalNotificationBell';
 
 // React Navigation fires a dev-only warning whenever a GO_BACK / CLOSE_DRAWER
 // action bubbles up to the root without being handled — most commonly when
@@ -32,6 +33,12 @@ export default function App() {
               {/* Imperative styled confirm() dialog host — must be inside
                   SafeAreaProvider so its statusBar overlay sits right. */}
               <ConfirmDialogHost />
+              {/* Floating notification bell that stays visible on every
+                  screen (guest + all logged-in roles). Rendered outside
+                  AppNavigator so it doesn't have to be plumbed through
+                  each screen's header. Hides itself on auth screens and
+                  on the notifications screen itself. */}
+              <GlobalNotificationBell />
             </NotificationAlertProvider>
           </ChildProvider>
         </InstitutionProvider>

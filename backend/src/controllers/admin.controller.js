@@ -139,9 +139,21 @@ exports.getDashboardStats = async (req, res) => {
       ),
 
       // Revenue this month — sum of REAL paid amounts on enrollments
-      // whose payment landed in the current calendar month. Scoped to
-      // the caller's branch via the batch join so branch admins only
-      // see their branch's revenue.
+      // whose payment landed in the current calendar month. Scoped
+      // to the caller's branch via the batch join so branch admins
+      // only see their branch's revenue.
+      //
+      // MUST stay filter-for-filter identical to the Earnings tab's
+      // "Collected this month" calc in PaymentsTabScreen.js#totals.
+      // If the wording of either widget changes, update BOTH.
+      //
+      // Contract:
+      //   • payment_status = 'paid'       — Razorpay-verified or offline recorded.
+      //     Excludes pending / failed / refunded / cancelled implicitly.
+      //   • paid_at (or enrolled_at fallback) in current calendar month.
+      //   • Enrolments only — subscription plan payments, event fees,
+      //     and other non-course channels live in different tables
+      //     and never mix into this bucket.
       pool.query(
         `SELECT COALESCE(SUM(e.payment_amount), 0)::numeric AS total
            FROM enrollments e

@@ -31,6 +31,7 @@ import {
 
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
+import { confirm } from '../../components/ConfirmDialog';
 
 // ── Category metadata ──
 const CATS = [
@@ -126,25 +127,31 @@ export default function StaffNotificationsScreen({ navigation }) {
   };
 
   const onDelete = (n) => {
-    Alert.alert(
-      'Delete notification?',
-      n.title,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              await apiClient.delete(`/notifications/${n.id}`);
-              setItems((prev) => prev.filter((x) => x.id !== n.id));
-            } catch (err) {
-              Alert.alert('Could not delete', err.response?.data?.message || err.message || 'Try again.');
-            }
-          },
-        },
-      ],
-    );
+    // Branded confirm — the previous OS Alert.alert rendered with
+    // pale accent buttons that didn't match the rest of the app. Swap
+    // to the shared confirm() so this dialog reads exactly like every
+    // other destructive prompt (Cancel enrolment, Sign out, etc.).
+    confirm({
+      title:       'Delete notification?',
+      message:     n.title || 'This notification will be permanently removed.',
+      variant:     'destructive',
+      confirmText: 'Delete',
+      cancelText:  'Cancel',
+      onConfirm: async () => {
+        try {
+          await apiClient.delete(`/notifications/${n.id}`);
+          setItems((prev) => prev.filter((x) => x.id !== n.id));
+        } catch (err) {
+          confirm({
+            title:       'Could not delete',
+            message:     err.response?.data?.message || err.message || 'Try again.',
+            variant:     'warning',
+            confirmText: 'Got it',
+            hideCancel:  true,
+          });
+        }
+      },
+    });
   };
 
   const markAllRead = async () => {

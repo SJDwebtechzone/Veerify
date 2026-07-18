@@ -90,14 +90,22 @@ export const radius = {
 // ─────────────────────────────────────────────────────────────────────────────
 export const type = {
   // Sizes
+  //
+  // Non-heading text bumped by 1pt (body 14 → 15, bodyBold 14 → 15,
+  // caption 12 → 13, micro 10 → 11) so labels, meta rows, hints, and
+  // captions all read a touch larger without changing the visual
+  // hierarchy. Line-heights bumped proportionally to keep the same
+  // ~1.4× ratio so wrapped paragraphs don't feel cramped. Headings
+  // (display / h1 / h2 / h3) are unchanged — they were already sized
+  // for hierarchy and would look chunky if scaled with the body.
   display:  { fontSize: 28, lineHeight: 34, fontWeight: '800' },
   h1:       { fontSize: 22, lineHeight: 28, fontWeight: '700' },
   h2:       { fontSize: 18, lineHeight: 24, fontWeight: '700' },
   h3:       { fontSize: 16, lineHeight: 22, fontWeight: '600' },
-  body:     { fontSize: 14, lineHeight: 20, fontWeight: '400' },
-  bodyBold: { fontSize: 14, lineHeight: 20, fontWeight: '600' },
-  caption:  { fontSize: 12, lineHeight: 16, fontWeight: '500' },
-  micro:    { fontSize: 10, lineHeight: 14, fontWeight: '600', letterSpacing: 0.5 },
+  body:     { fontSize: 15, lineHeight: 22, fontWeight: '400' },
+  bodyBold: { fontSize: 15, lineHeight: 22, fontWeight: '600' },
+  caption:  { fontSize: 13, lineHeight: 18, fontWeight: '500' },
+  micro:    { fontSize: 11, lineHeight: 15, fontWeight: '600', letterSpacing: 0.5 },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

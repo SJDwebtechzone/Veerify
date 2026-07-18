@@ -12,6 +12,12 @@ router.get('/me', verifyToken, requireRole('trainer'), trainerController.getMe);
 // come before /:id).
 router.get('/all', verifyToken, trainerController.getAllTrainers);
 
+// Public — a lightweight trainer profile keyed by id. No auth so
+// guests browsing Course Detail can open a trainer's public card.
+// Static path :id/public must come BEFORE the admin-scoped /:id
+// route so Express doesn't capture "public" as an id.
+router.get('/:id/public', trainerController.getPublicTrainerById);
+
 // All other trainer routes are admin-only
 router.post('/', verifyToken, requireRole('admin'), requireActiveSubscription, trainerController.createTrainer);
 router.get('/', verifyToken, requireRole('admin'), trainerController.getMyTrainers);

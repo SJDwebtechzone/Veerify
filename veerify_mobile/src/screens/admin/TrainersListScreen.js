@@ -23,6 +23,7 @@ import {
 } from 'lucide-react-native';
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
+import { useBellScrollHandler } from '../../components/bellScrollBus';
 import PlanLimitModal from '../../components/PlanLimitModal';
 import { confirm } from '../../components/ConfirmDialog';
 // Shared resolver — repairs legacy DB rows that baked in 10.0.2.2:5000
@@ -235,6 +236,8 @@ export default function TrainersListScreen({ navigation }) {
         data={trainers}
         keyExtractor={(item) => String(item.id)}
         contentContainerStyle={{ padding: spacing.lg, paddingBottom: 120 }}
+        onScroll={useBellScrollHandler()}
+        scrollEventThrottle={16}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}

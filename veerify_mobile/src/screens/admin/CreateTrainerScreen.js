@@ -937,8 +937,12 @@ export default function CreateTrainerScreen({ navigation, route }) {
         {/* ── Section 6: Salary ── */}
         {/* Monthly base pay. Read-only on the payroll screen, editable
             here. Deductions per month are captured on Institution →
-            More → Salary and stored per-slip. */}
-        <SectionTitle icon={Briefcase} title="Compensation" />
+            More → Salary and stored per-slip.
+            Note: the section header was previously "Compensation" but
+            the spec renames the user-facing wording to "Salary" for
+            consistency with the inner field label. Data column stays
+            `basic_salary` — this is a copy-only change. */}
+        <SectionTitle icon={Briefcase} title="Salary" />
         <Field label="Basic Salary (per month, ₹)">
           <TextInput
             style={styles.input}

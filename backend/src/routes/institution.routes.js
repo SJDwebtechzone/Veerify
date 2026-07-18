@@ -32,6 +32,11 @@ router.post('/me/events',          verifyToken, requireRole('admin'), institutio
 // Razorpay Payment Link and returns short_url for the app to open. Sits
 // as a literal /events/... path so it doesn't collide with /:id/events.
 router.post('/events/:eventId/pay', verifyToken, institutionController.payForInstitutionEvent);
+// /events/:eventId/payment-status — polled by the mobile after the
+// payer returns from Razorpay. Reports paid | pending | failed | none
+// so the client can flip UI to Registered without waiting for the next
+// full events refetch.
+router.get('/events/:eventId/payment-status', verifyToken, institutionController.getEventPaymentStatus);
 
 // Branch → Parent event approval flow.
 //   GET  /me/events/pending — parent admin lists pending branch events.

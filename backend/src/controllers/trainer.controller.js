@@ -402,6 +402,70 @@ exports.getMyTrainers = async (req, res) => {
   }
 };
 
+// GET /api/trainers/:id/public
+//
+// Public trainer profile — no auth required. Powers the mobile
+// PublicTrainerProfileScreen that guests and students reach by tapping
+// the Trainer card on Course Detail. Returns the full public-facing
+// bundle: photo, name, skills, experience, bio, certificate URLs,
+// belt level, achievements, plus the academy name / city / logo the
+// trainer belongs to.
+//
+// Deliberately does NOT expose contact fields (email, phone,
+// govt_proof_*) — those are private.
+exports.getPublicTrainerById = async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ message: 'Invalid trainer id' });
+    }
+    const result = await pool.query(
+      `SELECT t.id,
+              t.specialization,
+              t.belt_level,
+              t.experience_years,
+              t.bio,
+              t.photo_url,
+              t.certificate_url,
+              t.skills,
+              t.gender,
+              t.date_of_birth,
+              u.name        AS name,
+              i.id          AS institution_id,
+              i.name        AS institution_name,
+              i.city        AS institution_city,
+              i.logo_url    AS institution_logo_url,
+              i.institution_type,
+              -- Aggregated public stats: how many active courses this
+              -- trainer is associated with by name, and how many batches
+              -- they teach — surfaces on the profile as bona-fide credentials.
+              (SELECT COUNT(*)::int
+                 FROM courses c
+                WHERE c.institution_id = t.institution_id
+                  AND (c.trainer_id = t.id OR c.trainer_name = u.name)
+                  AND COALESCE(c.status, 'active') = 'active'
+              ) AS active_courses,
+              (SELECT COUNT(*)::int
+                 FROM batches b
+                WHERE b.trainer_id = t.id
+              ) AS batches_taught
+         FROM trainers t
+         JOIN users u        ON u.id = t.user_id
+         JOIN institutions i ON i.id = t.institution_id
+        WHERE t.id = $1
+          AND COALESCE(u.is_deleted, false) = false`,
+      [id],
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'Trainer not found' });
+    }
+    res.json({ trainer: result.rows[0] });
+  } catch (err) {
+    console.error('Get public trainer error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
 // GET single trainer
 exports.getTrainerById = async (req, res) => {
   try {

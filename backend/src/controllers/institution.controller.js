@@ -1264,6 +1264,39 @@ exports.payForInstitutionEvent = async (req, res) => {
     );
     const p = payer.rows[0] || {};
 
+    // ── Normalise the payer's contact number ─────────────────────────
+    // ROOT CAUSE of the "Payment Authentication Failed" error we've
+    // been seeing at OTP time: Razorpay uses `customer.contact` for
+    // 3DS / OTP delivery. If we pass a bare 10-digit Indian number
+    // ("9876543210") the SMS gateway that Razorpay routes through
+    // rejects it and the payer sees "Payment Authentication Failed"
+    // even though the card + card data were correct. Razorpay expects
+    // an E.164 string like "+919876543210". We normalise defensively:
+    //   • strip whitespace / hyphens / parentheses
+    //   • if the number already starts with '+', keep as-is
+    //   • if it starts with '91' and is 12 digits, prefix '+'
+    //   • if it's a plain 10-digit Indian mobile (starts 6-9), prefix '+91'
+    //   • anything else (unusable) → omit the field entirely so
+    //     Razorpay defaults to asking the payer for a phone at
+    //     checkout instead of failing auth silently.
+    const normaliseContact = (raw) => {
+      if (!raw) return undefined;
+      const cleaned = String(raw).replace(/[\s\-()]+/g, '');
+      if (!cleaned) return undefined;
+      if (cleaned.startsWith('+')) return cleaned;
+      if (/^91\d{10}$/.test(cleaned)) return `+${cleaned}`;
+      if (/^[6-9]\d{9}$/.test(cleaned)) return `+91${cleaned}`;
+      return undefined;
+    };
+    const contactE164 = normaliseContact(p.phone);
+
+    // Basic email sanity — pass through only when it looks vaguely
+    // valid so Razorpay doesn't reject junk seed emails.
+    const cleanEmail =
+      typeof p.email === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(p.email.trim())
+        ? p.email.trim()
+        : undefined;
+
     const amountPaise = Math.round(amountRupees * 100);
     const referenceId = `evt_${eventId}_u${userId}_${Date.now()}`;
     let link;
@@ -1278,8 +1311,8 @@ exports.payForInstitutionEvent = async (req, res) => {
         reference_id: referenceId,
         customer: {
           name:    p.name || undefined,
-          email:   p.email || undefined,
-          contact: p.phone || undefined,
+          email:   cleanEmail,
+          contact: contactE164,
         },
         notes: {
           // Webhook uses these to route back to the correct row.
@@ -1302,9 +1335,68 @@ exports.payForInstitutionEvent = async (req, res) => {
       [eventId, userId, amountPaise, link.id, link.short_url],
     );
 
-    return res.json({ ok: true, short_url: link.short_url });
+    // Return the full envelope the mobile client needs to render its
+    // "Verifying" state and (optionally, in future) drive the native
+    // Razorpay SDK. We include:
+    //   • key_id   — public key so the client can render an "opened
+    //     with Razorpay <keyId>" strip and switch to native SDK later
+    //   • order_id — the Payment Link id, used as the correlation id
+    //     for the polling endpoint (/events/:id/payment-status)
+    //   • amount   — paise (Razorpay convention) so client math never
+    //     drifts from server truth
+    //   • currency — always INR for now, explicit so future USD/etc
+    //     doesn't need a shim
+    return res.json({
+      ok: true,
+      short_url: link.short_url,
+      key_id:    process.env.RAZORPAY_KEY_ID,
+      order_id:  link.id,
+      amount:    amountPaise,
+      currency:  'INR',
+    });
   } catch (err) {
     console.error('payForInstitutionEvent error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// GET /api/institutions/events/:eventId/payment-status
+//
+// Mobile polls this after the payer returns from the Razorpay hosted
+// page. Reports the current server-side status of the caller's most
+// recent event_payments row for this event. Never mutates state —
+// only the signed webhook can flip 'pending' → 'paid'.
+//
+// Returns:
+//   { status: 'paid' | 'pending' | 'failed' | 'none',
+//     payment_id: string | null,
+//     paid_at:    ISO string | null }
+exports.getEventPaymentStatus = async (req, res) => {
+  try {
+    const userId  = req.user?.id;
+    const eventId = parseInt(req.params.eventId, 10);
+    if (!userId)                   return res.status(401).json({ message: 'Not authenticated' });
+    if (!Number.isFinite(eventId)) return res.status(400).json({ message: 'Bad event id' });
+
+    const q = await pool.query(
+      `SELECT status, razorpay_payment_id, paid_at
+         FROM event_payments
+        WHERE event_id = $1 AND user_id = $2
+        ORDER BY created_at DESC
+        LIMIT 1`,
+      [eventId, userId],
+    );
+    if (q.rows.length === 0) {
+      return res.json({ status: 'none', payment_id: null, paid_at: null });
+    }
+    const row = q.rows[0];
+    return res.json({
+      status:     row.status || 'pending',
+      payment_id: row.razorpay_payment_id || null,
+      paid_at:    row.paid_at || null,
+    });
+  } catch (err) {
+    console.error('getEventPaymentStatus error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };

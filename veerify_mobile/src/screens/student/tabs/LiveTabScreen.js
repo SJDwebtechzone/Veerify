@@ -30,6 +30,7 @@ import apiClient from '../../../api/client';
 import { useAuth } from '../../../context/AuthContext';
 import { useInstitution } from '../../../context/InstitutionContext';
 import { palette, spacing, radius, shadows, type } from '../../../theme';
+import { useBellScrollHandler } from '../../../components/bellScrollBus';
 
 const ASSET_HOST = (apiClient.defaults.baseURL || '').replace(/\/api\/?$/, '');
 function resolveAssetUrl(src) {
@@ -294,6 +295,8 @@ export default function LiveTabScreen({ navigation }) {
       <ScrollView
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{ paddingBottom: 40 }}
+        onScroll={useBellScrollHandler()}
+        scrollEventThrottle={16}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}

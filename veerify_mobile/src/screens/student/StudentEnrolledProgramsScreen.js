@@ -8,6 +8,14 @@
 //   • Payment / activation status pill
 //   • Progress bar (from /curriculum-progress, best-effort per row)
 //
+// Access rule: a row only appears in the main "Enrolled Programs"
+// list once its payment_status is 'paid' (webhook-verified). Pending
+// / failed / cancelled enrolments surface in a separate "Pending
+// payments" section at the top of the same screen with a Pay Now
+// CTA so the student can resume the Razorpay flow. Course content
+// (EnrolledCourse) is only reachable via the paid list — the pending
+// section only exposes Pay Now, never the course itself.
+//
 // Empty state renders a friendly nudge to browse academies.
 
 import React, { useCallback, useEffect, useState } from 'react';
@@ -18,13 +26,14 @@ import {
 import { useFocusEffect } from '@react-navigation/native';
 import {
   ArrowLeft, BookOpen, GraduationCap, Building2, User,
-  Calendar, Award, ChevronRight,
+  Calendar, Award, ChevronRight, Clock, CreditCard,
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 import resolveAssetUrl from '../../utils/assetUrl';
 import DownloadInvoiceButton from '../../components/DownloadInvoiceButton';
+import { confirm } from '../../components/ConfirmDialog';
 
 function fmtDate(iso) {
   if (!iso) return '—';
@@ -58,10 +67,16 @@ export default function StudentEnrolledProgramsScreen({ navigation }) {
       setRows(list);
       setBeltName(journey.data?.current_belt?.name || null);
 
-      // Best-effort curriculum progress per unique course. Failures
-      // (no curriculum, network hiccup) collapse to 0/0 so the UI
-      // shows an empty bar instead of throwing.
-      const uniqueCourses = Array.from(new Set(list.map((e) => e.course_id).filter(Boolean)));
+      // Best-effort curriculum progress per unique course. Only fetch
+      // for PAID rows — pending / failed enrolments don't grant access
+      // to lessons, so their progress is by definition 0/0 and asking
+      // the backend would just spam useless requests.
+      const uniqueCourses = Array.from(new Set(
+        list
+          .filter((e) => e.payment_status === 'paid')
+          .map((e) => e.course_id)
+          .filter(Boolean),
+      ));
       const progResults = await Promise.all(
         uniqueCourses.map((cid) =>
           apiClient.get(`/curriculum-progress?course_id=${cid}`)
@@ -77,6 +92,62 @@ export default function StudentEnrolledProgramsScreen({ navigation }) {
       setRefreshing(false);
     }
   }, []);
+
+  // Split rows into paid (grants access to course content) vs pending
+  // / failed / cancelled (only exposes Pay Now). Cancelled and any
+  // unrecognised payment_status fall into the pending bucket so the
+  // student can always see and resume the payment.
+  const paidRows    = React.useMemo(
+    () => rows.filter((r) => r.payment_status === 'paid'),
+    [rows],
+  );
+  const pendingRows = React.useMemo(
+    () => rows.filter((r) => r.payment_status !== 'paid'),
+    [rows],
+  );
+
+  // Hand the row off to EnrollmentPaymentScreen — same payload shape
+  // it expects on the happy path from the enrolment form so it can
+  // render the summary card and open Razorpay.
+  const handlePayNow = (row) => {
+    const amount = Number(row.payment_amount) || Number(row.course_price) || 0;
+    if (amount <= 0) {
+      confirm({
+        title:       'No amount to pay',
+        message:     'This enrolment has no price set. Please contact your academy.',
+        variant:     'warning',
+        confirmText: 'Got it',
+        hideCancel:  true,
+      });
+      return;
+    }
+    const payload = {
+      enrollment: { id: row.id, payment_amount: amount },
+      batch: {
+        id:              row.batch_id,
+        name:            row.batch_name,
+        course_id:       row.course_id,
+        course_name:     row.course_name,
+        course_price:    row.course_price,
+        institution_name:row.institution_name,
+        days_of_week:    row.days_of_week,
+        start_time:      row.start_time,
+        end_time:        row.end_time,
+      },
+      course: {
+        id:               row.course_id,
+        name:             row.course_name,
+        price:            row.course_price,
+        institution_name: row.institution_name,
+      },
+      amount,
+    };
+    try {
+      navigation.navigate('EnrollmentPayment', payload);
+    } catch (_) {
+      try { navigation.getParent()?.navigate('EnrollmentPayment', payload); } catch (_) {}
+    }
+  };
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   return (
@@ -88,7 +159,9 @@ export default function StudentEnrolledProgramsScreen({ navigation }) {
         <View style={{ flex: 1 }}>
           <Text style={styles.title}>Enrolled Programs</Text>
           <Text style={styles.subtitle}>
-            {rows.length === 0 ? 'None yet' : `${rows.length} program${rows.length === 1 ? '' : 's'}`}
+            {paidRows.length === 0
+              ? (pendingRows.length > 0 ? 'Complete payment to activate' : 'None yet')
+              : `${paidRows.length} active program${paidRows.length === 1 ? '' : 's'}`}
           </Text>
         </View>
       </View>
@@ -97,7 +170,7 @@ export default function StudentEnrolledProgramsScreen({ navigation }) {
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={palette.purple.vivid} />
         </View>
-      ) : rows.length === 0 ? (
+      ) : (paidRows.length === 0 && pendingRows.length === 0) ? (
         <View style={styles.emptyCard}>
           <GraduationCap size={40} color={palette.textLight} strokeWidth={1.6} />
           <Text style={styles.emptyTitle}>No enrollments yet</Text>
@@ -116,17 +189,103 @@ export default function StudentEnrolledProgramsScreen({ navigation }) {
             />
           }
         >
-          {rows.map((row) => (
-            <ProgramCard
-              key={row.id}
-              row={row}
-              beltName={beltName}
-              progress={progressById[row.course_id]}
-              onPress={() => navigation.navigate('EnrolledCourse', { enrollmentId: row.id })}
-            />
-          ))}
+          {/* ── Pending payments — only Pay Now is exposed, never the
+              course itself. A row can only cross into the paid list
+              below once the Razorpay webhook has flipped its
+              payment_status server-side. */}
+          {pendingRows.length > 0 && (
+            <View style={{ marginBottom: spacing.lg }}>
+              <View style={styles.sectionHeaderRow}>
+                <Clock size={14} color={palette.textMuted} strokeWidth={2.4} />
+                <Text style={styles.sectionHeaderText}>Pending payments</Text>
+              </View>
+              <Text style={styles.sectionHint}>
+                These enrolments will move to your active list once payment
+                is successful.
+              </Text>
+              {pendingRows.map((row) => (
+                <PendingCard
+                  key={row.id}
+                  row={row}
+                  onPayNow={() => handlePayNow(row)}
+                />
+              ))}
+            </View>
+          )}
+
+          {/* ── Active (paid) programs — the only entry point that can
+              route into EnrolledCourse and unlock lessons, videos,
+              curriculum progress, certificates, etc. */}
+          {paidRows.length > 0 && (
+            <>
+              {pendingRows.length > 0 && (
+                <View style={styles.sectionHeaderRow}>
+                  <GraduationCap size={14} color={palette.textMuted} strokeWidth={2.4} />
+                  <Text style={styles.sectionHeaderText}>Active programs</Text>
+                </View>
+              )}
+              {paidRows.map((row) => (
+                <ProgramCard
+                  key={row.id}
+                  row={row}
+                  beltName={beltName}
+                  progress={progressById[row.course_id]}
+                  onPress={() => navigation.navigate('EnrolledCourse', { enrollmentId: row.id })}
+                />
+              ))}
+            </>
+          )}
         </ScrollView>
       )}
+    </View>
+  );
+}
+
+// ── Pending payment card ───────────────────────────────────────────
+// Reduced-affordance row for a not-yet-paid enrolment. Deliberately
+// does NOT route into EnrolledCourse — only the Pay Now button is
+// interactive. Once the Razorpay webhook flips the row to paid, it
+// disappears from here and shows up in the active list above.
+function PendingCard({ row, onPayNow }) {
+  const amount = Number(row.payment_amount) || Number(row.course_price) || 0;
+  return (
+    <View style={styles.pendingCard}>
+      <View style={styles.pendingHead}>
+        <View style={styles.pendingIcon}>
+          <BookOpen size={18} color={palette.purple.vivid} strokeWidth={2.4} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.pendingCourse} numberOfLines={1}>
+            {row.course_name || 'Course'}
+          </Text>
+          <Text style={styles.pendingAcademy} numberOfLines={1}>
+            {row.institution_name || 'Academy'}
+            {row.batch_name ? ` · ${row.batch_name}` : ''}
+          </Text>
+        </View>
+        <View style={styles.pendingBadge}>
+          <Text style={styles.pendingBadgeText}>
+            {row.payment_status === 'failed' ? 'FAILED' : 'PENDING'}
+          </Text>
+        </View>
+      </View>
+
+      <View style={styles.pendingFooter}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.pendingAmountLabel}>Amount due</Text>
+          <Text style={styles.pendingAmount}>
+            {amount > 0 ? `₹${amount.toLocaleString('en-IN')}` : '—'}
+          </Text>
+        </View>
+        <TouchableOpacity
+          style={styles.payNowBtn}
+          onPress={onPayNow}
+          activeOpacity={0.85}
+        >
+          <CreditCard size={14} color="#fff" strokeWidth={2.4} />
+          <Text style={styles.payNowBtnText}>Pay Now</Text>
+        </TouchableOpacity>
+      </View>
     </View>
   );
 }
@@ -314,6 +473,73 @@ const styles = StyleSheet.create({
   },
   emptyTitle: { ...type.bodyBold, color: palette.text, marginTop: 6 },
   emptySub:   { ...type.caption, color: palette.textMuted, textAlign: 'center' },
+
+  // ── Section header (Pending / Active) ─────────────────────────────
+  sectionHeaderRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    marginBottom: 4, marginTop: spacing.xs,
+  },
+  sectionHeaderText: {
+    ...type.caption, color: palette.textMuted, fontWeight: '800',
+    letterSpacing: 0.5, textTransform: 'uppercase',
+  },
+  sectionHint: {
+    ...type.caption, color: palette.textMuted,
+    marginBottom: spacing.sm,
+  },
+
+  // ── Pending payment card ──────────────────────────────────────────
+  pendingCard: {
+    backgroundColor: palette.surface,
+    borderRadius: radius.lg,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+    borderWidth: 1, borderColor: '#FED7AA',
+    ...shadows.card,
+  },
+  pendingHead: {
+    flexDirection: 'row', alignItems: 'center', gap: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  pendingIcon: {
+    width: 40, height: 40, borderRadius: radius.md,
+    backgroundColor: palette.purple.soft,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  pendingCourse: { ...type.bodyBold, color: palette.text },
+  pendingAcademy: {
+    ...type.caption, color: palette.textMuted, marginTop: 2,
+  },
+  pendingBadge: {
+    paddingHorizontal: 8, paddingVertical: 3,
+    borderRadius: 999,
+    backgroundColor: '#FEF3C7',
+  },
+  pendingBadgeText: {
+    fontSize: 10, fontWeight: '900', color: '#92400E',
+    letterSpacing: 0.6,
+  },
+  pendingFooter: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingTop: spacing.sm,
+    borderTopWidth: 1, borderTopColor: palette.borderSoft,
+    gap: spacing.md,
+  },
+  pendingAmountLabel: {
+    ...type.caption, color: palette.textMuted, fontWeight: '700',
+  },
+  pendingAmount: {
+    ...type.bodyBold, color: palette.text, marginTop: 2, fontSize: 16,
+  },
+  payNowBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: palette.purple.vivid,
+    paddingHorizontal: 16, paddingVertical: 10,
+    borderRadius: radius.md,
+  },
+  payNowBtnText: {
+    color: '#fff', fontWeight: '800', fontSize: 13,
+  },
 
   card: {
     backgroundColor: palette.surface,

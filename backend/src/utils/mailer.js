@@ -13,9 +13,35 @@
 const nodemailer = require('nodemailer');
 
 const SMTP_USER = process.env.SMTP_USER;
-// Public base URL of the backend, used for links in emails. Falls back
-// to localhost during dev; production sets APP_BASE_URL in the env.
-const APP_BASE_URL = process.env.APP_BASE_URL || 'http://localhost:5000';
+// ── URL resolution ───────────────────────────────────────────────────
+// We keep two distinct URLs for emails and payment redirects so the
+// same code runs unchanged across dev, staging, and production:
+//
+//   API_BASE_URL  — public origin of the BACKEND (Express) server.
+//                    Used for links the recipient must hit against
+//                    the API — the pay-approval picker page lives on
+//                    the backend, for example. Preferred name.
+//   APP_BASE_URL  — legacy alias for API_BASE_URL. Older deployments
+//                    only set this one, so we fall back to it before
+//                    hard-defaulting.
+//   WEB_APP_URL   — public origin of the FRONTEND (web admin) app.
+//                    Post-payment success pages, not the API.
+//
+// Hard defaults deliberately point at PRODUCTION (https://veerifyapp.com)
+// rather than localhost so a missing env in a staging box never leaks
+// a "localhost:5000" link into a real email. Local dev overrides both
+// via .env when needed.
+const API_BASE_URL =
+  process.env.API_BASE_URL ||
+  process.env.APP_BASE_URL ||
+  'https://veerifyapp.com';
+const WEB_APP_URL =
+  process.env.WEB_APP_URL ||
+  process.env.APP_BASE_URL ||
+  'https://veerifyapp.com';
+// Kept for backward compat with call sites still referencing this name.
+// New code should use API_BASE_URL or WEB_APP_URL explicitly.
+const APP_BASE_URL = API_BASE_URL;
 const SMTP_PASS = process.env.SMTP_PASS;
 const FROM_NAME = process.env.MAIL_FROM_NAME || 'Veerify';
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || SMTP_USER;

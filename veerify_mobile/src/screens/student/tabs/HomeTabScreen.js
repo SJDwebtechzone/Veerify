@@ -33,6 +33,7 @@ import { useInstitution } from '../../../context/InstitutionContext';
 import { palette, spacing, radius, shadows, type } from '../../../theme';
 import MyDashboard from '../MyDashboard';
 import NearbyLocationPicker from '../../../components/NearbyLocationPicker';
+import { useBellScrollHandler } from '../../../components/bellScrollBus';
 import { confirm } from '../../../components/ConfirmDialog';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -220,6 +221,8 @@ export default function HomeTabScreen({ navigation }) {
     );
   }
 
+  const bellScroll = useBellScrollHandler();
+
   return (
     <View style={styles.screen}>
       <ScrollView
@@ -232,10 +235,19 @@ export default function HomeTabScreen({ navigation }) {
           />
         }
         contentContainerStyle={{ paddingBottom: 40 }}
+        // Auto-hide the floating notification bell as the viewer
+        // scrolls down; slide it back in on scroll up. Handler is
+        // stateless — no re-renders on scroll frames.
+        onScroll={bellScroll}
+        scrollEventThrottle={16}
       >
         {/* ── Header ───────────────────────────────────────────── */}
+        {/* Bell removed from the header — it now floats globally via
+            <GlobalNotificationBell/> so it stays visible on every
+            screen. The spacer keeps the greeting from butting up
+            against the floating bell in the top-right corner. */}
         <View style={styles.header}>
-          <View style={{ flex: 1 }}>
+          <View style={{ flex: 1, paddingRight: 54 }}>
             <Text style={styles.greeting}>{isGuest ? 'Welcome to Veerify' : `Hi, ${user.name.split(' ')[0]} 👋`}</Text>
             <TouchableOpacity
               style={styles.instSelector}
@@ -248,41 +260,6 @@ export default function HomeTabScreen({ navigation }) {
               <ChevronDown size={16} color={palette.purple.vivid} strokeWidth={2.4} />
             </TouchableOpacity>
           </View>
-          <TouchableOpacity
-            style={styles.bellButton}
-            onPress={() => {
-              // Guests can browse the app but can't hold notifications
-              // — nothing is scoped to a user for them. Instead of
-              // opening an empty list we surface a login prompt with
-              // two paths: Login (existing account) or Sign up (new
-              // account). Once authenticated the bell resumes its
-              // normal behaviour of routing to StaffNotifications.
-              if (isGuest) {
-                confirm({
-                  title:       'Sign in for notifications',
-                  message:
-                    'Login to receive notifications about courses, batches, ' +
-                    'events, offers, announcements, and more.',
-                  variant:     'destructive',
-                  confirmText: 'Login',
-                  cancelText:  'Sign up',
-                  onConfirm: () => {
-                    try { navigation.navigate('Login'); return; } catch {}
-                    try { navigation.getParent()?.navigate('Login'); } catch {}
-                  },
-                  onCancel: () => {
-                    try { navigation.navigate('Register'); return; } catch {}
-                    try { navigation.getParent()?.navigate('Register'); } catch {}
-                  },
-                });
-                return;
-              }
-              navigation.navigate('StaffNotifications');
-            }}
-            activeOpacity={0.85}
-          >
-            <Bell size={20} color={palette.text} strokeWidth={2.2} />
-          </TouchableOpacity>
         </View>
 
         {/* ── Banner carousel ─────────────────────────────────── */}
@@ -908,13 +885,18 @@ const styles = StyleSheet.create({
   sectionAction: { flexDirection: 'row', alignItems: 'center', gap: 2, marginTop: 2 },
   sectionActionText: { ...type.caption, color: palette.purple.vivid, fontWeight: '700' },
 
-  // Pick-academy soft prompt (shown when no institution is selected)
+  // Pick-academy soft prompt (shown when no institution is selected).
+  // Vertical margins bumped so the "Other Academies Near You" section
+  // below breathes — previously the card had marginTop but no
+  // marginBottom, so the two sections looked visually stuck together
+  // for guest users (where nothing renders between them).
   pickAcademyCard: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.md,
     marginHorizontal: spacing.xl,
-    marginTop: spacing.lg,
+    marginTop: spacing.xl,
+    marginBottom: spacing.xl,
     padding: spacing.md,
     backgroundColor: palette.purple.soft,
     borderRadius: radius.lg,

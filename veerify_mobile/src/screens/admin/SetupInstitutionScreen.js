@@ -1044,11 +1044,21 @@ export default function SetupInstitutionScreen({ navigation }) {
     [stepIdx],
   );
 
-  // Close-handle for the Medium of Instruction dropdown in StepOperations.
-  // The dropdown binds its close fn into this ref via useEffect; the
-  // parent ScrollView fires it on scroll so the panel collapses as soon
-  // as the owner moves past it to the next field.
+  // Close-handles for every inline dropdown on this screen. Each
+  // dropdown binds its `setOpen(false)` into `.current` via useEffect,
+  // and we call every ref whenever the ScrollView scrolls or a
+  // different text input takes focus — so the panel collapses the
+  // moment the owner moves past it and never overlaps the next field.
   const mediumCloseRef = React.useRef(null);
+  const skillsCloseRef = React.useRef(null);
+
+  // One-shot helper — fires every registered close handle. Callers
+  // don't need to know which dropdowns are on the current step; adding
+  // a new inline dropdown just means registering another ref here.
+  const closeAllDropdowns = React.useCallback(() => {
+    try { mediumCloseRef.current && mediumCloseRef.current(); } catch (_) {}
+    try { skillsCloseRef.current && skillsCloseRef.current(); } catch (_) {}
+  }, []);
 
   return (
     <KeyboardAvoidingView
@@ -1120,14 +1130,30 @@ export default function SetupInstitutionScreen({ navigation }) {
         contentContainerStyle={styles.body}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
-        // Close any open in-page dropdown the moment the user scrolls past
-        // it. Currently only the Medium of Instruction picker uses this;
-        // any future inline dropdown can register its close handle here too.
-        onScroll={() => { mediumCloseRef.current && mediumCloseRef.current(); }}
+        // Close every open inline dropdown the instant the owner
+        // starts dragging. onScrollBeginDrag is user-initiated only
+        // — content-height changes from opening the panel itself do
+        // NOT trigger it (unlike onScroll), so the panel never
+        // self-dismisses just from being opened. Also fires on
+        // onMomentumScrollBegin so a quick flick past the field
+        // still collapses the panel even without a leisurely drag.
+        onScrollBeginDrag={closeAllDropdowns}
+        onMomentumScrollBegin={closeAllDropdowns}
         scrollEventThrottle={64}
+        // Smooth scroll consistency across platforms — deceleration
+        // "normal" on iOS matches Android's default so both feel the
+        // same when the user flicks past the skills panel.
+        decelerationRate="normal"
       >
         {stepIdx === 0 && (
-          <StepCore form={form} set={set} pickLogo={() => pickAndUpload('logo')} uploading={uploading} />
+          <StepCore
+            form={form}
+            set={set}
+            pickLogo={() => pickAndUpload('logo')}
+            uploading={uploading}
+            skillsCloseRef={skillsCloseRef}
+            closeAllDropdowns={closeAllDropdowns}
+          />
         )}
         {stepIdx === 1 && (
           <StepContact
@@ -1199,7 +1225,7 @@ export default function SetupInstitutionScreen({ navigation }) {
 }
 
 // ─── Step 1: Core Details ───────────────────────────────────────────────
-function StepCore({ form, set, pickLogo, uploading }) {
+function StepCore({ form, set, pickLogo, uploading, skillsCloseRef, closeAllDropdowns }) {
   return (
     <>
       <SectionIntro
@@ -1288,6 +1314,11 @@ function StepCore({ form, set, pickLogo, uploading }) {
           options={SKILL_OPTIONS}
           other={form.skills_other}
           onOtherChange={(v) => set('skills_other', v)}
+          // Register the panel's imperative close handle so the parent
+          // ScrollView can dismiss it on scroll and any downstream
+          // input's onFocus can dismiss it when focus moves to the
+          // next section.
+          closeRef={skillsCloseRef}
         />
       </Field>
 
@@ -1299,6 +1330,11 @@ function StepCore({ form, set, pickLogo, uploading }) {
           value={form.registration_number}
           onChangeText={(v) => set('registration_number', v)}
           autoCapitalize="characters"
+          // Moving to the next field must dismiss the Skills panel so
+          // the panel body doesn't hover over the field the user is
+          // now editing. Runs on tap, native focus, and keyboard
+          // arrival (which triggers a layout scroll on Android).
+          onFocus={closeAllDropdowns}
         />
       </Field>
 
@@ -1887,8 +1923,18 @@ function InstitutionTypeSelect({ value, onChange, options }) {
 // expands inline with one tappable row per option + a Check tick for the
 // selected ones. Tapping a row toggles it; the trigger summary updates
 // live and the panel stays open so they can pick several at once.
-function SkillsMultiSelect({ values, onToggle, options, other, onOtherChange }) {
+function SkillsMultiSelect({ values, onToggle, options, other, onOtherChange, closeRef }) {
   const [open, setOpen] = React.useState(false);
+
+  // Bind the imperative close handle to the parent's ref so the
+  // ScrollView + downstream input onFocus can dismiss the panel.
+  // Same pattern as MediumDropdown below. Cleanup nulls the ref on
+  // unmount so a stale reference can't fire after teardown.
+  React.useEffect(() => {
+    if (closeRef) closeRef.current = () => setOpen(false);
+    return () => { if (closeRef) closeRef.current = null; };
+  }, [closeRef]);
+
   const selected = Array.isArray(values) ? values : [];
   const summary = selected.length === 0
     ? 'Select disciplines…'
@@ -1966,6 +2012,10 @@ function SkillsMultiSelect({ values, onToggle, options, other, onOtherChange }) 
           value={other}
           onChangeText={onOtherChange}
           maxLength={60}
+          // Tapping into the Others field is a clear "moving past the
+          // grid" signal, so collapse the picker panel so it doesn't
+          // eclipse the input the owner is now typing into.
+          onFocus={() => setOpen(false)}
         />
         {selected.length > 0 ? (
           <Text style={styles.skillsOtherHint}>

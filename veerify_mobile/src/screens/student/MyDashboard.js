@@ -34,6 +34,7 @@ import { useAuth } from '../../context/AuthContext';
 // Shared resolver — strips embedded localhost / 10.0.2.2 hosts from
 // legacy DB rows so old uploads still render on any client.
 import resolveAssetUrl from '../../utils/assetUrl';
+import { useBellScrollHandler } from '../../components/bellScrollBus';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const VIDEO_CARD_WIDTH = Math.round(SCREEN_WIDTH * 0.65);
@@ -164,11 +165,15 @@ export default function MyDashboard({ navigation }) {
     .split(' ').map((w) => w[0]).filter(Boolean)
     .slice(0, 2).join('').toUpperCase() || '?';
 
+  const bellScroll = useBellScrollHandler();
+
   return (
     <View style={styles.screen}>
       <ScrollView
         contentContainerStyle={{ paddingBottom: 120 }}
         showsVerticalScrollIndicator={false}
+        onScroll={bellScroll}
+        scrollEventThrottle={16}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
@@ -191,13 +196,8 @@ export default function MyDashboard({ navigation }) {
               <Text style={styles.heroEyebrow}>WELCOME BACK</Text>
               <Text style={styles.heroName} numberOfLines={1}>{fullName}</Text>
             </View>
-            <TouchableOpacity
-              style={styles.bellBtn}
-              onPress={() => navigation.navigate('StaffNotifications')}
-              activeOpacity={0.85}
-            >
-              <Bell size={18} color="#fff" strokeWidth={2.4} />
-            </TouchableOpacity>
+            {/* Inline bell removed — GlobalNotificationBell renders
+                globally now so it stays visible across every screen. */}
           </View>
 
           <View style={styles.heroSummary}>

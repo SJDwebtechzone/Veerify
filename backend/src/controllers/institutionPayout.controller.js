@@ -40,15 +40,31 @@ exports.list = async (req, res) => {
   try {
     const commissionPct = await getCommissionPercent();
 
+    // Wallet inclusion filter — MUST match the spec exactly:
+    //   • payment_status = 'paid'          (successful only; excludes
+    //                                       pending / failed /
+    //                                       cancelled / refunded)
+    //   • revenue_channel = 'wallet'       (direct student purchases
+    //                                       via Razorpay + admin-
+    //                                       created "Share Payment
+    //                                       Link" enrolments; excludes
+    //                                       offline sales which are
+    //                                       marked 'revenue')
+    // A `null` revenue_channel is NEVER included — those are legacy
+    // uncategorised rows the platform can't safely settle without
+    // manual review. The three places below (super-admin list,
+    // super-admin mark-paid, institution wallet snapshot) all share
+    // the same filter so the numbers never drift.
+    const WALLET_FILTER = `e.payment_status = 'paid' AND e.revenue_channel = 'wallet'`;
     const result = await pool.query(
       `WITH gross AS (
          SELECT i.id            AS institution_id,
                 i.name          AS institution_name,
                 i.email         AS institution_email,
                 i.logo_url      AS institution_logo,
-                COALESCE(SUM(e.payment_amount) FILTER (WHERE e.payment_status = 'paid'), 0)::numeric
+                COALESCE(SUM(e.payment_amount) FILTER (WHERE ${WALLET_FILTER}), 0)::numeric
                                 AS gross_purchases,
-                COUNT(*) FILTER (WHERE e.payment_status = 'paid') AS paid_enrollment_count
+                COUNT(*) FILTER (WHERE ${WALLET_FILTER}) AS paid_enrollment_count
            FROM institutions i
            LEFT JOIN enrollments e ON e.institution_id = i.id
           WHERE i.deleted_at IS NULL
@@ -120,12 +136,20 @@ exports.markPaid = async (req, res) => {
 
     const commissionPct = await getCommissionPercent();
 
-    // Re-aggregate for THIS institution to compute the exact pending amount
-    // — avoids races where the list view and the click happen seconds apart
-    // and the totals drift.
+    // Re-aggregate for THIS institution to compute the exact pending
+    // amount — avoids races where the list view and the click happen
+    // seconds apart and the totals drift.
+    //
+    // Filter MUST match the one in list() + getMyWallet(): paid AND
+    // revenue_channel='wallet'. This is what keeps offline sales out
+    // of the settlement flow (they were already collected in cash /
+    // UPI / bank — the platform doesn't owe the institution anything
+    // for those).
     const grossRow = await pool.query(
-      `SELECT COALESCE(SUM(payment_amount) FILTER (WHERE payment_status = 'paid'), 0)::numeric
-                AS gross_purchases
+      `SELECT COALESCE(SUM(payment_amount) FILTER (
+                 WHERE payment_status = 'paid'
+                   AND revenue_channel = 'wallet'
+               ), 0)::numeric AS gross_purchases
          FROM enrollments
         WHERE institution_id = $1`,
       [institution_id],
@@ -200,10 +224,21 @@ exports.getMyWallet = async (req, res) => {
 
     const commissionPct = await getCommissionPercent();
 
+    // Wallet inclusion filter — MUST match list() + markPaid():
+    //   • payment_status = 'paid'
+    //   • revenue_channel = 'wallet'  (direct student purchases via
+    //     Razorpay + admin-created "Share Payment Link" enrolments)
+    // Offline sales (revenue_channel='revenue') and uncategorised
+    // legacy rows (revenue_channel IS NULL) never contribute here.
     const grossRow = await pool.query(
-      `SELECT COALESCE(SUM(payment_amount) FILTER (WHERE payment_status = 'paid'), 0)::numeric
-                AS gross_purchases,
-              COUNT(*) FILTER (WHERE payment_status = 'paid') AS paid_enrollment_count
+      `SELECT COALESCE(SUM(payment_amount) FILTER (
+                 WHERE payment_status = 'paid'
+                   AND revenue_channel = 'wallet'
+               ), 0)::numeric AS gross_purchases,
+              COUNT(*) FILTER (
+                 WHERE payment_status = 'paid'
+                   AND revenue_channel = 'wallet'
+               ) AS paid_enrollment_count
          FROM enrollments
         WHERE institution_id = $1`,
       [institutionId],
@@ -222,6 +257,28 @@ exports.getMyWallet = async (req, res) => {
     const transferred = Number(transferredRow.rows[0]?.transferred_total) || 0;
     const pending     = Math.max(0, toTransfer - transferred);
 
+    // Settlement history — every row the super admin has marked paid
+    // to this institution. Drives the mobile "Settlement History"
+    // list under the wallet card. Returned newest-first so the
+    // latest settlement is always on top. Kept as a first-class
+    // field of this response so the mobile doesn't need a second
+    // round-trip to hydrate the list.
+    const historyRes = await pool.query(
+      `SELECT id,
+              gross_amount,
+              commission_percent,
+              commission_amount,
+              transfer_amount,
+              status,
+              paid_at,
+              note
+         FROM institution_payouts
+        WHERE institution_id = $1
+        ORDER BY paid_at DESC
+        LIMIT 100`,
+      [institutionId],
+    );
+
     res.json({
       institution_id:        institutionId,
       paid_enrollment_count: Number(grossRow.rows[0]?.paid_enrollment_count) || 0,
@@ -229,14 +286,31 @@ exports.getMyWallet = async (req, res) => {
       commission_percent:    commissionPct,
       commission_amount:     commissionAmt,
       to_transfer:           toTransfer,
-      // wallet_balance is the amount the institution is STILL OWED. When the
-      // super admin clicks "Mark Paid" the payout row is inserted, transferred
-      // goes up, and this number goes down to zero. (Marketplace convention:
-      // the wallet represents pending settlements, not money already received.)
+      // wallet_balance is the amount the institution is STILL OWED.
+      // When the super admin clicks "Mark Paid" the payout row is
+      // inserted, transferred goes up, and this number goes down to
+      // zero. (Marketplace convention: the wallet represents pending
+      // settlements, not money already received.)
       wallet_balance:        pending,
       paid_out_total:        transferred,
       pending_amount:        pending,
       last_paid_at:          transferredRow.rows[0]?.last_paid_at || null,
+      // Full settlement history — every mark-paid event. Each row
+      // carries { id, gross_amount, commission_percent, commission_amount,
+      // transfer_amount, status, paid_at, note }. Status is 'paid' or
+      // 'reversed' (per the institution_payouts CHECK constraint).
+      settlement_history:    historyRes.rows.map((r) => ({
+        id:                 r.id,
+        gross_amount:       Number(r.gross_amount)       || 0,
+        commission_percent: Number(r.commission_percent) || 0,
+        commission_amount:  Number(r.commission_amount)  || 0,
+        transfer_amount:    Number(r.transfer_amount)    || 0,
+        amount:             Number(r.transfer_amount)    || 0,  // alias for clarity in UI
+        status:             r.status || 'paid',
+        paid_at:            r.paid_at,
+        date:               r.paid_at,                          // alias
+        note:               r.note || null,
+      })),
     });
   } catch (err) {
     console.error('Institution wallet error:', err);

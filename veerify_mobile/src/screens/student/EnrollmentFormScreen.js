@@ -12,7 +12,7 @@
 // On second + subsequent enrollments we pre-fill the form from
 // GET /api/enrollments/my-profile so the student doesn't re-type everything.
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView, Image,
   Alert, ActivityIndicator, StyleSheet, KeyboardAvoidingView, Platform,
@@ -250,6 +250,49 @@ export default function EnrollmentFormScreen({ route, navigation }) {
   const [planModalOpen, setPlanModalOpen] = useState(false);
   const [planLimitInfo, setPlanLimitInfo] = useState(null);
 
+  // Photo source picker (Gallery/Camera). Rendered as a branded
+  // bottom sheet so it matches the rest of the app instead of the
+  // stock OS Alert.
+  const [photoPickerOpen, setPhotoPickerOpen] = useState(false);
+
+  // ── Exit guard ────────────────────────────────────────────────────
+  // Guards against accidental exit while the student is filling the
+  // enrolment form. Flipped to `true` right before we call
+  // navigation.replace('EnrollmentPayment', ...) so the successful
+  // submit path is NOT blocked by the confirmation dialog. Admin
+  // "Add student" flow bypasses the guard entirely (see below).
+  const submittedRef = useRef(false);
+
+  // Intercept every attempt to leave the screen — hardware back, the
+  // header back button, gesture-swipe, or any programmatic
+  // navigation — and prompt "Are you sure you want to exit?" per
+  // spec. Only self-enrolment gets the prompt; the admin quick-add
+  // flow shouldn't nag the operator.
+  useEffect(() => {
+    if (adminMode) return;
+    const beforeRemove = (e) => {
+      if (submittedRef.current) return; // Successful submit → allow.
+      e.preventDefault();
+      confirm({
+        title:       'Are you sure you want to exit?',
+        message:     'Your enrollment is not yet completed.',
+        variant:     'warning',
+        confirmText: 'Exit',
+        cancelText:  'Continue Enrollment',
+        onConfirm: () => {
+          // Flip the flag first so the re-dispatched action doesn't
+          // trigger this listener recursively.
+          submittedRef.current = true;
+          navigation.dispatch(e.data.action);
+        },
+        // No onCancel → dismissing the dialog leaves the student on
+        // the form exactly as spec'd ("Continue Enrollment — Stay").
+      });
+    };
+    const unsub = navigation.addListener('beforeRemove', beforeRemove);
+    return unsub;
+  }, [navigation, adminMode]);
+
   const set = (k, v) => setForm((p) => ({ ...p, [k]: v }));
 
   // Pre-fill from existing profile (subsequent enrollments) with a
@@ -341,13 +384,9 @@ export default function EnrollmentFormScreen({ route, navigation }) {
   const age = useMemo(() => ageFromDob(form.date_of_birth), [form.date_of_birth]);
 
   // ── Photo upload ───────────────────────────────────────────────────
-  const pickPhoto = () => {
-    Alert.alert('Upload Photo', 'Choose how to upload your photo:', [
-      { text: 'Gallery', onPress: () => fromGallery() },
-      { text: 'Camera',  onPress: () => fromCamera() },
-      { text: 'Cancel',  style: 'cancel' },
-    ]);
-  };
+  // Opens the branded bottom-sheet picker. The actual Gallery/Camera
+  // launches happen from the sheet's option rows, not from here.
+  const pickPhoto = () => setPhotoPickerOpen(true);
   const fromGallery = () => {
     launchImageLibrary(
       { mediaType: 'photo', quality: 0.85, maxWidth: 1200, maxHeight: 1200 },
@@ -564,6 +603,11 @@ export default function EnrollmentFormScreen({ route, navigation }) {
         return;
       }
 
+      // Flip the exit-guard flag so the beforeRemove listener lets
+      // this replace() through instead of prompting "Are you sure
+      // you want to exit?" — the student IS finishing enrolment,
+      // just moving to the payment step.
+      submittedRef.current = true;
       navigation.replace('EnrollmentPayment', {
         enrollment, batch, course, amount: paymentAmount,
       });
@@ -1230,6 +1274,76 @@ export default function EnrollmentFormScreen({ route, navigation }) {
           catch { navigation.getParent()?.navigate('PlanSelection'); }
         }}
       />
+
+      {/* Photo source picker — branded bottom sheet. Tapping the
+          backdrop or Cancel dismisses; tapping an option closes the
+          sheet first, then launches the picker on the next tick so
+          the modal has time to unmount before the OS camera/gallery
+          intent fires (Android will otherwise misroute focus). */}
+      <Modal
+        visible={photoPickerOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPhotoPickerOpen(false)}
+      >
+        <TouchableOpacity
+          style={styles.sheetBackdrop}
+          activeOpacity={1}
+          onPress={() => setPhotoPickerOpen(false)}
+        >
+          <TouchableOpacity activeOpacity={1} style={styles.sheetCard}>
+            <View style={styles.sheetHandle} />
+            <Text style={styles.sheetTitle}>Upload photo</Text>
+            <Text style={styles.sheetSubtitle}>
+              Choose how you'd like to add your photo.
+            </Text>
+
+            <TouchableOpacity
+              style={styles.sheetOption}
+              activeOpacity={0.8}
+              onPress={() => {
+                setPhotoPickerOpen(false);
+                setTimeout(() => fromGallery(), 200);
+              }}
+            >
+              <View style={[styles.sheetIconWrap, { backgroundColor: BRAND_SOFT }]}>
+                <User size={20} color={BRAND} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.sheetOptionTitle}>Choose from gallery</Text>
+                <Text style={styles.sheetOptionSub}>Pick an existing photo</Text>
+              </View>
+              <ChevronRight size={18} color={TEXT_LIGHT} />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.sheetOption}
+              activeOpacity={0.8}
+              onPress={() => {
+                setPhotoPickerOpen(false);
+                setTimeout(() => fromCamera(), 200);
+              }}
+            >
+              <View style={[styles.sheetIconWrap, { backgroundColor: BRAND_SOFT }]}>
+                <Camera size={20} color={BRAND} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.sheetOptionTitle}>Take a new photo</Text>
+                <Text style={styles.sheetOptionSub}>Open your camera</Text>
+              </View>
+              <ChevronRight size={18} color={TEXT_LIGHT} />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.sheetCancel}
+              activeOpacity={0.8}
+              onPress={() => setPhotoPickerOpen(false)}
+            >
+              <Text style={styles.sheetCancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
@@ -1391,6 +1505,83 @@ const styles = StyleSheet.create({
   body: { padding: 16, paddingBottom: 32 },
 
   photoCard: { alignItems: 'center', marginBottom: 16 },
+
+  // ── Photo picker bottom sheet ─────────────────────────────────────
+  // Slides up from the bottom (fade transition + backdrop). Two big
+  // touch targets for Gallery and Camera, plus a Cancel row.
+  sheetBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(17,24,39,0.45)',
+    justifyContent: 'flex-end',
+  },
+  sheetCard: {
+    backgroundColor: SURFACE,
+    borderTopLeftRadius: 22,
+    borderTopRightRadius: 22,
+    paddingHorizontal: 18,
+    paddingTop: 10,
+    paddingBottom: 24,
+  },
+  sheetHandle: {
+    alignSelf: 'center',
+    width: 44,
+    height: 4,
+    borderRadius: 4,
+    backgroundColor: BORDER,
+    marginBottom: 12,
+  },
+  sheetTitle: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: TEXT,
+    marginBottom: 4,
+  },
+  sheetSubtitle: {
+    fontSize: 13,
+    color: TEXT_MUTED,
+    marginBottom: 14,
+  },
+  sheetOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 10,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: BORDER,
+    backgroundColor: SURFACE,
+    marginBottom: 10,
+  },
+  sheetIconWrap: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sheetOptionTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: TEXT,
+    marginBottom: 2,
+  },
+  sheetOptionSub: {
+    fontSize: 12,
+    color: TEXT_MUTED,
+  },
+  sheetCancel: {
+    marginTop: 6,
+    paddingVertical: 14,
+    borderRadius: 14,
+    backgroundColor: BG,
+    alignItems: 'center',
+  },
+  sheetCancelText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: TEXT_MUTED,
+  },
 
   // ── Batch summary card (student mode only) ────────────────────────
   // Renders the Institution / Branch / Course / Batch / Trainer /

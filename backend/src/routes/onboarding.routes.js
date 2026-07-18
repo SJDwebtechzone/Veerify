@@ -22,6 +22,13 @@ router.get('/payment-history',  verifyToken, requireRole('admin'), onboardingCon
 //   /pay-approval/:instId               → renders HTML picker page
 //   /pay-approval/:instId?term=monthly  → mints link + 302 → Razorpay
 router.get('/pay-approval/:institutionId', onboardingController.startApprovalPayment);
+// Backend fallback for the post-payment landing page. Razorpay is
+// configured to redirect to `${WEB_APP_URL}/payment-success` — the
+// real frontend route. This endpoint exists so an ops team can add a
+// simple nginx rewrite `/payment-success → /api/onboarding/payment-success`
+// when the frontend isn't deployed yet, and no payer ever lands on a
+// raw 404 after successfully paying.
+router.get('/payment-success', onboardingController.renderPaymentSuccessPage);
 // Admin walks away from Razorpay before paying → mark the still-pending
 // row 'cancelled' so History reflects the truth.
 router.post('/mark-payment-cancelled', verifyToken, requireRole('admin'), onboardingController.markPaymentCancelled);
@@ -52,7 +59,13 @@ router.get('/:id',     verifyToken, onboardingController.getInstitutionById);
 
 router.post('/approve/:id',             verifyToken, onboardingController.approveInstitution);
 router.post('/reject/:id',              verifyToken, onboardingController.rejectInstitution);
-router.post('/activate/:id',            verifyToken, onboardingController.activateInstitution);
+// Manual activation is a SUPER-ADMIN ONLY override for institutions
+// that paid via a channel Razorpay didn't observe (offline bank
+// transfer, cheque, ops-side reconciliation). Everyone else must go
+// through the Razorpay webhook, which is the only automated path.
+// The role gate closes a legacy hole where any authenticated caller
+// could POST /activate/:id and grant an unpaid institution access.
+router.post('/activate/:id',            verifyToken, requireRole('super_admin'), onboardingController.activateInstitution);
 router.post('/resend-payment-link/:id', verifyToken, onboardingController.resendPaymentLink);
 router.post('/toggle-active/:id',       verifyToken, onboardingController.toggleInstitutionActive);
 router.post('/:id/restore',             verifyToken, onboardingController.restoreInstitution);

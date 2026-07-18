@@ -1,21 +1,27 @@
 // src/components/YouTubeThumbPlayer.js
 //
-// Inline YouTube intro-video player capped at 90 seconds.
+// Inline intro-video player used on Course Details. Behaviour depends
+// on the viewer's relationship to the course:
 //
-// Behaviour:
-//   1. Until tapped, shows the official YouTube thumbnail (max-res then high-
-//      quality fallback) with a play bubble overlay — exactly like the
-//      teaser card on Course Details.
-//   2. On tap, swaps the thumbnail for a WebView pointing at YouTube's
-//      embed URL with `end=90` so the video auto-pauses at the 90-second
-//      mark. `autoplay=1` makes it start immediately.
-//   3. We extract the video id from every common YouTube URL form (watch,
-//      youtu.be, shorts, embed) so the admin can paste whichever they
-//      copied.
+//   viewerMode = 'enrolled'  → uncapped, full playback
+//   viewerMode = 'unenrolled' → 60s preview, then "Buy this course" dialog
+//   viewerMode = 'guest'     → 60s preview, then "Login to continue" dialog
 //
-// Requires the `react-native-webview` peer module. If the package is missing
-// (e.g. fresh clone with `npm install` not yet run), we fall back to a
-// "Tap to open in YouTube" card so the screen still works.
+// Playback happens INSIDE the app in a WebView — we never open the OS
+// browser or YouTube app for enrolled students, and even the paywalled
+// preview stays in-app so the branded upsell dialog can catch it.
+//
+// URL support: any YouTube URL shape (watch, youtu.be, shorts, embed)
+// runs through the IFrame Player API. Direct .mp4 / .webm / .mov URLs
+// play via a WebView-hosted <video> element with the same 60s cap
+// enforced client-side. If neither shape matches, we fall back to
+// external launch.
+//
+// Seek defense: the 60s cap isn't just `end=60` in the query string
+// (which YouTube can be scrubbed past). A tick loop calls
+// player.getCurrentTime() every 500ms and, when the preview quota is
+// active, snaps the player back to 60 + pauses + fires the dialog if
+// the viewer scrubs beyond the limit.
 
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
@@ -37,6 +43,10 @@ try {
   WebView = null;
 }
 
+// Free preview window for guest + unenrolled viewers. Enrolled students
+// bypass the cap entirely.
+const PREVIEW_SECONDS = 60;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Pull the 11-char YouTube video id from any URL shape we've seen in the wild.
 // Returns null when the URL isn't a YouTube link.
@@ -50,6 +60,13 @@ export function youtubeIdFromUrl(url) {
   return m ? m[1] : null;
 }
 
+// Detect direct video files so we can embed them in a plain <video>
+// element inside the WebView.
+function isDirectVideoUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  return /\.(mp4|m4v|mov|webm)(\?|#|$)/i.test(url.trim());
+}
+
 // Best-quality YouTube thumbnail. `maxresdefault` doesn't exist for every
 // video (older / unprocessed ones) so the <Image> falls back to `hqdefault`
 // via the onError handler.
@@ -60,15 +77,36 @@ function thumbUrls(id) {
   };
 }
 
-// HTML page for the WebView. We load the YouTube IFrame Player API instead of
-// a bare <iframe> so we can subscribe to its `onError` event and detect 100,
-// 101, 150 (and the rare 153) embed-blocked codes — when those fire we
-// postMessage back to React Native and the host component falls back to
-// opening the video externally in the real YouTube app.
-//
-// `end=90` is YouTube's official IFrame Player parameter that auto-stops
-// playback at 90 seconds. No JS polling needed.
-function buildEmbedHtml(videoId) {
+// HTML for the YouTube IFrame Player. Two behaviours:
+//   • capped=false → no `end`, no tick-loop enforcement, full playback.
+//   • capped=true  → `end=60` plus a 500ms tick loop that snaps back +
+//     pauses + posts 'limit-reached' when currentTime exceeds 60. The
+//     tick loop guards against seek-bar scrubs that YouTube's own
+//     `end` param can't intercept.
+function buildYouTubeHtml(videoId, capped) {
+  const capJs = capped
+    ? `
+      var TICK_MS = 500;
+      var LIMIT = ${PREVIEW_SECONDS};
+      var limitFired = false;
+      setInterval(function () {
+        if (!window.__player) return;
+        try {
+          var t = window.__player.getCurrentTime();
+          if (typeof t === 'number' && t > LIMIT + 0.15) {
+            window.__player.seekTo(LIMIT, true);
+            window.__player.pauseVideo();
+            if (!limitFired) {
+              limitFired = true;
+              send({ type: 'limit-reached' });
+            }
+          }
+        } catch (e) {}
+      }, TICK_MS);
+    `
+    : '';
+  const endParam = capped ? `, end: ${PREVIEW_SECONDS}` : '';
+
   return `
     <!doctype html>
     <html>
@@ -88,21 +126,13 @@ function buildEmbedHtml(videoId) {
             try { window.ReactNativeWebView.postMessage(JSON.stringify(msg)); } catch (e) {}
           }
           function onYouTubeIframeAPIReady() {
-            new YT.Player('player', {
+            window.__player = new YT.Player('player', {
               videoId: '${videoId}',
-              // Plain youtube.com host — youtube-nocookie was rejecting some
-              // embeds with the undocumented 152 error.
               host: 'https://www.youtube.com',
               playerVars: {
                 autoplay: 1,
-                // mute=1 lets autoplay succeed under Android WebView's
-                // autoplay policy even when the user hasn't directly
-                // gestured on the iframe yet. The viewer can tap the
-                // speaker icon in the YouTube controls to un-mute, which
-                // is exactly how every other muted-autoplay site works.
                 mute: 1,
-                playsinline: 1,
-                end: 90,
+                playsinline: 1${endParam},
                 rel: 0,
                 modestbranding: 1,
                 controls: 1,
@@ -112,19 +142,73 @@ function buildEmbedHtml(videoId) {
                 onReady:  () => send({ type: 'ready' }),
                 onError:  (e) => send({ type: 'error', code: e.data }),
                 onStateChange: (e) => {
-                  // YT.PlayerState: -1 unstarted, 0 ended, 1 playing, 2 paused,
-                  // 3 buffering, 5 cued. We notify on every change so the host
-                  // component's "did we ever reach playing?" guard can clear.
                   send({ type: 'state', state: e.data });
+                  // state === 0 (ended) after the end= truncation is our
+                  // second signal that the preview window is done. The
+                  // seek-guard's 'limit-reached' catches manual scrubs;
+                  // this catches the natural end of the preview.
+                  if (e.data === 0) {
+                    send({ type: 'limit-reached' });
+                  }
                 },
               },
             });
           }
-          // (The .ytp-error DOM scanner used to live here. It was firing on
-          // transient "loading..." UI even for videos that ended up playing
-          // fine, so we now rely on the JS-API onError + the host-side
-          // watchdog instead. Don't reintroduce without verifying that
-          // YouTube hasn't started reusing .ytp-error for non-fatal states.)
+          ${capJs}
+        </script>
+      </body>
+    </html>
+  `;
+}
+
+// HTML for direct video files (mp4/webm/mov). We render a native
+// <video> and, when the preview quota is active, listen for
+// timeupdate and pause the moment currentTime crosses 60. Seek
+// attempts past 60 are snapped back to 60 via the seeking event.
+function buildDirectVideoHtml(url, capped) {
+  const guard = capped
+    ? `
+      var LIMIT = ${PREVIEW_SECONDS};
+      var limitFired = false;
+      var v = document.getElementById('v');
+      v.addEventListener('timeupdate', function () {
+        if (v.currentTime > LIMIT) {
+          v.currentTime = LIMIT;
+          v.pause();
+          if (!limitFired) { limitFired = true; send({ type: 'limit-reached' }); }
+        }
+      });
+      v.addEventListener('seeking', function () {
+        if (v.currentTime > LIMIT) {
+          v.currentTime = LIMIT;
+          v.pause();
+          if (!limitFired) { limitFired = true; send({ type: 'limit-reached' }); }
+        }
+      });
+      v.addEventListener('ended', function () {
+        if (!limitFired) { limitFired = true; send({ type: 'limit-reached' }); }
+      });
+    `
+    : '';
+  return `
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+        <style>
+          html, body { margin: 0; padding: 0; background: #000; height: 100%; }
+          video { width: 100%; height: 100%; background: #000; }
+        </style>
+      </head>
+      <body>
+        <video id="v" src="${url}" autoplay muted playsinline controls></video>
+        <script>
+          function send(msg) {
+            try { window.ReactNativeWebView.postMessage(JSON.stringify(msg)); } catch (e) {}
+          }
+          send({ type: 'ready' });
+          ${guard}
         </script>
       </body>
     </html>
@@ -134,26 +218,33 @@ function buildEmbedHtml(videoId) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Component
 // ─────────────────────────────────────────────────────────────────────────────
-export default function YouTubeThumbPlayer({ url, fallbackImage }) {
+export default function YouTubeThumbPlayer({
+  url,
+  fallbackImage,
+  viewerMode = 'guest', // 'guest' | 'unenrolled' | 'enrolled'
+  onLoginPress,
+  onBuyPress,
+}) {
   const [playing, setPlaying] = useState(false);
   const [thumbError, setThumbError] = useState(false);
+  const dialogFiredRef = useRef(false);
 
   const videoId = useMemo(() => youtubeIdFromUrl(url), [url]);
   const isYouTube = !!videoId;
+  const isDirect  = useMemo(() => isDirectVideoUrl(url), [url]);
   const thumbs = videoId ? thumbUrls(videoId) : null;
 
-  // Non-YouTube URL (or no URL) — degrade to external launch.
-  //
-  // We deliberately do NOT call Linking.canOpenURL() for http/https URLs.
-  // On Android 11+ the system requires every app you want to introspect
-  // to be declared in <queries> in AndroidManifest.xml, so canOpenURL()
-  // returns false on a plain emulator even when Chrome IS installed.
-  // openURL() itself works fine — it asks the OS to resolve the intent
-  // and the user's default browser (or YouTube app) opens.
-  //
-  // If openURL itself rejects (genuinely no handler), we fall back to
-  // copying the URL to the clipboard so the user can paste it into any
-  // browser manually.
+  // Only enrolled students get uncapped playback. Guests and
+  // logged-in non-enrolled viewers share the 60s preview quota.
+  const capped = viewerMode !== 'enrolled';
+
+  // Reset the "limit dialog already shown for this session" flag
+  // whenever the player is re-opened.
+  useEffect(() => {
+    if (!playing) dialogFiredRef.current = false;
+  }, [playing]);
+
+  // Non-embeddable (or missing WebView) fallback — open externally.
   const openExternal = async () => {
     const raw = (url || '').trim();
     if (!raw) {
@@ -170,8 +261,6 @@ export default function YouTubeThumbPlayer({ url, fallbackImage }) {
     try {
       await Linking.openURL(final);
     } catch (err) {
-      // Last-ditch — stash the link on the clipboard so the user has
-      // something to paste somewhere that works.
       try { Clipboard.setString(final); } catch (_e) { /* ignore */ }
       confirm({
         title:       "Couldn't open the video",
@@ -185,32 +274,16 @@ export default function YouTubeThumbPlayer({ url, fallbackImage }) {
     }
   };
 
-  // YouTube IFrame Player error codes — only the ones we KNOW are fatal:
-  //   2   invalid id (rare)
-  //   100 video private / removed
-  //   101 owner disabled embed
-  //
-  // Previously we also treated 5 / 150 / 152 / 153 as fatal, but those
-  // fire even for videos where "Allow embedding" is on — typically when
-  // the video has copyrighted music, is age-restricted, was marked
-  // "Made for kids", or sits behind a regional block. Bailing the moment
-  // we see them means perfectly playable videos get bounced to YouTube.
-  // We let the watchdog (18s) catch genuine non-starters instead.
   const EMBED_BLOCKED = new Set([2, 100, 101]);
 
   // Watchdog — only triggers when the IFrame Player API never wires up
-  // at all (network failure, blocked region, etc.). Bumped from 6s to
-  // 18s because the emulator can take 10+ seconds to spin up the YouTube
-  // IFrame API on a cold WebView, and we want to keep the user in-app.
-  //
-  // On timeout we DON'T auto-bounce to the YouTube app any more — we just
-  // collapse to the thumbnail with a friendly retry prompt. The user can
-  // tap again to retry, or fall through to "Open in YouTube" themselves.
+  // at all (network failure, blocked region, etc.). Only used for
+  // YouTube; direct <video> reports 'ready' immediately.
   const watchdogRef = useRef(null);
   const reachedPlayingRef = useRef(false);
 
   useEffect(() => {
-    if (!playing) {
+    if (!playing || !isYouTube) {
       reachedPlayingRef.current = false;
       if (watchdogRef.current) {
         clearTimeout(watchdogRef.current);
@@ -221,10 +294,6 @@ export default function YouTubeThumbPlayer({ url, fallbackImage }) {
     watchdogRef.current = setTimeout(() => {
       if (!reachedPlayingRef.current) {
         setPlaying(false);
-        // Styled confirm — two clear paths (Retry / Open in YouTube)
-        // plus a Cancel via the close X. A third-button "destructive"
-        // link on the bottom lets the user fall through to the external
-        // app without making it the primary action.
         confirm({
           title:           'Taking too long',
           message:         'The video is slow to load. Tap Retry to try again, or open it in YouTube.',
@@ -241,21 +310,47 @@ export default function YouTubeThumbPlayer({ url, fallbackImage }) {
       if (watchdogRef.current) clearTimeout(watchdogRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playing]);
+  }, [playing, isYouTube]);
+
+  // Fire the correct dialog per viewer mode, exactly once per playback
+  // session. `guest` and `unenrolled` are the only capped modes.
+  const fireLimitDialog = () => {
+    if (dialogFiredRef.current) return;
+    dialogFiredRef.current = true;
+    // Collapse the player so the paywall dialog isn't fighting the
+    // WebView underneath for focus.
+    setPlaying(false);
+    if (viewerMode === 'guest') {
+      confirm({
+        title:       'Login to continue exploring this course.',
+        message:     'You\'ve reached the free preview. Sign in to keep exploring — or close and browse other courses.',
+        variant:     'destructive',
+        confirmText: 'Login',
+        cancelText:  'Close',
+        onConfirm:   () => { try { onLoginPress && onLoginPress(); } catch (_) {} },
+      });
+    } else if (viewerMode === 'unenrolled') {
+      confirm({
+        title:       'Purchase this course to watch the full video.',
+        message:     'The free preview ends here. Enroll to unlock the full intro video and every lesson.',
+        variant:     'destructive',
+        confirmText: 'Buy Now',
+        cancelText:  'Close',
+        onConfirm:   () => { try { onBuyPress && onBuyPress(); } catch (_) {} },
+      });
+    }
+  };
 
   const handleWebViewMessage = (event) => {
     try {
       const msg = JSON.parse(event.nativeEvent.data || '{}');
 
-      // Diagnostic — Metro logs show exactly what YouTube reports so we
-      // can tell "embed blocked" apart from "copyrighted music" etc.
       if (msg.type === 'error') {
         // eslint-disable-next-line no-console
         console.log('[YouTubeThumbPlayer] IFrame Player error code:', msg.code);
       }
 
       if (msg.type === 'state') {
-        // 1 = playing; clear the watchdog the first time we see it.
         if (msg.state === 1) {
           reachedPlayingRef.current = true;
           if (watchdogRef.current) {
@@ -263,30 +358,33 @@ export default function YouTubeThumbPlayer({ url, fallbackImage }) {
             watchdogRef.current = null;
           }
         }
-        if (msg.state === 0) {
-          setPlaying(false);  // ended → collapse to thumbnail
+        // state===0 (ended) is handled by 'limit-reached' emit from
+        // the same event on the HTML side, so we don't collapse here
+        // for capped playback — the dialog fires and does that itself.
+        if (msg.state === 0 && !capped) {
+          setPlaying(false);
         }
+        return;
+      }
+
+      if (msg.type === 'limit-reached') {
+        fireLimitDialog();
         return;
       }
 
       if (msg.type === 'iframe-error' || (msg.type === 'error' && EMBED_BLOCKED.has(Number(msg.code)))) {
         setPlaying(false);
-        // YouTube refused to embed this video. The institution who
-        // uploaded the link IS the channel owner, so this is almost
-        // always because they haven't enabled "Allow embedding" on the
-        // video itself (YouTube Studio → Video → Visibility → "Allow
-        // embedding"). We surface that fix in the dialog so the admin
-        // can tap "Open in YouTube" and toggle it on their own.
         confirm({
           title:       'Embedding is off for this video',
-          message:     'YouTube blocked the preview from playing in-app. Open it in YouTube and turn on “Allow embedding” in YouTube Studio so guests can watch it here.',
+          message:     'YouTube blocked the preview from playing in-app. Open it in YouTube and turn on "Allow embedding" in YouTube Studio so guests can watch it here.',
           variant:     'warning',
           confirmText: 'Open in YouTube',
           cancelText:  'Cancel',
           onConfirm:   () => openExternal(),
         });
       } else if (msg.type === 'ended') {
-        setPlaying(false);
+        if (capped) fireLimitDialog();
+        else setPlaying(false);
       }
     } catch (e) {
       // Non-JSON message — ignore.
@@ -294,11 +392,14 @@ export default function YouTubeThumbPlayer({ url, fallbackImage }) {
   };
 
   // ── Inline play state ──
-  if (playing && isYouTube && WebView) {
+  if (playing && (isYouTube || isDirect) && WebView) {
+    const html = isYouTube
+      ? buildYouTubeHtml(videoId, capped)
+      : buildDirectVideoHtml((url || '').trim(), capped);
     return (
       <View style={styles.player}>
         <WebView
-          source={{ html: buildEmbedHtml(videoId), baseUrl: 'https://www.youtube.com' }}
+          source={{ html, baseUrl: 'https://www.youtube.com' }}
           style={StyleSheet.absoluteFill}
           allowsInlineMediaPlayback
           mediaPlaybackRequiresUserAction={false}
@@ -307,17 +408,17 @@ export default function YouTubeThumbPlayer({ url, fallbackImage }) {
           mixedContentMode="always"
           onMessage={handleWebViewMessage}
           onError={(syntheticEvent) => {
-            // Network or HTTP error loading the iframe itself.
             const { nativeEvent } = syntheticEvent;
             console.log('[YouTubeThumbPlayer] WebView error', nativeEvent);
             setPlaying(false);
-            openExternal();
+            if (isYouTube) openExternal();
           }}
-          // Block all navigation away from the embed iframe — keeps user inside the app.
           onShouldStartLoadWithRequest={(req) => {
             return req.url.startsWith('https://www.youtube-nocookie.com')
               || req.url.startsWith('https://www.youtube.com')
-              || req.url.startsWith('about:blank');
+              || req.url.startsWith('about:blank')
+              || req.url.startsWith('http://')
+              || req.url.startsWith('https://');
           }}
         />
         <TouchableOpacity
@@ -327,16 +428,22 @@ export default function YouTubeThumbPlayer({ url, fallbackImage }) {
         >
           <Text style={styles.closeText}>Close</Text>
         </TouchableOpacity>
+        {capped ? (
+          <View style={styles.previewPill}>
+            <Text style={styles.previewPillText}>Free preview · {PREVIEW_SECONDS}s</Text>
+          </View>
+        ) : null}
       </View>
     );
   }
 
   // ── Thumbnail / tap-to-play state ──
+  const canEmbed = (isYouTube || isDirect) && !!WebView;
   return (
     <TouchableOpacity
       activeOpacity={0.9}
       onPress={() => {
-        if (isYouTube && WebView) setPlaying(true);
+        if (canEmbed) setPlaying(true);
         else openExternal();
       }}
       style={styles.player}
@@ -362,7 +469,9 @@ export default function YouTubeThumbPlayer({ url, fallbackImage }) {
 
       <View style={styles.captionRow}>
         <Text style={styles.caption}>
-          {isYouTube && WebView ? 'Watch a 90s preview' : (isYouTube ? 'Tap to watch (install required)' : 'Open intro video')}
+          {!canEmbed
+            ? (isYouTube ? 'Tap to watch (install required)' : 'Open intro video')
+            : capped ? `Watch a ${PREVIEW_SECONDS}s preview` : 'Watch intro video'}
         </Text>
         {!WebView && isYouTube ? (
           <ExternalLink size={14} color="#fff" strokeWidth={2.2} />
@@ -418,4 +527,14 @@ const styles = StyleSheet.create({
     borderRadius: radius.pill,
   },
   closeText: { ...type.caption, color: '#fff', fontWeight: '700' },
+  previewPill: {
+    position: 'absolute',
+    top: spacing.sm,
+    left: spacing.sm,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    paddingHorizontal: spacing.md,
+    paddingVertical: 6,
+    borderRadius: radius.pill,
+  },
+  previewPillText: { ...type.caption, color: '#fff', fontWeight: '700' },
 });

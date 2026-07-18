@@ -1,9 +1,10 @@
 import React from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { View, Text, ActivityIndicator } from 'react-native';
+import { View, Text, Image, ActivityIndicator, StatusBar, StyleSheet } from 'react-native';
 import { useAuth } from '../context/AuthContext';
 import { navigationRef } from './navigationRef';
+import { palette, type } from '../theme';
 
 // Auth screens
 import WelcomeScreen from '../screens/WelcomeScreen';
@@ -69,6 +70,7 @@ import InstitutionDetailScreen from '../screens/student/InstitutionDetailScreen'
 import AllInstitutionsScreen from '../screens/student/AllInstitutionsScreen';
 import CategoryAcademiesScreen from '../screens/student/CategoryAcademiesScreen';
 import CourseDetailScreen from '../screens/student/CourseDetailScreen';
+import PublicTrainerProfileScreen from '../screens/student/PublicTrainerProfileScreen';
 import BatchDetailScreen from '../screens/student/BatchDetailScreen';
 import MyAttendanceScreen from '../screens/student/MyAttendanceScreen';
 import MyEnrollmentsScreen from '../screens/student/MyEnrollmentsScreen';
@@ -143,11 +145,31 @@ const getAdminInitialRoute = (onboardingStatus) => {
 export default function AppNavigator() {
   const { user, loading, onboardingStatus } = useAuth();
 
+  // ── Splash / loading state ──
+  // Rendered while AuthContext restores the saved session from
+  // storage. Doubles as the app's JS-level splash: brand logo,
+  // Veerify wordmark, and the "#1 Martial Arts App" tagline stay
+  // visible for the entire duration of the auth-restore step so the
+  // viewer never sees a jarring blank screen between the native
+  // splash and the first navigator screen.
   if (loading) {
     return (
-      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#0a4d8c' }}>
-        <ActivityIndicator size="large" color="#ffd60a" />
-        <Text style={{ color: 'white', marginTop: 12, fontSize: 14 }}>Loading Veerify…</Text>
+      <View style={splashStyles.screen}>
+        <StatusBar barStyle="light-content" backgroundColor={palette.purple.vivid} />
+        <View style={splashStyles.logoWrap}>
+          <Image
+            source={require('../assets/veerify-logo.png')}
+            style={splashStyles.logoImage}
+            resizeMode="cover"
+          />
+        </View>
+        <Text style={splashStyles.wordmark}>Veerify</Text>
+        <Text style={splashStyles.tagline}>#1 Martial Arts App</Text>
+        <ActivityIndicator
+          size="small"
+          color="#fff"
+          style={splashStyles.spinner}
+        />
       </View>
     );
   }
@@ -181,6 +203,10 @@ export default function AppNavigator() {
             options={{ headerShown: false }} />
           <Stack.Screen name="CourseDetail" component={CourseDetailScreen}
             options={{ headerShown: true, title: '' }} />
+          {/* Public trainer profile — reached from CourseDetail's
+              Trainer card. Renders its own header. */}
+          <Stack.Screen name="PublicTrainerProfile" component={PublicTrainerProfileScreen}
+            options={{ headerShown: false }} />
           <Stack.Screen name="BatchDetail" component={BatchDetailScreen}
             options={{ headerShown: true, title: '' }} />
         </Stack.Navigator>
@@ -454,6 +480,10 @@ export default function AppNavigator() {
             options={{ headerShown: false }} />
           <Stack.Screen name="CourseDetail" component={CourseDetailScreen}
             options={{ headerShown: true, title: '' }} />
+          {/* Public trainer profile — reached from CourseDetail's
+              Trainer card by both students and admin-preview flows. */}
+          <Stack.Screen name="PublicTrainerProfile" component={PublicTrainerProfileScreen}
+            options={{ headerShown: false }} />
           <Stack.Screen name="BatchDetail" component={BatchDetailScreen}
             options={{ headerShown: true, title: '' }} />
           <Stack.Screen name="MyAttendance" component={MyAttendanceScreen}
@@ -677,4 +707,56 @@ export default function AppNavigator() {
     </NavigationContainer>
   );
 }
+
+// ─── Splash / auth-restore screen styles ──────────────────────────
+// Sits at the file bottom so the fast-path `if (loading)` block above
+// stays tight to the auth check it depends on. The tagline uses the
+// display-typography token so it inherits the app's font weights;
+// colors come straight from the shared palette so brand changes
+// (purple hue etc.) automatically propagate here.
+const splashStyles = StyleSheet.create({
+  screen: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: palette.purple.vivid,
+    paddingHorizontal: 24,
+  },
+  logoWrap: {
+    width: 108,
+    height: 108,
+    borderRadius: 28,
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOpacity: 0.18,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 10,
+  },
+  logoImage: {
+    width: '100%',
+    height: '100%',
+  },
+  wordmark: {
+    ...type.display,
+    color: '#fff',
+    marginTop: 22,
+    letterSpacing: 0.5,
+    textAlign: 'center',
+  },
+  tagline: {
+    ...type.bodyBold,
+    color: 'rgba(255,255,255,0.92)',
+    marginTop: 8,
+    textAlign: 'center',
+    letterSpacing: 1.4,
+    textTransform: 'uppercase',
+  },
+  spinner: {
+    marginTop: 32,
+  },
+});
 

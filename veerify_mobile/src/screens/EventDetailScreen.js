@@ -17,18 +17,25 @@
 // Route params:
 //   event   the full event row (or at least { title, event_date })
 
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View, Text, Image, ScrollView, TouchableOpacity, Linking, StyleSheet,
-  ActivityIndicator, Alert,
+  ActivityIndicator, Alert, AppState,
 } from 'react-native';
 import {
   ArrowLeft, Calendar, MapPin, Clock, ExternalLink,
-  CheckCircle2, Share2, CreditCard,
+  CheckCircle2, Share2, CreditCard, AlertCircle, RefreshCw,
 } from 'lucide-react-native';
 
 import apiClient from '../api/client';
 import resolveAssetUrl from '../utils/assetUrl';
+import { confirm } from '../components/ConfirmDialog';
+
+// Polling budget after the payer returns from the Razorpay browser.
+// The webhook usually lands in 3-5s; 30s gives slow networks room
+// without leaving the payer staring forever.
+const POLL_INTERVAL_MS = 2500;
+const POLL_MAX_MS      = 30_000;
 
 const BRAND       = '#E63946';
 const BRAND_SOFT  = '#FFE4E6';
@@ -39,6 +46,7 @@ const SURFACE     = '#FFFFFF';
 const BG          = '#F4F4F8';
 const BORDER      = '#E5E7EB';
 const GREEN       = '#10B981';
+const AMBER       = '#F59E0B';
 
 // "Mon, 22 Jun 2026" — long-form display used in the detail card.
 function formatFullDate(iso) {
@@ -57,6 +65,106 @@ export default function EventDetailScreen({ route, navigation }) {
   const [event, setEvent] = useState(route?.params?.event || {});
   const [paying, setPaying] = useState(false);
 
+  // Payment lifecycle stage — drives the CTA render tree:
+  //   'idle'      → show Pay Now
+  //   'awaiting'  → payer is in the Razorpay browser
+  //   'verifying' → polling backend for webhook flip
+  //   'pending'   → poll timed out / payer returned unpaid; retry available
+  //   'failed'    → poll saw an explicit 'failed' status
+  //   'done'      → server confirmed 'paid'; badge shows Paid
+  const [stage, setStage] = useState('idle');
+  const pollTimer   = useRef(null);
+  const pollStart   = useRef(0);
+  const appStateSub = useRef(null);
+  const sentToRzp   = useRef(false);
+
+  // ── Cleanup ───────────────────────────────────────────────────────
+  useEffect(() => {
+    return () => {
+      if (pollTimer.current)  clearTimeout(pollTimer.current);
+      if (appStateSub.current) appStateSub.current.remove();
+    };
+  }, []);
+
+  // ── Poll the server for the webhook's payment flip ───────────────
+  // We NEVER mark the row paid client-side. The only path from
+  // pending → paid is the signed webhook flipping event_payments on
+  // the server, which this endpoint reads back.
+  const pollPaymentStatus = async () => {
+    if (!event?.id) return;
+    try {
+      const r = await apiClient.get(
+        `/institutions/events/${event.id}/payment-status`,
+      );
+      const s = r.data?.status;
+      if (s === 'paid') {
+        setEvent((e) => ({ ...e, has_paid: true }));
+        setStage('done');
+        return;
+      }
+      if (s === 'failed') {
+        setStage('failed');
+        return;
+      }
+    } catch (err) {
+      // Swallow — keep polling; a transient 500 shouldn't abort the loop.
+      // eslint-disable-next-line no-console
+      console.log('[EventPay] poll error:', err?.message);
+    }
+    if (Date.now() - pollStart.current < POLL_MAX_MS) {
+      pollTimer.current = setTimeout(pollPaymentStatus, POLL_INTERVAL_MS);
+    } else {
+      setStage('pending');
+    }
+  };
+
+  const startPolling = () => {
+    if (pollTimer.current) clearTimeout(pollTimer.current);
+    pollStart.current = Date.now();
+    setStage('verifying');
+    // Small initial delay so the webhook can race the return-to-app.
+    pollTimer.current = setTimeout(pollPaymentStatus, 800);
+  };
+
+  // Detect the payer coming back from Razorpay's hosted page and
+  // kick off polling. The Payment Link page doesn't deep-link back
+  // into the RN app, so AppState 'active' is our best signal.
+  useEffect(() => {
+    if (!sentToRzp.current) return;
+    const handleChange = (next) => {
+      if (next === 'active' && sentToRzp.current) {
+        sentToRzp.current = false;
+        startPolling();
+      }
+    };
+    appStateSub.current = AppState.addEventListener('change', handleChange);
+    return () => { if (appStateSub.current) appStateSub.current.remove(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage]);
+
+  // Manual "check status" from the Pending state — hits the same
+  // endpoint once so the payer doesn't have to wait for a tick.
+  const recheckStatus = async () => {
+    if (!event?.id) return;
+    setStage('verifying');
+    try {
+      const r = await apiClient.get(
+        `/institutions/events/${event.id}/payment-status`,
+      );
+      const s = r.data?.status;
+      if (s === 'paid') {
+        setEvent((e) => ({ ...e, has_paid: true }));
+        setStage('done');
+      } else if (s === 'failed') {
+        setStage('failed');
+      } else {
+        setStage('pending');
+      }
+    } catch (_) {
+      setStage('pending');
+    }
+  };
+
   const isPast = event.status === 'past'
     || (event.event_date && new Date(event.event_date) < new Date(new Date().toDateString()));
 
@@ -70,10 +178,20 @@ export default function EventDetailScreen({ route, navigation }) {
   };
 
   // ── Pay Now ────────────────────────────────────────────────────────
-  // POSTs to /institutions/events/:id/pay, which mints (or reuses) a
-  // Razorpay Payment Link and returns its short URL. We then open that
-  // URL in the phone browser — same pattern as the subscription Pay
-  // Now on AdminDashboardScreen.
+  //
+  // Contract: never marks paid client-side. Only:
+  //   1. Ask backend to mint (or reuse) a Razorpay Payment Link.
+  //   2. If server already sees the row as paid (webhook landed
+  //      earlier), flip to 'done' — server is source of truth.
+  //   3. Otherwise open the Payment Link in the OS browser and
+  //      enter 'awaiting'. The AppState listener starts polling
+  //      the moment the payer returns to Veerify.
+  //   4. Poll → 'paid' → 'done'; poll timeout → 'pending' with
+  //      Retry Payment; poll → 'failed' → 'failed' with Retry.
+  //
+  // No mock/fake-success fallback — if the gateway isn't configured
+  // we surface a real error. Nothing gets "Registered" without a
+  // server-verified payment.
   const payForEvent = async () => {
     if (paying) return;
     if (!event?.id) return;
@@ -83,22 +201,34 @@ export default function EventDetailScreen({ route, navigation }) {
       const res = await apiClient.post(`/institutions/events/${event.id}/pay`);
       if (res.data?.already_paid) {
         setEvent((e) => ({ ...e, has_paid: true }));
-        Alert.alert('Already paid', 'Our records show you have already paid for this event.');
+        setStage('done');
         return;
       }
       const url = res.data?.short_url;
       if (!url) {
-        Alert.alert('Could not start payment', 'The payment link is missing. Please try again.');
-        return;
+        throw new Error('Payment link is missing from the server response.');
       }
-      try {
-        await Linking.openURL(url);
-      } catch {
-        Alert.alert('Could not open payment page', 'Please try again in a moment.');
+      const supported = await Linking.canOpenURL(url);
+      if (!supported) {
+        throw new Error('This device cannot open the payment page.');
       }
+      sentToRzp.current = true;
+      setStage('awaiting');
+      await Linking.openURL(url);
     } catch (err) {
-      const msg = err.response?.data?.message || err.message || 'Payment failed to start.';
-      Alert.alert('Payment error', msg);
+      const msg =
+        err.response?.data?.message ||
+        err.message ||
+        'We could not start the payment. Your registration is still Pending — you can retry any time.';
+      confirm({
+        title:       'Payment could not start',
+        message:     msg,
+        variant:     'destructive',
+        confirmText: 'Got it',
+        hideCancel:  true,
+      });
+      setStage('idle');
+      sentToRzp.current = false;
     } finally {
       setPaying(false);
     }
@@ -203,16 +333,76 @@ export default function EventDetailScreen({ route, navigation }) {
         ) : null}
 
         {/* Payment CTA — only when the admin turned on Payment Required
-            AND the event isn't already past AND the caller hasn't paid.
-            Same visual language as the External link CTA so the two
-            buttons stack nicely when both are present. */}
+            AND the event isn't already past. The rendered block
+            depends on the payment lifecycle stage:
+              • 'done' or event.has_paid → Paid badge, registration
+                complete, no CTA.
+              • 'awaiting' or 'verifying' → progress card so the payer
+                sees us confirming with Razorpay after their return.
+                Never flips to registered until the webhook lands.
+              • 'pending' or 'failed' → status card + Retry Payment.
+              • 'idle' → the primary Pay Now CTA. */}
         {event.payment_required && !isPast ? (
-          event.has_paid ? (
+          (stage === 'done' || event.has_paid) ? (
             <View style={styles.paidBadge}>
               <CheckCircle2 size={16} color={GREEN} strokeWidth={2.4} />
               <Text style={styles.paidBadgeText}>
-                Paid — you're all set for this event.
+                Paid — you're registered for this event.
               </Text>
+            </View>
+          ) : (stage === 'awaiting' || stage === 'verifying') ? (
+            <View style={styles.verifyingCard}>
+              <ActivityIndicator color={BRAND} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.verifyingTitle}>
+                  {stage === 'awaiting' ? 'Waiting for payment…' : 'Verifying payment…'}
+                </Text>
+                <Text style={styles.verifyingSub}>
+                  {stage === 'awaiting'
+                    ? 'Complete the payment in your browser, then return to Veerify.'
+                    : "We're confirming with Razorpay. This usually takes a few seconds."}
+                </Text>
+              </View>
+            </View>
+          ) : (stage === 'pending' || stage === 'failed') ? (
+            <View style={styles.pendingCard}>
+              <View style={styles.pendingHead}>
+                <AlertCircle size={20} color={AMBER} strokeWidth={2.2} />
+                <Text style={styles.pendingTitle}>
+                  {stage === 'failed' ? 'Payment failed' : 'Payment pending'}
+                </Text>
+              </View>
+              <Text style={styles.pendingSub}>
+                Your registration is saved as{' '}
+                <Text style={{ fontWeight: '800' }}>Pending Payment</Text>{' '}
+                and not yet active. If you already paid, tap Check again — the
+                confirmation may still be on its way.
+              </Text>
+              <View style={styles.pendingBtnRow}>
+                <TouchableOpacity
+                  style={[styles.retryBtnGhost]}
+                  onPress={recheckStatus}
+                  activeOpacity={0.85}
+                >
+                  <RefreshCw size={14} color={TEXT} strokeWidth={2.4} />
+                  <Text style={styles.retryBtnGhostText}>Check again</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.retryBtn, paying && { opacity: 0.7 }]}
+                  onPress={payForEvent}
+                  disabled={paying}
+                  activeOpacity={0.85}
+                >
+                  {paying ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <>
+                      <CreditCard size={14} color="#fff" strokeWidth={2.4} />
+                      <Text style={styles.retryBtnText}>Retry payment</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </View>
             </View>
           ) : (
             <TouchableOpacity
@@ -400,4 +590,57 @@ const styles = StyleSheet.create({
   },
   paidBadgeText: { color: GREEN, fontWeight: '800', fontSize: 13 },
   linkBtnText: { color: '#fff', fontSize: 14, fontWeight: '800', letterSpacing: 0.3 },
+
+  // Verifying / awaiting card — used while the mobile is either
+  // waiting for the payer to return from Razorpay or polling the
+  // backend for the webhook flip.
+  verifyingCard: {
+    flexDirection: 'row', alignItems: 'flex-start', gap: 12,
+    marginHorizontal: 16, marginTop: 18,
+    paddingVertical: 14, paddingHorizontal: 16,
+    backgroundColor: SURFACE,
+    borderRadius: 12,
+    borderWidth: 1, borderColor: BORDER,
+  },
+  verifyingTitle: { color: TEXT, fontWeight: '800', fontSize: 14 },
+  verifyingSub:   {
+    color: TEXT_MUTED, fontWeight: '600', fontSize: 12,
+    marginTop: 2, lineHeight: 17,
+  },
+
+  // Pending / failed card — payment didn't complete; payer can
+  // retry from here.
+  pendingCard: {
+    marginHorizontal: 16, marginTop: 18,
+    paddingVertical: 14, paddingHorizontal: 16,
+    backgroundColor: '#FFF7ED',
+    borderRadius: 12,
+    borderWidth: 1, borderColor: '#FED7AA',
+  },
+  pendingHead: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  pendingTitle: { color: TEXT, fontWeight: '800', fontSize: 14 },
+  pendingSub:   {
+    color: TEXT_MUTED, fontWeight: '600', fontSize: 12,
+    marginTop: 6, lineHeight: 17,
+  },
+  pendingBtnRow: {
+    flexDirection: 'row', gap: 8, marginTop: 12,
+  },
+  retryBtn: {
+    flex: 1,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 6,
+    backgroundColor: BRAND,
+    paddingVertical: 10, borderRadius: 10,
+  },
+  retryBtnText: { color: '#fff', fontWeight: '800', fontSize: 13 },
+  retryBtnGhost: {
+    flex: 1,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 6,
+    backgroundColor: SURFACE,
+    paddingVertical: 10, borderRadius: 10,
+    borderWidth: 1, borderColor: BORDER,
+  },
+  retryBtnGhostText: { color: TEXT, fontWeight: '700', fontSize: 13 },
 });

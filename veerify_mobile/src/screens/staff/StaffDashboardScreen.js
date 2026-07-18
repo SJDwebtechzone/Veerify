@@ -35,6 +35,7 @@ import {
 import apiClient from '../../api/client';
 import { useAuth } from '../../context/AuthContext';
 import { palette, spacing, radius, shadows, type } from '../../theme';
+import { useBellScrollHandler } from '../../components/bellScrollBus';
 // Shared resolver — strips embedded localhost / 10.0.2.2 hosts from
 // legacy DB rows so uploads written before the bug fix still render
 // on any client.
@@ -168,11 +169,15 @@ export default function StaffDashboardScreen({ navigation }) {
     );
   }
 
+  const bellScroll = useBellScrollHandler();
+
   return (
     <ScrollView
       style={styles.screen}
       contentContainerStyle={{ paddingBottom: 100 }}
       showsVerticalScrollIndicator={false}
+      onScroll={bellScroll}
+      scrollEventThrottle={16}
       refreshControl={
         <RefreshControl
           refreshing={refreshing}
@@ -204,21 +209,8 @@ export default function StaffDashboardScreen({ navigation }) {
             <Text style={styles.eyebrow}>Welcome back</Text>
             <Text style={styles.greetName} numberOfLines={1}>{displayName}</Text>
           </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.bellBtn}
-            onPress={() => navigation.navigate('StaffNotifications')}
-            activeOpacity={0.75}
-            hitSlop={10}
-          >
-            <Bell size={20} color={palette.text} strokeWidth={2.2} />
-            {unreadCount > 0 ? (
-              <View style={styles.bellBadge}>
-                <Text style={styles.bellBadgeText}>
-                  {unreadCount > 99 ? '99+' : String(unreadCount)}
-                </Text>
-              </View>
-            ) : null}
-          </TouchableOpacity>
+          {/* Inline bell removed — GlobalNotificationBell renders it
+              globally now so it stays visible across every screen. */}
         </View>
         <Text style={styles.headerSub}>
           {todayClasses.length > 0

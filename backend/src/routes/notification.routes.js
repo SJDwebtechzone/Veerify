@@ -5,9 +5,13 @@ const { verifyToken } = require('../middleware/auth.middleware');
 const { requireRole } = require('../middleware/role.middleware');
 
 // Inbox (any logged-in user reads their own).
-router.get('/',           verifyToken, notif.list);
-router.post('/:id/read',  verifyToken, notif.markRead);
-router.post('/read-all',  verifyToken, notif.markAllRead);
+router.get('/',              verifyToken, notif.list);
+// Lightweight badge count for the floating GlobalNotificationBell.
+// Must be defined BEFORE /:id/... routes so Express doesn't treat
+// "unread-count" as an id param.
+router.get('/unread-count',  verifyToken, notif.unreadCount);
+router.post('/:id/read',     verifyToken, notif.markRead);
+router.post('/read-all',     verifyToken, notif.markAllRead);
 router.delete('/:id',     verifyToken, notif.remove);
 
 // Sent history — what *this* user has dispatched, grouped per send event.

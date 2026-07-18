@@ -2,6 +2,7 @@ import React, { useState, useCallback } from 'react';
 import { View, Text, FlatList, TouchableOpacity, RefreshControl, ActivityIndicator, Alert } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import apiClient from '../../api/client';
+import { useBellScrollHandler } from '../../components/bellScrollBus';
 import { useAuth } from '../../context/AuthContext';
 import { colors, commonStyles } from '../../utils/styles';
 
@@ -47,6 +48,8 @@ export default function TrainerDashboardScreen({ navigation }) {
         data={batches}
         keyExtractor={(item) => item.id.toString()}
         contentContainerStyle={{ padding: 20 }}
+        onScroll={useBellScrollHandler()}
+        scrollEventThrottle={16}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
         ListHeaderComponent={
           <Text style={[commonStyles.title, { fontSize: 18, marginBottom: 12 }]}>My Batches</Text>

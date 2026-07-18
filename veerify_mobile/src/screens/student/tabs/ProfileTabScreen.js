@@ -25,6 +25,7 @@ import {
 import { useAuth } from '../../../context/AuthContext';
 import { useInstitution } from '../../../context/InstitutionContext';
 import { palette, spacing, radius, shadows, type } from '../../../theme';
+import { useBellScrollHandler } from '../../../components/bellScrollBus';
 import { confirm } from '../../../components/ConfirmDialog';
 
 export default function ProfileTabScreen({ navigation }) {
@@ -40,6 +41,8 @@ export default function ProfileTabScreen({ navigation }) {
       style={styles.screen}
       contentContainerStyle={{ paddingBottom: 60 }}
       showsVerticalScrollIndicator={false}
+      onScroll={useBellScrollHandler()}
+      scrollEventThrottle={16}
     >
       {/* Header */}
       <View style={styles.header}>

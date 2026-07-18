@@ -148,6 +148,64 @@ export default function EnrolledCourseScreen({ route, navigation }) {
   const courseName = course?.name || enrollment.course_name || 'Course';
   const paid = enrollment.payment_status === 'paid';
 
+  // Access gate — if the enrolment isn't paid, refuse to show the
+  // course content. Render a locked-state card that routes the
+  // student to the payment screen. Belt-and-braces: the Enrolled
+  // Programs list already hides non-paid rows, so this only ever
+  // fires on a stale deep link or an in-flight state change.
+  if (!paid) {
+    const amount = Number(enrollment.payment_amount) || Number(enrollment.course_price) || 0;
+    return (
+      <View style={[styles.screen, styles.center, { padding: 24 }]}>
+        <BookOpen size={44} color={BRAND} strokeWidth={2} />
+        <Text style={[styles.emptyText, { marginTop: 12, fontWeight: '800' }]}>
+          Payment required to unlock
+        </Text>
+        <Text style={[styles.emptyText, { marginTop: 4, textAlign: 'center' }]}>
+          Complete the Razorpay payment to activate {courseName} and access lessons.
+        </Text>
+        <TouchableOpacity
+          onPress={() => {
+            const payload = {
+              enrollment: { id: enrollment.id, payment_amount: amount },
+              batch: {
+                id:              enrollment.batch_id,
+                name:            enrollment.batch_name,
+                course_id:       enrollment.course_id,
+                course_name:     enrollment.course_name,
+                course_price:    enrollment.course_price,
+                institution_name:enrollment.institution_name,
+                days_of_week:    enrollment.days_of_week,
+                start_time:      enrollment.start_time,
+                end_time:        enrollment.end_time,
+              },
+              course: {
+                id:               enrollment.course_id,
+                name:             enrollment.course_name,
+                price:            enrollment.course_price,
+                institution_name: enrollment.institution_name,
+              },
+              amount,
+            };
+            try { navigation.replace('EnrollmentPayment', payload); }
+            catch (_) {
+              try { navigation.navigate('EnrollmentPayment', payload); } catch (_) {}
+            }
+          }}
+          style={[styles.btn, styles.btnPrimary, { marginTop: 20, paddingHorizontal: 24 }]}
+        >
+          <Text style={styles.btnPrimaryText}>Pay Now · ₹{amount.toLocaleString('en-IN')}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          onPress={() => navigation.goBack()}
+          style={[styles.btn, styles.btnGhost, { marginTop: 8 }]}
+        >
+          <Text style={styles.btnGhostText}>Back</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
   return (
     <View style={styles.screen}>
       <ScrollView
@@ -521,4 +579,10 @@ const styles = StyleSheet.create({
   },
   btnGhost: { backgroundColor: BG },
   btnGhostText: { fontSize: 13, color: TEXT_MUTED, fontWeight: '700' },
+  btnPrimary: {
+    backgroundColor: BRAND,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 6,
+  },
+  btnPrimaryText: { fontSize: 13, color: '#fff', fontWeight: '800' },
 });

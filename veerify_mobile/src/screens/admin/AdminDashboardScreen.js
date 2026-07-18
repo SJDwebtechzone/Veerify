@@ -35,6 +35,7 @@ import { useAuth } from '../../context/AuthContext';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 import StatCard from '../../components/StatCard';
 import QuickAction from '../../components/QuickAction';
+import { useBellScrollHandler } from '../../components/bellScrollBus';
 import FAB from '../../components/FAB';
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
@@ -278,6 +279,8 @@ export default function AdminDashboardScreen({ navigation }) {
   const placeholder = (name) =>
     Alert.alert(name, 'We\'ll wire this up as we build out the related screen.');
 
+  const bellScroll = useBellScrollHandler();
+
   return (
     <View style={styles.screen}>
       <ScrollView
@@ -290,6 +293,10 @@ export default function AdminDashboardScreen({ navigation }) {
             tintColor={palette.purple.vivid}
           />
         }
+        // Auto-hide the floating notification bell on scroll down,
+        // slide it back in on scroll up.
+        onScroll={bellScroll}
+        scrollEventThrottle={16}
       >
         {/* ───── Header — polished logo + academy name card ─────
             Soft greeting line + a floating white card that holds the
@@ -335,18 +342,12 @@ export default function AdminDashboardScreen({ navigation }) {
                 <Text style={styles.topBarSub} numberOfLines={1}>Tap the bell for updates</Text>
               )}
             </View>
-            <TouchableOpacity
-              onPress={() => navigation.navigate('StaffNotifications')}
-              style={styles.topBarBellBtn}
-              activeOpacity={0.85}
-            >
-              <Bell size={18} color={palette.purple.vivid} strokeWidth={2.4} />
-              {unread > 0 && (
-                <View style={styles.dot}>
-                  <Text style={styles.dotText}>{unread > 9 ? '9+' : unread}</Text>
-                </View>
-              )}
-            </TouchableOpacity>
+            {/* Inline bell removed — see GlobalNotificationBell which
+                floats over every screen. Left the wrapping <View>
+                unchanged so the topbar layout still spaces correctly.
+                Unread badge is intentionally dropped here; only the
+                floating global bell is the canonical notification
+                affordance across the app now. */}
           </View>
         </View>
 

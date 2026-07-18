@@ -1,10 +1,12 @@
 import React, { useState, useCallback } from 'react';
 import { View, Text, FlatList, TouchableOpacity, RefreshControl, ActivityIndicator, Alert } from 'react-native';
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import apiClient from '../../api/client';
 import { colors, commonStyles } from '../../utils/styles';
+import { confirm } from '../../components/ConfirmDialog';
 
 export default function MyEnrollmentsScreen() {
+  const navigation = useNavigation();
   const [enrollments, setEnrollments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -19,26 +21,71 @@ export default function MyEnrollmentsScreen() {
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
+  // Pay Now — hands the enrolment off to EnrollmentPaymentScreen,
+  // which opens Razorpay and polls the backend for the webhook. We
+  // NEVER touch payment_status here; the old client-side PATCH to
+  // /enrollments/:id/payment has been removed because it flipped the
+  // row to paid without any real charge going through.
   const handlePay = (enrollment) => {
-    Alert.alert(
-      'Confirm Payment',
-      `Pay ₹${enrollment.course_price} for "${enrollment.course_name}"?\n\n(Demo: this simulates a successful payment)`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Pay Now',
-          onPress: async () => {
-            try {
-              await apiClient.patch(`/enrollments/${enrollment.id}/payment`);
-              Alert.alert('Payment Successful! 🎉', 'Your enrollment is now confirmed.');
-              load();
-            } catch (err) {
-              Alert.alert('Error', err.response?.data?.message || 'Payment failed');
-            }
-          }
-        }
-      ]
-    );
+    // Build the payload EnrollmentPaymentScreen expects. It reads
+    // enrollment.id + enrollment.payment_amount, batch.course_name +
+    // batch.course_price for the summary, and course.name for the
+    // success screen copy.
+    const payload = {
+      enrollment: {
+        id:             enrollment.id,
+        payment_amount: enrollment.payment_amount ?? enrollment.course_price,
+      },
+      batch: {
+        id:              enrollment.batch_id,
+        name:            enrollment.batch_name,
+        course_id:       enrollment.course_id,
+        course_name:     enrollment.course_name,
+        course_price:    enrollment.course_price,
+        institution_name:enrollment.institution_name,
+        days_of_week:    enrollment.days_of_week,
+        start_time:      enrollment.start_time,
+        end_time:        enrollment.end_time,
+      },
+      course: {
+        id:               enrollment.course_id,
+        name:             enrollment.course_name,
+        price:            enrollment.course_price,
+        institution_name: enrollment.institution_name,
+      },
+      amount: enrollment.payment_amount ?? enrollment.course_price,
+    };
+
+    // Belt-and-braces guard: if we somehow don't know the price we
+    // stop instead of routing into a payment screen with amount 0
+    // (which the payment screen would reject anyway).
+    if (!payload.amount || Number(payload.amount) <= 0) {
+      confirm({
+        title:       'No amount to pay',
+        message:     'This enrolment has no price set. Please contact your academy.',
+        variant:     'warning',
+        confirmText: 'Got it',
+        hideCancel:  true,
+      });
+      return;
+    }
+
+    try {
+      navigation.navigate('EnrollmentPayment', payload);
+    } catch (err) {
+      // Fallback for nested navigators — try the parent stack.
+      try {
+        navigation.getParent()?.navigate('EnrollmentPayment', payload);
+      } catch (_) {
+        confirm({
+          title:       'Could not open payment',
+          message:     'Please open this enrolment from Home and tap Pay Now again.',
+          variant:     'warning',
+          confirmText: 'Got it',
+          hideCancel:  true,
+        });
+      }
+    }
   };
 
   const handleCancel = (enrollment) => {

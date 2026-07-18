@@ -31,6 +31,7 @@ import {
 import { palette, spacing, radius, shadows, type } from '../../../theme';
 import FAB from '../../../components/FAB';
 import apiClient from '../../../api/client';
+import { useBellScrollHandler } from '../../../components/bellScrollBus';
 
 // All / Paid / Pending — Overdue isn't a real backend status; pending+past-due
 // is folded into Pending. If we later add an SLA we can split it back out.
@@ -130,6 +131,11 @@ const DEFAULT_WALLET = {
   wallet_balance:      0,    // pending owed
   paid_out_total:      0,    // cumulative already received
   pending_amount:      0,
+  // Full settlement history — every mark-paid event the super admin
+  // has recorded for this institution. Rendered as its own section
+  // below the wallet card. Each row: { id, amount, date, status,
+  // gross_amount, commission_amount, note }.
+  settlement_history:  [],
 };
 
 export default function PaymentsTabScreen() {
@@ -161,6 +167,9 @@ export default function PaymentsTabScreen() {
             paid_out_total:      Number(res.data.paid_out_total)     || 0,
             pending_amount:      Number(res.data.pending_amount)     || 0,
             last_paid_at:        res.data.last_paid_at || null,
+            settlement_history:  Array.isArray(res.data.settlement_history)
+              ? res.data.settlement_history
+              : [],
           });
         }
       } catch (err) {
@@ -241,9 +250,55 @@ export default function PaymentsTabScreen() {
     return () => { cancelled = true; };
   }, []);
 
+  // Totals for the hero + tiles.
+  //
+  // "Collected this month" must EXACTLY match the Home Dashboard's
+  // Revenue card (admin.controller.js#getDashboardData). Both surface
+  // the same number to the operator, so the two calcs need to match
+  // filter-for-filter — otherwise the two widgets tell different
+  // stories and the admin loses trust in the numbers.
+  //
+  // Filter contract (must equal the backend query):
+  //   1. payment_status === 'paid' — the Razorpay webhook has verified
+  //      the charge (or the offline branch recorded a successful
+  //      cash/UPI/bank/cheque collection). Pending, failed, refunded,
+  //      and cancelled rows are all excluded.
+  //   2. paid_at within the current calendar month. We fall back to
+  //      enrolled_at when paid_at is null (offline sales that predate
+  //      the paid_at column) — same COALESCE the backend does.
+  //   3. Course fee only — an enrolment row's amount IS the course
+  //      payment; there are no non-course entries in this table, so
+  //      "exclude non-course payments" is satisfied by scoping to
+  //      /enrollments. Subscription plan payments, event fees, and
+  //      other channels live in different tables and never mix in
+  //      here.
+  //
+  // Pending stays as-is (lifetime pending across all time). The
+  // "Overdue" bucket is reserved for a future SLA gate and stays 0.
   const totals = useMemo(() => {
-    const collected = payments.filter(p => p.status === 'paid').reduce((s, p) => s + p.amount, 0);
-    const pending   = payments.filter(p => p.status === 'pending').reduce((s, p) => s + p.amount, 0);
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+
+    const inCurrentMonth = (iso) => {
+      if (!iso) return false;
+      const d = new Date(iso);
+      return !Number.isNaN(d.getTime()) && d >= monthStart;
+    };
+
+    const collected = payments
+      .filter((p) =>
+        p.status === 'paid'
+        // Same COALESCE(paid_at, enrolled_at) the backend uses so
+        // offline sales without a paid_at still land in the bucket.
+        && inCurrentMonth(p.paid_at || p.enrolled_at),
+      )
+      .reduce((s, p) => s + p.amount, 0);
+
+    const pending = payments
+      .filter((p) => p.status === 'pending')
+      .reduce((s, p) => s + p.amount, 0);
+
     return { collected, pending, overdue: 0 };
   }, [payments]);
 
@@ -278,6 +333,8 @@ export default function PaymentsTabScreen() {
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{ paddingBottom: 140 }}
         stickyHeaderIndices={[]}
+        onScroll={useBellScrollHandler()}
+        scrollEventThrottle={16}
       >
         {/* Header — wallet was here as a chip; it now lives in the teaser
             card below the header so it gets the visual weight it deserves.
@@ -422,6 +479,71 @@ export default function PaymentsTabScreen() {
                 </Text>
               </View>
 
+              {/* Settlement History — every mark-paid event the super
+                  admin has recorded for this institution. Empty state
+                  when nothing has been settled yet. Scrollable inside
+                  the modal so many past settlements don't push the
+                  Close button off the screen. */}
+              <View style={styles.settlementHistoryWrap}>
+                <View style={styles.settlementHistoryHead}>
+                  <Text style={styles.settlementHistoryTitle}>Settlement History</Text>
+                  {wallet.settlement_history.length > 0 ? (
+                    <Text style={styles.settlementHistoryCount}>
+                      {wallet.settlement_history.length} settlement
+                      {wallet.settlement_history.length === 1 ? '' : 's'}
+                    </Text>
+                  ) : null}
+                </View>
+                {wallet.settlement_history.length === 0 ? (
+                  <View style={styles.settlementEmpty}>
+                    <Text style={styles.settlementEmptyText}>
+                      No settlements yet. When the admin transfers your
+                      wallet balance it will appear here.
+                    </Text>
+                  </View>
+                ) : (
+                  <ScrollView
+                    style={styles.settlementList}
+                    nestedScrollEnabled
+                    showsVerticalScrollIndicator={false}
+                  >
+                    {wallet.settlement_history.map((s) => (
+                      <View key={s.id} style={styles.settlementRow}>
+                        <View style={styles.settlementRowLeft}>
+                          <View style={[
+                            styles.settlementDot,
+                            s.status === 'reversed'
+                              ? { backgroundColor: palette.rose }
+                              : { backgroundColor: palette.green },
+                          ]} />
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.settlementAmount}>
+                              {fmt(s.amount || s.transfer_amount || 0)}
+                            </Text>
+                            <Text style={styles.settlementDate}>
+                              {longDate(s.date || s.paid_at)}
+                            </Text>
+                          </View>
+                        </View>
+                        <View style={[
+                          styles.settlementBadge,
+                          s.status === 'reversed'
+                            ? { backgroundColor: palette.roseSoft || '#FEE2E2' }
+                            : { backgroundColor: palette.greenSoft || '#D1FAE5' },
+                        ]}>
+                          <Text style={[
+                            styles.settlementBadgeText,
+                            { color: s.status === 'reversed' ? '#991B1B' : '#065F46' },
+                          ]}>
+                            {(s.status || 'paid').toUpperCase()}
+                          </Text>
+                        </View>
+                      </View>
+                    ))}
+                  </ScrollView>
+                )}
+              </View>
+
               {/* Actions — settlements are initiated by the super admin from
                   the Institution Payout page; the institution-side view is
                   read-only, so we keep a single Close button. */}
@@ -564,12 +686,19 @@ export default function PaymentsTabScreen() {
         )}
       </ScrollView>
 
+      {/* "Record Payment" FAB hidden per spec — the entry point is
+          being handled from the enrolment/payment flows themselves,
+          not from a floating action on the Earnings tab. Kept as a
+          comment (rather than deleted) so a future ops-side quick-
+          add can re-enable it in one line. */}
+      {/*
       <FAB
         icon={Plus}
         bottom={92}
         onPress={() => placeholder('Record Payment')}
         accent={palette.purple}
       />
+      */}
     </View>
   );
 }
@@ -899,6 +1028,68 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: palette.purple.vivid,
     letterSpacing: -0.4,
+  },
+
+  // ── Settlement history section ──
+  settlementHistoryWrap: {
+    marginTop: spacing.lg,
+    paddingTop: spacing.md,
+    borderTopWidth: 1,
+    borderTopColor: palette.borderSoft,
+  },
+  settlementHistoryHead: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: spacing.sm,
+  },
+  settlementHistoryTitle: {
+    fontSize: 14, fontWeight: '800', color: palette.text,
+  },
+  settlementHistoryCount: {
+    fontSize: 12, fontWeight: '600', color: palette.textMuted,
+  },
+  settlementEmpty: {
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.sm,
+    backgroundColor: palette.surfaceAlt,
+    borderRadius: radius.md,
+  },
+  settlementEmptyText: {
+    fontSize: 12, color: palette.textMuted, textAlign: 'center', lineHeight: 17,
+  },
+  settlementList: {
+    maxHeight: 220,
+  },
+  settlementRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: palette.borderSoft,
+  },
+  settlementRowLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  settlementDot: {
+    width: 8, height: 8, borderRadius: 4,
+  },
+  settlementAmount: {
+    fontSize: 14, fontWeight: '800', color: palette.text,
+  },
+  settlementDate: {
+    fontSize: 11, fontWeight: '600', color: palette.textMuted, marginTop: 2,
+  },
+  settlementBadge: {
+    paddingHorizontal: 8, paddingVertical: 3,
+    borderRadius: 999,
+  },
+  settlementBadgeText: {
+    fontSize: 10, fontWeight: '900', letterSpacing: 0.4,
   },
 
   walletActions: {

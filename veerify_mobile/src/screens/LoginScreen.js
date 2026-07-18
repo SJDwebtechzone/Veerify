@@ -198,18 +198,25 @@ export default function LoginScreen({ navigation }) {
     // server-side so the dialog re-appears on the next login.
     if (result.user?.must_change_password) {
       // Defer slightly so the navigator finishes mounting the new stack
-      // before we try to navigate into ChangePassword.
+      // before we try to navigate into ChangePassword. The temp password
+      // was mailed to the student after their Razorpay payment cleared
+      // — see enrollment.controller.js#activateStudentAfterPayment. On
+      // "Remind Me Later" we leave `must_change_password=TRUE` on the
+      // server so this same dialog pops on every subsequent login until
+      // the student actually rotates the temp password.
       setTimeout(() => {
         confirm({
           title:           'Set a new password',
-          message:         "Your account was created with a temporary password. We recommend changing it now — you can do it later if you prefer.",
+          message:         'Your account was created with a temporary password. ' +
+                           'For security we recommend changing it now — or we can remind you again next time you sign in.',
           variant:         'info',
           confirmText:     'Change password',
-          cancelText:      "I'll do it later",
+          cancelText:      'Remind Me Later',
           onConfirm:       () => {
             try { navigate('ChangePassword'); } catch (_) { /* ignore */ }
           },
-          // onCancel: nothing — user keeps using the temp password.
+          // onCancel: no-op — the flag stays set server-side so the
+          // dialog re-appears on the next login.
         });
       }, 250);
     }

@@ -187,6 +187,7 @@ exports.getMyBatches = async (req, res) => {
       `SELECT b.*, c.name AS course_name,
               c.price AS course_price,
               c.duration_months AS course_duration_months,
+              c.billing_cycle   AS course_billing_cycle,
               u.name AS trainer_name,
               -- Branch label: sub-branch name for pinned batches,
               -- 'Main Institution' for batches with branch_id IS NULL.

@@ -28,6 +28,7 @@ import {
 
 import { useAuth } from '../../../context/AuthContext';
 import { palette, spacing, radius, shadows, type } from '../../../theme';
+import { useBellScrollHandler } from '../../../components/bellScrollBus';
 import { confirm } from '../../../components/ConfirmDialog';
 
 // ─── Menu definition ─────────────────────────────────────────────────────────
@@ -193,6 +194,8 @@ export default function MoreTabScreen({ navigation }) {
       style={styles.screen}
       contentContainerStyle={styles.scrollContent}
       showsVerticalScrollIndicator={false}
+      onScroll={useBellScrollHandler()}
+      scrollEventThrottle={16}
     >
       {/* ───── Header ───── */}
       <View style={styles.header}>

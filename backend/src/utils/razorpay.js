@@ -15,7 +15,17 @@ const Razorpay = require('razorpay');
 const KEY_ID         = process.env.RAZORPAY_KEY_ID;
 const KEY_SECRET     = process.env.RAZORPAY_KEY_SECRET;
 const WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET;
-const APP_BASE_URL   = process.env.APP_BASE_URL || 'http://localhost:5173';
+
+// URL Razorpay redirects the payer back to after checkout. This must
+// point at the FRONTEND — never the backend API — so the payer lands
+// on a friendly success page instead of a raw JSON / API response.
+// Resolution order: WEB_APP_URL (preferred) → APP_BASE_URL (legacy) →
+// hard default of the production frontend, so a missing env in staging
+// can't leak a localhost link into a Razorpay-hosted checkout page.
+const WEB_APP_URL =
+  process.env.WEB_APP_URL ||
+  process.env.APP_BASE_URL ||
+  'https://veerifyapp.com';
 
 let client = null;
 
@@ -80,7 +90,12 @@ async function createPaymentLink({ amountInRupees, institution, notes: extraNote
         plan_name: institution.plan_name || '',
         ...(extraNotes && typeof extraNotes === 'object' ? extraNotes : {}),
       },
-      callback_url: `${APP_BASE_URL}/payment-complete?institution_id=${institution.id}`,
+      // Post-payment landing page. Points at the frontend web app —
+      // NOT the API. The frontend route renders a friendly "Payment
+      // received" confirmation card. In dev when the frontend isn't
+      // running, the backend serves a plain fallback HTML at
+      // /api/onboarding/payment-success so the payer isn't stranded.
+      callback_url: `${WEB_APP_URL}/payment-success?institution_id=${institution.id}`,
       callback_method: 'get',
     });
 

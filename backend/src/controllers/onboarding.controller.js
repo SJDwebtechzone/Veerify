@@ -905,54 +905,27 @@ exports.rejectInstitution = async (req, res) => {
   }
 };
 
-// MOCK PAYMENT: Activate institution after payment (Phase 1 mock)
-exports.mockPayment = async (req, res) => {
-  try {
-    const userId = req.user.id;
-
-    const instResult = await pool.query(
-      'SELECT * FROM institutions WHERE owner_user_id = $1',
-      [userId]
-    );
-
-    if (instResult.rows.length === 0) {
-      return res.status(404).json({ message: 'Institution not found' });
-    }
-
-    const institution = instResult.rows[0];
-
-    if (institution.onboarding_status !== 'approved') {
-      return res.status(400).json({ 
-        message: 'Institution must be approved before payment' 
-      });
-    }
-
-    // Activate the institution
-    const updated = await pool.query(
-      `UPDATE institutions SET
-         onboarding_status = 'active',
-         status = 'approved',
-         subscription_start = NOW(),
-         subscription_end = NOW() + INTERVAL '30 days'
-       WHERE owner_user_id = $1
-       RETURNING *`,
-      [userId]
-    );
-
-    // Also update user status
-    await pool.query(
-      'UPDATE users SET status = $1 WHERE id = $2',
-      ['active', userId]
-    );
-
-    res.json({
-      message: '🎉 Payment successful! Your academy is now live.',
-      institution: updated.rows[0]
-    });
-  } catch (err) {
-    console.error('Mock payment error:', err);
-    res.status(500).json({ message: 'Server error' });
-  }
+// POST /api/onboarding/mock-payment  (DEPRECATED — never activates)
+//
+// This endpoint used to flip institutions.onboarding_status='active'
+// and users.status='active' as a Phase 1 "mock" shortcut so early
+// devs could bypass Razorpay. That's a live security hole in
+// production: any authenticated institution admin could POST here
+// and grant themselves full access without paying.
+//
+// Activation now goes through EXACTLY one code path — the Razorpay
+// webhook after signature verification (verifyWebhookSignature in
+// utils/razorpay.js, HMAC-SHA256 constant-time compare). We keep the
+// route registered so old builds of the app get a deterministic
+// 410 Gone instead of a mysterious 404, but we NEVER mutate the row.
+exports.mockPayment = async (_req, res) => {
+  return res.status(410).json({
+    code:    'MOCK_PAYMENT_DEPRECATED',
+    message:
+      'Institution activation must go through Razorpay. Complete the ' +
+      'payment from your approval email — the webhook will activate ' +
+      'your account after the signature check passes.',
+  });
 };
 
 // GET: List all pending institutions (for super admin)
@@ -1715,7 +1688,59 @@ exports.handlePaymentWebhook = async (req, res) => {
     return res.status(400).json({ message: 'Malformed JSON body' });
   }
 
-  // We only care about successful payment-link payments. Acknowledge everything
+  // ── Failed / cancelled / expired branch ─────────────────────────
+  // Razorpay fires distinct events for the unhappy paths:
+  //   • payment.failed        — a specific charge attempt failed.
+  //   • payment_link.cancelled — the merchant / customer cancelled.
+  //   • payment_link.expired   — link timed out unpaid.
+  // The institution row MUST stay at 'approved' / unpaid for any of
+  // these. We only annotate the ledger so History reflects reality;
+  // no state change on institutions is fired. Bounced back with 200
+  // so Razorpay stops retrying.
+  const FAILED_EVENTS = new Set([
+    'payment.failed',
+    'payment_link.cancelled',
+    'payment_link.expired',
+  ]);
+  if (FAILED_EVENTS.has(event.event)) {
+    try {
+      const linkEntity    = event.payload?.payment_link?.entity || {};
+      const paymentEntity = event.payload?.payment?.entity      || {};
+      const failedLinkId  = linkEntity.id || paymentEntity?.notes?.payment_link_id || null;
+      const failedPayId   = paymentEntity.id || null;
+      const status =
+        event.event === 'payment.failed'         ? 'failed'    :
+        event.event === 'payment_link.cancelled' ? 'cancelled' :
+                                                   'expired';
+      if (failedLinkId) {
+        await pool.query(
+          `UPDATE subscription_transactions
+              SET status              = $2,
+                  razorpay_payment_id = COALESCE($3, razorpay_payment_id),
+                  paid_at             = NULL
+            WHERE razorpay_link_id = $1
+              AND status = 'pending'`,
+          [failedLinkId, status, failedPayId],
+        );
+        // Reset the institution's pending link marker so the admin
+        // can start a fresh link. onboarding_status stays UNTOUCHED —
+        // failed / cancelled / expired must never activate.
+        await pool.query(
+          `UPDATE institutions
+              SET payment_link_status = $2
+            WHERE payment_link_id = $1
+              AND onboarding_status <> 'active'`,
+          [failedLinkId, status],
+        );
+      }
+      console.log(`[webhook] ${event.event} recorded link=${failedLinkId}`);
+    } catch (err) {
+      console.warn(`[webhook] failed-branch bookkeeping error:`, err?.message);
+    }
+    return res.json({ ok: true, failed_recorded: true });
+  }
+
+  // We only activate on successful payment-link payments. Ack anything
   // else with 200 so Razorpay stops retrying.
   if (event.event !== 'payment_link.paid') {
     return res.json({ ok: true, ignored: event.event });
@@ -2990,9 +3015,16 @@ exports.startApprovalPayment = async (req, res) => {
     const institution = rows[0];
     if (!institution) return res.status(404).send('Institution not found.');
     if (institution.onboarding_status === 'active') {
-      return res.status(200).send(
-        '<h3>Your subscription is already active.</h3>' +
-        '<p>Open the Veerify mobile app and sign in to see your dashboard.</p>',
+      // Redirect to the frontend success page instead of leaking the
+      // API endpoint in the browser URL bar. `already=1` lets the
+      // frontend tweak copy from "Payment received" to "Already active".
+      const webBase =
+        process.env.WEB_APP_URL ||
+        process.env.APP_BASE_URL ||
+        'https://veerifyapp.com';
+      return res.redirect(
+        302,
+        `${webBase}/payment-success?institution_id=${institutionId}&already=1`,
       );
     }
     if (!institution.plan_id) {
@@ -3114,6 +3146,121 @@ exports.startApprovalPayment = async (req, res) => {
   } catch (err) {
     console.error('startApprovalPayment error:', err);
     res.status(500).send('Server error. Please try again in a moment.');
+  }
+};
+
+// GET /api/onboarding/payment-success
+//
+// Backend fallback for the post-payment landing page. Razorpay
+// redirects the payer to `${WEB_APP_URL}/payment-success` — that's
+// a real frontend route in production, but during dev or if the
+// frontend hasn't been deployed yet the payer would land on a 404.
+// A tiny nginx rule can rewrite `/payment-success` to this endpoint
+// so nobody gets stranded on the raw Razorpay callback URL.
+//
+// Renders a branded confirmation card with:
+//   • Success tick + "Payment received"
+//   • Institution name + amount (looked up from the pending row)
+//   • "Open Veerify" CTA that deep-links back into the mobile app
+//     with a marketing fallback to the download page.
+//
+// Public — no auth. Safe because we only surface the institution
+// name; no PII beyond what the payer already knew.
+exports.renderPaymentSuccessPage = async (req, res) => {
+  try {
+    const instId  = parseInt(req.query.institution_id, 10);
+    const already = req.query.already === '1';
+    let institution = null;
+    if (Number.isFinite(instId)) {
+      const q = await pool.query(
+        `SELECT id, name, onboarding_status, plan_id
+           FROM institutions
+          WHERE id = $1 AND deleted_at IS NULL
+          LIMIT 1`,
+        [instId],
+      );
+      institution = q.rows[0] || null;
+    }
+
+    const title = already
+      ? 'Subscription already active'
+      : 'Payment received';
+    const sub = already
+      ? "You're all set — this institution's subscription is already active. Open the Veerify app to sign in."
+      : "Thanks! We've received your payment. The webhook usually confirms it within a few seconds — refresh the app to see your subscription go live.";
+
+    const instName = institution?.name
+      ? String(institution.name).replace(/[<>&"']/g, (c) => (
+          { '<':'&lt;', '>':'&gt;', '&':'&amp;', '"':'&quot;', "'":'&#39;' }[c]
+        ))
+      : null;
+
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    return res.status(200).send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${title} — Veerify</title>
+  <style>
+    :root { color-scheme: light; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh;
+      display: flex; align-items: center; justify-content: center;
+      background: linear-gradient(135deg, #F5F3FF 0%, #FDF2F8 100%);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      color: #111827; padding: 24px;
+    }
+    .card {
+      max-width: 460px; width: 100%; background: #fff;
+      border-radius: 20px; padding: 32px 28px;
+      box-shadow: 0 20px 60px rgba(15,23,42,0.08),
+                  0 4px 12px rgba(15,23,42,0.04);
+      text-align: center;
+    }
+    .tick {
+      width: 72px; height: 72px; border-radius: 50%;
+      background: #10B981; margin: 4px auto 20px;
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 10px 30px rgba(16,185,129,0.35);
+    }
+    .tick svg { width: 40px; height: 40px; stroke: #fff; }
+    h1 { margin: 0 0 8px; font-size: 22px; font-weight: 800; }
+    p  { margin: 0 0 8px; color: #6B7280; line-height: 1.55; font-size: 14px; }
+    .inst {
+      display: inline-block; margin: 14px 0 6px;
+      padding: 8px 14px; border-radius: 999px;
+      background: #F3E8FF; color: #6D28D9; font-weight: 700; font-size: 13px;
+    }
+    .cta {
+      display: inline-block; margin-top: 22px;
+      padding: 12px 22px; border-radius: 12px;
+      background: #6D28D9; color: #fff; font-weight: 700;
+      text-decoration: none; font-size: 14px;
+    }
+    .foot { margin-top: 22px; font-size: 11px; color: #9CA3AF; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="tick">
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="3"
+           stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="20 6 9 17 4 12"/>
+      </svg>
+    </div>
+    <h1>${title}</h1>
+    ${instName ? `<div class="inst">${instName}</div>` : ''}
+    <p>${sub}</p>
+    <a class="cta" href="veerify://payment-complete">Open Veerify</a>
+    <div class="foot">You can safely close this tab.</div>
+  </div>
+</body>
+</html>`);
+  } catch (err) {
+    console.error('renderPaymentSuccessPage error:', err);
+    return res.status(500).send('Server error. Please try again in a moment.');
   }
 };
 

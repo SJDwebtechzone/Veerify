@@ -73,20 +73,44 @@ export default function CourseDetailScreen({ navigation, route }) {
   const isGuest = !user;
   const isPaid = false; // Phase 2
 
+  // Enrolment check for THIS course. Drives the intro-video paywall:
+  //   • guest      → 60s preview, then "Login to continue…" dialog
+  //   • unenrolled → 60s preview, then "Purchase this course…" dialog
+  //   • enrolled   → uncapped full playback
+  // Only counts payment_status='paid' rows so a pending-payment
+  // enrolment doesn't accidentally grant full video access before the
+  // Razorpay webhook confirms.
+  const [isEnrolledInCourse, setIsEnrolledInCourse] = useState(false);
+  const viewerMode = isGuest
+    ? 'guest'
+    : (isEnrolledInCourse ? 'enrolled' : 'unenrolled');
+
   const load = useCallback(async () => {
     try {
-      const [progRes, batchRes] = await Promise.all([
+      const [progRes, batchRes, enrRes] = await Promise.all([
         apiClient.get(`/courses/${courseId}`).catch(() => ({ data: { course: null } })),
         apiClient.get(`/batches/course/${courseId}`).catch(() => ({ data: { batches: [] } })),
+        // Enrolments are only meaningful when signed in. For guests we
+        // skip the call entirely so we don't bark 401s at the client.
+        user
+          ? apiClient.get('/enrollments/my').catch(() => ({ data: { enrollments: [] } }))
+          : Promise.resolve({ data: { enrollments: [] } }),
       ]);
       setProgram(progRes.data.course || progRes.data.program || null);
       setBatches(batchRes.data.batches || []);
+      const myRows = enrRes.data?.enrollments || [];
+      setIsEnrolledInCourse(
+        myRows.some((e) =>
+          Number(e.course_id) === Number(courseId)
+          && e.payment_status === 'paid',
+        ),
+      );
     } catch (err) {
       console.log('[ProgramDetail] load error:', err?.message);
     } finally {
       setLoading(false);
     }
-  }, [courseId]);
+  }, [courseId, user]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -345,11 +369,19 @@ export default function CourseDetailScreen({ navigation, route }) {
         </View>
 
         {/* ── Intro video ──────────────────────────────────── */}
+        {/* Playback stays IN-APP for every viewer. The player caps at
+            60 seconds for guests + non-enrolled viewers and shows the
+            correct upsell dialog (Login vs Buy Now) when the quota is
+            reached. Only enrolled students (payment_status='paid' on
+            this course) get uncapped playback. */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Intro Video</Text>
           <YouTubeThumbPlayer
             url={program.intro_video_url}
             fallbackImage={bannerImg}
+            viewerMode={viewerMode}
+            onLoginPress={goToLogin}
+            onBuyPress={handleEnroll}
           />
         </View>
 
@@ -357,7 +389,30 @@ export default function CourseDetailScreen({ navigation, route }) {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Trainer</Text>
           <TouchableOpacity
-            onPress={() => Alert.alert('Trainer profile', 'Full trainer profile lands next.')}
+            // Open the public trainer profile — only navigation. If the
+            // course row doesn't have a trainer_id linked (legacy rows
+            // still on free-text trainer_name), we short-circuit with
+            // the app's branded confirm dialog instead of the OS Alert
+            // so the copy sits alongside the rest of the app's tone.
+            onPress={() => {
+              const tid = program?.trainer_id;
+              if (!tid) {
+                confirm({
+                  title:       'Trainer profile unavailable',
+                  message:
+                    'This trainer hasn\'t been linked to a profile yet. ' +
+                    'The academy admin needs to select them from the trainer list on the course.',
+                  variant:     'warning',
+                  confirmText: 'Got it',
+                  hideCancel:  true,
+                });
+                return;
+              }
+              navigation.navigate('PublicTrainerProfile', {
+                trainerId:   tid,
+                trainerName: program?.trainer_name || program?.trainer,
+              });
+            }}
             activeOpacity={0.85}
             style={styles.trainerCard}
           >

@@ -30,6 +30,7 @@ import apiClient from '../../api/client';
 import { useAuth } from '../../context/AuthContext';
 import { useChild } from '../../context/ChildContext';
 import { palette, spacing, radius, shadows, type } from '../../theme';
+import { useBellScrollHandler } from '../../components/bellScrollBus';
 
 const BELTS = [
   { key: 'white',  label: 'White',  bg: '#FFFFFF', fg: '#111827', border: '#E5E7EB' },
@@ -180,6 +181,8 @@ export default function ParentDashboardScreen({ navigation }) {
         style={{ flex: 1 }}
         contentContainerStyle={{ paddingBottom: 110 }}
         showsVerticalScrollIndicator={false}
+        onScroll={useBellScrollHandler()}
+        scrollEventThrottle={16}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
@@ -195,14 +198,8 @@ export default function ParentDashboardScreen({ navigation }) {
               <Text style={styles.eyebrow}>Welcome back</Text>
               <Text style={styles.parentName} numberOfLines={1}>{user?.name || 'Parent'}</Text>
             </View>
-            <TouchableOpacity
-              style={styles.bellBtn}
-              onPress={() => navigation.navigate('StaffNotifications')}
-              activeOpacity={0.85}
-            >
-              <Bell size={20} color="#fff" strokeWidth={2.2} />
-              {hasUnread ? <View style={styles.bellDot} /> : null}
-            </TouchableOpacity>
+            {/* Inline bell removed — GlobalNotificationBell renders
+                globally now so it stays visible across every screen. */}
           </View>
 
           {/* Active child chip. Tapping the avatar opens the full profile;

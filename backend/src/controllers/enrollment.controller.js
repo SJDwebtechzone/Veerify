@@ -136,6 +136,8 @@ exports.getEnrollmentsForMyInstitution = async (req, res) => {
          c.id              AS course_id,
          c.name            AS course_name,
          c.duration_months AS course_duration_months,
+         c.billing_cycle   AS course_billing_cycle,
+         c.price           AS course_price,
 
          b.id         AS batch_id,
          b.name       AS batch_name,
@@ -719,6 +721,7 @@ exports.createEnrollmentPaymentLink = async (req, res) => {
       `SELECT e.id, e.student_id, e.institution_id, e.payment_amount,
               e.payment_status,
               c.name AS course_name, c.price AS course_price,
+              c.billing_cycle AS course_billing_cycle,
               i.name AS institution_name,
               u.name AS student_name, u.email AS student_email, u.phone AS student_phone
          FROM enrollments e
@@ -748,6 +751,13 @@ exports.createEnrollmentPaymentLink = async (req, res) => {
       });
     }
 
+    // Shared billing-cycle label — same source used by the mobile
+    // payment summary and the PDF invoice, so all three surfaces
+    // ("Monthly Fee" / "Quarterly Fee" / "Annual Fee" / etc.) render
+    // exactly the same wording as the course's configured cycle.
+    const { billingCycleLabel } = require('../utils/billingCycle');
+    const cycleLabel = billingCycleLabel(row.course_billing_cycle);
+
     const { createPaymentLink } = require('../utils/razorpay');
     const link = await createPaymentLink({
       amountInRupees: amount,
@@ -757,12 +767,16 @@ exports.createEnrollmentPaymentLink = async (req, res) => {
         owner_name:  row.student_name,
         owner_email: row.student_email,
         owner_phone: row.student_phone,
-        plan_name:   row.course_name,
+        // Reads as "Veerify subscription — <course> (<cycle>) for <academy>"
+        // on the Razorpay hosted checkout, so the payer knows exactly
+        // what they're being charged for and on what cadence.
+        plan_name:   `${row.course_name} (${cycleLabel})`,
       },
       notes: {
         action:        'enrollment_new',
         enrollment_id: String(row.id),
         student_id:    String(studentId),
+        billing_cycle: String(row.course_billing_cycle || 'monthly'),
       },
     });
 
@@ -774,11 +788,19 @@ exports.createEnrollmentPaymentLink = async (req, res) => {
       });
     }
 
-    // Stamp the pending link id so the webhook lookup succeeds.
+    // Stamp the pending link id so the webhook lookup succeeds. Also
+    // stamp revenue_channel='wallet' — this is a direct student
+    // purchase paid via Razorpay, so the settlement flows through
+    // the institution wallet exactly like an admin-created "Share
+    // Payment Link" enrolment. Without this stamp the row would
+    // stay revenue_channel=NULL and be excluded from the wallet
+    // aggregation (offline / uncategorised sales are excluded per
+    // spec).
     await pool.query(
       `UPDATE enrollments
           SET payment_reference = $2,
-              payment_status    = 'pending'
+              payment_status    = 'pending',
+              revenue_channel   = 'wallet'
         WHERE id = $1`,
       [row.id, link.link.id],
     );
@@ -788,7 +810,13 @@ exports.createEnrollmentPaymentLink = async (req, res) => {
       provider:       'razorpay',
       transaction_id: link.link.id,
       amount,
+      currency:       'INR',
       payment_status: 'pending',
+      // Surface the billing cycle + human label so the mobile summary
+      // and any UI that renders this response never needs to know the
+      // enum → label mapping locally.
+      billing_cycle:  row.course_billing_cycle || 'monthly',
+      billing_label:  cycleLabel,
     });
   } catch (err) {
     console.error('createEnrollmentPaymentLink error:', err);
@@ -1616,39 +1644,24 @@ exports.cancelEnrollment = async (req, res) => {
   }
 };
 
-// MARK as paid (fake payment for demo)
+// PATCH /enrollments/:id/payment  (DEPRECATED — never grants access)
+//
+// This endpoint used to flip payment_status='paid' for the caller's
+// own enrollment as a "demo" shortcut. It's been retired because the
+// mobile Pay Now flow was silently invoking it and granting course
+// access with no Razorpay charge ever happening. Payment MUST go
+// through /create-payment-link → Razorpay Payment Link → webhook.
+//
+// We keep the route registered so old builds of the app get a
+// deterministic 410 Gone instead of a mysterious 404, but we NEVER
+// mutate the row — even for the correct student.
 exports.markPaid = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const studentId = req.user.id;
-
-    const check = await pool.query(
-      'SELECT student_id FROM enrollments WHERE id = $1',
-      [id]
-    );
-
-    if (check.rows.length === 0) {
-      return res.status(404).json({ message: 'Enrollment not found' });
-    }
-
-    if (check.rows[0].student_id !== studentId) {
-      return res.status(403).json({ message: 'Not your enrollment' });
-    }
-
-    const result = await pool.query(
-      `UPDATE enrollments SET payment_status = 'paid' 
-       WHERE id = $1 RETURNING *`,
-      [id]
-    );
-
-    res.json({
-      message: 'Payment successful',
-      enrollment: result.rows[0]
-    });
-  } catch (err) {
-    console.error('Mark paid error:', err);
-    res.status(500).json({ message: 'Server error', error: err.message });
-  }
+  return res.status(410).json({
+    code:    'MARK_PAID_DEPRECATED',
+    message:
+      'Payments must go through Razorpay. Start the payment from ' +
+      'the Enrolment screen so it can be verified.',
+  });
 };
 // ─── Student: renew an enrollment ───────────────────────────────────────────
 // POST /api/enrollments/:id/renew

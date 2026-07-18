@@ -180,28 +180,75 @@ const result = await pool.query(
       { expiresIn: '7d' }
     );
 
-    // Look up the institution's display name once at login so the
-    // mobile can render "Academy Name" chips instantly on every screen
-    // without waiting on a follow-up /institutions/me/details fetch.
-    // Best-effort: any error here just leaves the name empty and the
-    // downstream fetch takes over.
-    let institutionName = null;
+    // Look up the institution's display name + activation state once
+    // at login. Name is used for the header chip; onboarding_status
+    // powers the "Pending Payment" gate on the mobile so an admin
+    // whose Razorpay payment hasn't cleared can't see feature
+    // screens. Best-effort: any error here just leaves the fields
+    // empty and the downstream /institutions/me fetch takes over.
+    let institutionName        = null;
+    let onboardingStatus       = null;
+    let subscriptionEnd        = null;
+    let paidAt                 = null;
     if (user.institution_id) {
       try {
         const instRow = await pool.query(
-          `SELECT COALESCE(NULLIF(name, ''), NULLIF(brand_name, '')) AS name
+          `SELECT COALESCE(NULLIF(name, ''), NULLIF(brand_name, '')) AS name,
+                  onboarding_status,
+                  subscription_end,
+                  paid_at
              FROM institutions WHERE id = $1`,
           [user.institution_id],
         );
-        institutionName = instRow.rows[0]?.name || null;
+        institutionName  = instRow.rows[0]?.name || null;
+        onboardingStatus = instRow.rows[0]?.onboarding_status || null;
+        subscriptionEnd  = instRow.rows[0]?.subscription_end   || null;
+        paidAt           = instRow.rows[0]?.paid_at            || null;
       } catch (e) {
         console.warn('[login] institution name lookup failed:', e?.message);
       }
     }
 
+    // ── Institution activation state — allowed, but restricted ───
+    // Login is INTENTIONALLY not blocked while the institution is
+    // pending payment. The admin needs to be able to sign in to:
+    //   • edit / correct any wizard details before paying,
+    //   • re-trigger a Razorpay Payment Link if the approval email
+    //     went missing,
+    //   • view what's still owed.
+    // The server marks the session as `login_state: 'pending_payment'`
+    // when the institution row is approved-but-unpaid so the mobile
+    // renders the restricted "Pending Payment" home (edit + retry
+    // payment CTAs only). All feature endpoints — creating trainers,
+    // courses, batches, enrolments — remain gated by
+    // requireActiveSubscription, which 402s while the phase is
+    // 'pending', so the JWT can never be used to bypass activation.
+    //
+    // The only paths from 'pending' → 'active' are:
+    //   1. Razorpay webhook after signature verification (utils/razorpay.js
+    //      verifyWebhookSignature — HMAC-SHA256 constant-time).
+    //   2. Super-admin manual override via /activate/:id
+    //      (requireRole('super_admin')).
+    // Failed / cancelled Razorpay attempts leave the row at 'approved'
+    // → next login again returns login_state='pending_payment'.
+    const isInstitutionAdmin = user.role === 'admin' && !!user.institution_id;
+    const isPendingPayment =
+      isInstitutionAdmin &&
+      onboardingStatus === 'approved' &&
+      !paidAt;
+    const loginState = isPendingPayment ? 'pending_payment' : 'active';
+
     res.json({
-      message: 'Login successful',
+      message:
+        loginState === 'pending_payment'
+          ? 'Login successful — payment pending. Please complete Razorpay to activate.'
+          : 'Login successful',
       token,
+      // Top-level flag the mobile branches on to render the restricted
+      // "Pending Payment" home (edit institution + retry payment) vs
+      // the full dashboard. Same field is echoed inside `user` for
+      // clients that ignore top-level metadata.
+      login_state: loginState,
       user: {
         id:               user.id,
         name:             user.name,
@@ -209,6 +256,19 @@ const result = await pool.query(
         role:             user.role,
         institution_id:   user.institution_id,
         institution_name: institutionName,
+        // Snapshot of the institution's activation state so the mobile
+        // can render the correct home screen immediately. Kept as-is
+        // (no phase computation) so the client uses the same fields
+        // it always has — see subscriptionGuard.getCurrentPhase for
+        // the canonical derivation used server-side.
+        institution_onboarding_status: onboardingStatus,
+        institution_paid_at:           paidAt,
+        institution_subscription_end:  subscriptionEnd,
+        // Restricted session — mobile MUST NOT show create/manage
+        // features while this is 'pending_payment'. Editing the
+        // wizard fields and retrying the payment link are the only
+        // allowed actions until the webhook flips the row to active.
+        login_state:                   loginState,
         // True for accounts that were created on someone's behalf with
         // a temp password (currently sub-branch admins). The mobile pops
         // a "Change password / I'll do it later" dialog when this is

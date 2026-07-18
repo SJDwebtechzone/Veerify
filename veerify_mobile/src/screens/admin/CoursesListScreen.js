@@ -23,6 +23,7 @@ import {
 
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
+import { useBellScrollHandler } from '../../components/bellScrollBus';
 
 const ASSET_HOST = (apiClient.defaults.baseURL || '').replace(/\/api\/?$/, '');
 function resolveAssetUrl(src) {
@@ -130,6 +131,8 @@ export default function CoursesListScreen({ navigation }) {
         data={courses}
         keyExtractor={(item) => String(item.id)}
         contentContainerStyle={{ padding: spacing.lg, paddingBottom: 120 }}
+        onScroll={useBellScrollHandler()}
+        scrollEventThrottle={16}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}

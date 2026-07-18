@@ -30,6 +30,10 @@ import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 import { confirm } from '../../components/ConfirmDialog';
 import TrainerPicker from '../../components/TrainerPicker';
+import {
+  BILLING_CYCLE_OPTIONS,
+  billingCycleLabel,
+} from '../../utils/billingCycle';
 
 // Resolve a stored /uploads/<file> path to an absolute URL that works on the
 // Android emulator (which can't reach localhost — it maps to 10.0.2.2).
@@ -162,6 +166,11 @@ export default function CreateCourseScreen({ navigation, route }) {
     batch_size_max:        existing?.batch_size_max ? String(existing.batch_size_max) : '',
     // pricing
     price:                 existing?.price ? String(existing.price) : '',
+    // Billing cadence — flows through to the mobile payment summary
+    // (fee chip: "Monthly Fee" / "Quarterly Fee" / "Annual Fee" / etc.),
+    // the Razorpay Payment Link description, and the invoice PDF.
+    // Defaults to 'monthly' for continuity with existing courses.
+    billing_cycle:         existing?.billing_cycle || 'monthly',
     // Legacy single admission-fee field — kept in state for back-compat
     // with rows saved before the new fee-list UI. Stays in sync with the
     // first Admission Fee entry of additional_fees on save.
@@ -343,6 +352,7 @@ export default function CreateCourseScreen({ navigation, route }) {
         batch_size_min:  form.batch_size_min ? parseInt(form.batch_size_min, 10) : null,
         batch_size_max:  form.batch_size_max ? parseInt(form.batch_size_max, 10) : null,
         price:           form.price ? parseFloat(form.price) : 0,
+        billing_cycle:   form.billing_cycle || 'monthly',
         admission_fee:   admissionFeeVal,
         additional_fees: cleanFees,
         // Trainer — send trainer_id (server derives trainer_name
@@ -504,8 +514,45 @@ export default function CreateCourseScreen({ navigation, route }) {
 
       {/* ── Section 5: Pricing ── */}
       <Section title="Pricing (₹)" icon={IndianRupee} accent={palette.pink}>
+        {/* Billing cadence — controls the fee label shown to the
+            student on the payment summary, on the Razorpay checkout
+            page, and on the invoice PDF. */}
+        <Text style={styles.label}>Billing Cycle</Text>
+        <Text style={styles.helperText}>
+          Choose how the course fee is billed. Default is Monthly Fee.
+        </Text>
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, marginTop: 6, marginBottom: spacing.md }}>
+          {BILLING_CYCLE_OPTIONS.map((opt) => {
+            const on = (form.billing_cycle || 'monthly') === opt.value;
+            return (
+              <TouchableOpacity
+                key={opt.value}
+                onPress={() => update('billing_cycle', opt.value)}
+                activeOpacity={0.85}
+                style={{
+                  paddingHorizontal: 12, paddingVertical: 8,
+                  borderRadius: 999,
+                  borderWidth: 1,
+                  borderColor: on ? palette.pink : palette.borderSoft,
+                  backgroundColor: on ? palette.pink : palette.surface,
+                }}
+              >
+                <Text style={{
+                  fontSize: 12, fontWeight: '800',
+                  color: on ? '#fff' : palette.text,
+                }}>
+                  {opt.label}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+
         <Field
-          label="Monthly Fee"
+          // Field label mirrors the picked billing cycle so an admin
+          // configuring an annual course sees "Annual Fee" here rather
+          // than the stale hardcoded "Monthly Fee".
+          label={billingCycleLabel(form.billing_cycle)}
           value={form.price}
           onChange={(v) => update('price', v)}
           placeholder="1500"

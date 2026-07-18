@@ -44,6 +44,7 @@ const ShieldCheck = Shield;
 
 import apiClient from '../../api/client';
 import { confirm } from '../../components/ConfirmDialog';
+import { billingCycleLabel } from '../../utils/billingCycle';
 
 // ─── Theme tokens ──────────────────────────────────────────────────────
 const BRAND = '#E63946';
@@ -155,36 +156,68 @@ export default function EnrollmentPaymentScreen({ route, navigation }) {
   }, [stage]);
 
   // ── Pay Now ───────────────────────────────────────────────────────
+  //
+  // Contract: this handler NEVER marks the enrollment paid on the
+  // client. It only:
+  //   1. Verifies preconditions.
+  //   2. Asks the backend to mint a Razorpay Payment Link.
+  //   3. If the server already sees this row as `paid` (webhook
+  //      landed on an earlier attempt), we jump the user to the
+  //      success screen — the payment IS verified server-side.
+  //   4. Otherwise, opens the Razorpay hosted page in the OS browser
+  //      and enters `awaiting`. From that point on, the ONLY way we
+  //      surface the success screen is by polling
+  //      `/enrollments/:id/payment-status` and seeing the backend
+  //      report `payment_status === 'paid'`. That flip only happens
+  //      after the Razorpay webhook fires with a valid signature.
+  //
+  // If Razorpay isn't configured on the server (mock:true), we now
+  // REFUSE to fake success. Instead we surface a clear error so the
+  // student — and the operator — know payment is unavailable. This
+  // removes the "Pay Now silently marks paid" foot-gun that showed
+  // up when creds hadn't been reloaded on the API server.
   const handlePay = async () => {
     if (!enrollment?.id) {
-      Alert.alert('No enrollment', 'Something went wrong. Go back and try again.');
+      confirm({
+        title:       'Nothing to pay for',
+        message:     'We lost track of this enrolment. Go back and start the payment again.',
+        variant:     'warning',
+        confirmText: 'Got it',
+        hideCancel:  true,
+      });
       return;
     }
     if (amount <= 0) {
-      Alert.alert('No amount', 'This course has no price configured.');
+      confirm({
+        title:       'No amount to charge',
+        message:     'This course has no price configured. Please contact the academy.',
+        variant:     'warning',
+        confirmText: 'Got it',
+        hideCancel:  true,
+      });
       return;
     }
     setPaying(true);
     try {
-      // Ask the backend to mint a Razorpay Payment Link.
+      // 1. Ask the backend to mint a Razorpay Payment Link.
       const res = await apiClient.post(
         `/enrollments/${enrollment.id}/create-payment-link`,
       );
       const data = res.data || {};
 
-      // Dev fallback — Razorpay creds missing in .env. Fall back to
-      // the mock-pay endpoint so local development still works. Only
-      // triggers when the backend explicitly signals { mock: true }.
+      // 2. Razorpay is not configured on the server. We DO NOT
+      // silently mock-pay any more — that used to grant access
+      // without an actual charge. Surface a hard error instead.
       if (data.mock) {
-        const mock = await apiClient.post(`/enrollments/${enrollment.id}/mock-pay`);
-        setReference(mock.data?.reference || mock.data?.enrollment?.payment_reference || null);
-        setStage('done');
-        setDone(true);
-        return;
+        throw new Error(
+          data.message
+            || 'Online payments are not available right now. Please try again in a few minutes or contact your academy.',
+        );
       }
 
-      // Already paid (defensive — the endpoint short-circuits when the
-      // webhook has landed for an earlier attempt).
+      // 3. Idempotent short-circuit — the webhook has already flipped
+      // this row to paid on a previous attempt. Server is the source
+      // of truth here, so we're safe to show the success screen.
       if (data.already_paid) {
         setReference(data.transaction_id || null);
         setStage('done');
@@ -197,22 +230,29 @@ export default function EnrollmentPaymentScreen({ route, navigation }) {
         throw new Error('No payment URL returned from server');
       }
 
-      // Open Razorpay in the OS browser. We flag sentToRzp so the
-      // AppState listener knows to start polling once the app returns.
+      // 4. Open Razorpay in the OS browser. sentToRzp arms the
+      // AppState listener so polling starts the moment the student
+      // comes back to Veerify. `stage='awaiting'` locks the UI out
+      // of any code path that could accidentally mark paid — only
+      // the poll loop can flip us to 'done'.
       const supported = await Linking.canOpenURL(url);
       if (!supported) {
-        throw new Error('Cannot open payment link on this device');
+        throw new Error('Cannot open the payment page on this device.');
       }
       sentToRzp.current = true;
       setStage('awaiting');
       await Linking.openURL(url);
     } catch (err) {
-      Alert.alert(
-        'Payment failed',
-        err?.response?.data?.message
-          || err?.message
-          || 'Could not start the payment. Please try again.',
-      );
+      confirm({
+        title:       'Payment could not start',
+        message:
+          err?.response?.data?.message
+            || err?.message
+            || 'We could not start the payment. Your enrolment is still Pending Payment — you can retry any time.',
+        variant:     'destructive',
+        confirmText: 'Got it',
+        hideCancel:  true,
+      });
       // Keep the enrollment in 'pending' state — never mark paid
       // client-side. The user can tap Pay Now again to retry.
       setStage('idle');
@@ -452,7 +492,12 @@ export default function EnrollmentPaymentScreen({ route, navigation }) {
           </View>
         </View>
 
-        {/* Amount */}
+        {/* Amount ── The fee-type chip reflects the course's
+            configured billing cycle: "Monthly Fee" by default, or
+            "Quarterly Fee" / "Annual Fee" / "One-Time Fee" / etc.
+            when the admin has configured a different cadence. Reads
+            from the row so the same wording flows through to the
+            Razorpay checkout description and the invoice PDF. */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Amount</Text>
           <View style={[styles.card, { alignItems: 'center', paddingVertical: 24 }]}>
@@ -460,7 +505,13 @@ export default function EnrollmentPaymentScreen({ route, navigation }) {
             <Text style={styles.amount}>{fmtINR(amount)}</Text>
             <View style={styles.amountChip}>
               <Wallet size={11} color={BRAND} strokeWidth={2.4} />
-              <Text style={styles.amountChipText}>One-time course fee</Text>
+              <Text style={styles.amountChipText}>
+                {billingCycleLabel(
+                  enrollment?.course_billing_cycle
+                    || batch?.course_billing_cycle
+                    || course?.billing_cycle,
+                )}
+              </Text>
             </View>
           </View>
         </View>

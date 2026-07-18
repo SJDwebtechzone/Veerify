@@ -191,6 +191,7 @@ async function generateEnrollmentInvoice({ enrollmentId }) {
       `SELECT e.id, e.payment_amount, e.payment_mode, e.payment_reference,
               e.institution_id,
               c.name AS course_name,
+              c.billing_cycle AS course_billing_cycle,
               i.name AS institution_name,
               u.name AS student_name, u.email AS student_email
          FROM enrollments e
@@ -216,13 +217,20 @@ async function generateEnrollmentInvoice({ enrollmentId }) {
     const tax      = 0;
     const subtotal = amount - tax;
 
+    // Shared billing-cycle label — mirrors the wording shown on the
+    // mobile payment summary and on the Razorpay hosted checkout page
+    // so the invoice matches what the payer just saw.
+    const { billingCycleLabel } = require('./billingCycle');
+    const cycleLabel = billingCycleLabel(row.course_billing_cycle);
+
     await renderInvoicePdf({
       filePath:        pdfPath,
       invoiceNumber,
       issuedAt:        new Date(),
       payerName:       row.student_name,
       payerEmail:      row.student_email,
-      itemDescription: `${row.course_name} — Enrollment (${row.institution_name})`,
+      itemDescription:
+        `${row.course_name} — ${cycleLabel} (${row.institution_name})`,
       subtotal,
       tax,
       total:           amount,
@@ -248,7 +256,7 @@ async function generateEnrollmentInvoice({ enrollmentId }) {
         row.institution_id,
         row.student_name || null,
         row.student_email || null,
-        `${row.course_name} — Enrollment`,
+        `${row.course_name} — ${cycleLabel}`,
         subtotal, tax, amount,
         row.payment_mode || 'razorpay',
         row.payment_reference,

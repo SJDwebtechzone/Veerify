@@ -307,6 +307,27 @@ export default function PaymentScreen({ navigation }) {
           🔒 Payment is handled entirely on Razorpay's secure page.
         </Text>
 
+        {/* Edit institution details — the wizard route (SetupInstitution)
+            already supports edit mode and reads the current row via
+            /onboarding/my-status. This is the "still able to change
+            anything before paying" affordance: contact info, address,
+            branding, plan, etc. Editing does NOT require payment. Once
+            the webhook flips the row to active, the same route
+            continues to work from the Settings tab. */}
+        <TouchableOpacity
+          onPress={() => {
+            try {
+              navigation.navigate('SetupInstitution', { editMode: true });
+            } catch (_) {
+              try { navigation.getParent()?.navigate('SetupInstitution', { editMode: true }); }
+              catch (__) {}
+            }
+          }}
+          style={styles.editLink}
+        >
+          <Text style={styles.editLinkText}>Edit institution details</Text>
+        </TouchableOpacity>
+
         <TouchableOpacity onPress={handleSignOut} style={styles.signOutLink}>
           <Text style={styles.signOutText}>Sign out</Text>
         </TouchableOpacity>
@@ -416,5 +437,14 @@ const styles = StyleSheet.create({
     fontSize: 13, fontWeight: '600',
     color: colors.textLight,
     textDecorationLine: 'underline',
+  },
+  editLink: {
+    alignItems: 'center',
+    paddingVertical: 12,
+    marginTop: 4,
+  },
+  editLinkText: {
+    fontSize: 13, fontWeight: '700',
+    color: colors.primary,
   },
 });

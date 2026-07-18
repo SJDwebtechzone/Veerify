@@ -47,6 +47,13 @@ function sanitizeCoursePayload(body) {
     batch_size_max:         body.batch_size_max ? parseInt(body.batch_size_max, 10) : null,
     language:               body.language || 'English',
     price:                  body.price !== undefined ? parseFloat(body.price) : 0,
+    // billing_cycle drives the fee label on the payment summary,
+    // Razorpay checkout, and invoice PDF. Whitelist the enum + default
+    // to 'monthly' so anything unrecognised falls back to legacy behaviour.
+    billing_cycle:          (['one_time','monthly','quarterly','half_yearly','annual']
+                              .includes(String(body.billing_cycle || '').toLowerCase()))
+                              ? String(body.billing_cycle).toLowerCase()
+                              : 'monthly',
     admission_fee:          body.admission_fee !== undefined ? parseFloat(body.admission_fee) : 0,
     belt_system:            !!body.belt_system,
     certificate_available:  body.certificate_available === undefined ? true : !!body.certificate_available,
@@ -114,7 +121,7 @@ exports.createCourse = async (req, res) => {
          belt_system, certificate_available,
          image_url, intro_video_url, curriculum,
          badge, trainer_name, branch_name,
-         mode, status, trainer_id
+         mode, status, trainer_id, billing_cycle
        )
        VALUES (
          $1, $2, $3, $4, $5,
@@ -125,7 +132,7 @@ exports.createCourse = async (req, res) => {
          $17, $18,
          $19, $20, $21::jsonb,
          $22, $23, $24,
-         $25, $26, $27
+         $25, $26, $27, $28
        )
        RETURNING *`,
       [
@@ -137,7 +144,7 @@ exports.createCourse = async (req, res) => {
         p.belt_system, p.certificate_available,
         p.image_url, p.intro_video_url, JSON.stringify(p.curriculum),
         p.badge, p.trainer_name, p.branch_name,
-        p.mode, p.status, p.trainer_id,
+        p.mode, p.status, p.trainer_id, p.billing_cycle,
       ],
     );
 
@@ -341,6 +348,16 @@ exports.updateCourse = async (req, res) => {
       }
     }
 
+    // Whitelist + normalise billing_cycle so the UPDATE branch keeps
+    // parity with the CREATE branch. Unknown values fall back to null
+    // via COALESCE (which then keeps whatever was already stored).
+    const CYCLES = new Set(['one_time','monthly','quarterly','half_yearly','annual']);
+    const billingCycleParam = has('billing_cycle')
+      ? (CYCLES.has(String(body.billing_cycle || '').toLowerCase())
+          ? String(body.billing_cycle).toLowerCase()
+          : null)
+      : null;
+
     const result = await pool.query(
       `UPDATE courses SET
          name                  = COALESCE($1,  name),
@@ -368,7 +385,8 @@ exports.updateCourse = async (req, res) => {
          branch_name           = COALESCE($23, branch_name),
          mode                  = COALESCE($24, mode),
          status                = COALESCE($25, status),
-         trainer_id            = COALESCE($27, trainer_id)
+         trainer_id            = COALESCE($27, trainer_id),
+         billing_cycle         = COALESCE($28, billing_cycle)
        WHERE id = $26
        RETURNING *`,
       [
@@ -400,6 +418,7 @@ exports.updateCourse = async (req, res) => {
         status,
         id,
         trainerIdParam,
+        billingCycleParam,
       ],
     );
 

@@ -27,6 +27,7 @@ import apiClient from '../../../api/client';
 import { useAuth } from '../../../context/AuthContext';
 import { useInstitution } from '../../../context/InstitutionContext';
 import { palette, spacing, radius, shadows, type } from '../../../theme';
+import { useBellScrollHandler } from '../../../components/bellScrollBus';
 import { confirm } from '../../../components/ConfirmDialog';
 
 const ACCENTS = [palette.purple, palette.blue, palette.green, palette.orange, palette.pink, palette.teal];
@@ -252,6 +253,8 @@ export default function BatchesTabScreen({ navigation }) {
         keyExtractor={(b) => String(b.id)}
         contentContainerStyle={{ padding: spacing.xl, paddingBottom: 40 }}
         ItemSeparatorComponent={() => <View style={{ height: spacing.md }} />}
+        onScroll={useBellScrollHandler()}
+        scrollEventThrottle={16}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}

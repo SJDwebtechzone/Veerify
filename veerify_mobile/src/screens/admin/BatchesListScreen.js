@@ -2,6 +2,7 @@ import React, { useState, useCallback } from 'react';
 import { View, Text, FlatList, TouchableOpacity, Alert, RefreshControl, ActivityIndicator } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import apiClient from '../../api/client';
+import { useBellScrollHandler } from '../../components/bellScrollBus';
 import { colors, commonStyles } from '../../utils/styles';
 import { confirm } from '../../components/ConfirmDialog';
 
@@ -124,6 +125,8 @@ export default function BatchesListScreen({ navigation }) {
         data={batches}
         keyExtractor={(item) => item.id.toString()}
         contentContainerStyle={{ padding: 20 }}
+        onScroll={useBellScrollHandler()}
+        scrollEventThrottle={16}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
         ListEmptyComponent={<View style={commonStyles.emptyState}><Text style={{ fontSize: 60 }}>📅</Text><Text style={commonStyles.emptyText}>No batches yet.{'\n'}Create a course first, then add batches.</Text></View>}
         renderItem={({ item }) => (

@@ -119,6 +119,27 @@ exports.markRead = async (req, res) => {
   }
 };
 
+// GET /api/notifications/unread-count
+//
+// Lightweight counter for the floating notification bell. Returns a
+// single integer so the mobile can poll it every 60s without
+// hydrating the full list on each tick. Guests short-circuit at the
+// verifyToken middleware, so we always have req.user here.
+exports.unreadCount = async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT COUNT(*) AS count
+         FROM notifications
+        WHERE user_id = $1 AND read_at IS NULL`,
+      [req.user.id],
+    );
+    res.json({ count: Number(r.rows[0]?.count || 0) });
+  } catch (err) {
+    console.error('Unread count error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
 // POST /api/notifications/read-all
 exports.markAllRead = async (req, res) => {
   try {
