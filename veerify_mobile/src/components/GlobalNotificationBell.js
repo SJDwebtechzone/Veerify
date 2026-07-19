@@ -38,14 +38,25 @@ const SURFACE = '#FFFFFF';
 const TEXT    = '#111827';
 const BADGE   = '#EF4444';
 
-const HIDE_ON_ROUTES = new Set([
-  'Welcome',
-  'Login',
-  'Register',
-  'ForgotPassword',
-  'ChangePassword',
-  'StaffNotifications',
+// Home-tab route names by role — the bell is visible ONLY on these
+// routes. Everywhere else (all inner tabs, detail screens, auth
+// screens, splash) the bell is hidden. Kept as an allow-list rather
+// than a hide-list so a new inner screen added later is silently
+// covered without needing to remember to update this file.
+//
+//   • Guest + Student → 'Home'          (StudentTabNavigator)
+//   • Trainer / Staff → 'StaffDashboard' (StaffTabNavigator)
+//   • Admin (Institution / Branch) → 'Dashboard' (AdminTabNavigator)
+//
+// Parent is excluded entirely — see PARENT_ROLE check below.
+const SHOW_ON_ROUTES = new Set([
+  'Home',
+  'StaffDashboard',
+  'Dashboard',
 ]);
+
+// Parent role sees no notification bell anywhere per the spec.
+const PARENT_ROLE = 'parent';
 
 // How often we re-poll unread count for signed-in users. 60s is a
 // good balance — the drop-shadow badge doesn't need to be second-by-
@@ -158,7 +169,15 @@ export default function GlobalNotificationBell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [HIDDEN_Y]);
 
-  if (routeName && HIDE_ON_ROUTES.has(routeName)) return null;
+  // Parent accounts never see the bell — the spec excludes them
+  // entirely. This runs before the route allow-list so a parent who
+  // happens to land on a route named "Home" still gets nothing.
+  if (user?.role === PARENT_ROLE) return null;
+  // Allow-list gate: bell renders only on each role's Home tab.
+  // Anything else (inner tabs like Programs / Batches / Profile,
+  // detail screens like Course Detail / Enrolment, auth screens,
+  // splash) short-circuits here.
+  if (!routeName || !SHOW_ON_ROUTES.has(routeName)) return null;
 
   const handlePress = () => {
     if (isGuest) {

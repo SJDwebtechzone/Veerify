@@ -204,6 +204,8 @@ exports.enrollInBatch = async (req, res) => {
       height_cm,
       weight_kg,
       disabilities,
+      blood_group,
+      belt_category,
       photo_url,
     } = req.body;
 
@@ -387,9 +389,10 @@ exports.enrollInBatch = async (req, res) => {
            contact_number, email, address,
            marital_status, occupation,
            height_cm, weight_kg, disabilities,
+           blood_group, belt_category,
            photo_url, updated_at
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW())
          ON CONFLICT (user_id) DO UPDATE SET
            full_name      = COALESCE(EXCLUDED.full_name,      student_profiles.full_name),
            date_of_birth  = COALESCE(EXCLUDED.date_of_birth,  student_profiles.date_of_birth),
@@ -404,6 +407,8 @@ exports.enrollInBatch = async (req, res) => {
            height_cm      = COALESCE(EXCLUDED.height_cm,      student_profiles.height_cm),
            weight_kg      = COALESCE(EXCLUDED.weight_kg,      student_profiles.weight_kg),
            disabilities   = COALESCE(EXCLUDED.disabilities,   student_profiles.disabilities),
+           blood_group    = COALESCE(EXCLUDED.blood_group,    student_profiles.blood_group),
+           belt_category  = COALESCE(EXCLUDED.belt_category,  student_profiles.belt_category),
            photo_url      = COALESCE(EXCLUDED.photo_url,      student_profiles.photo_url),
            updated_at     = NOW()`,
         [
@@ -414,6 +419,7 @@ exports.enrollInBatch = async (req, res) => {
           height_cm != null ? Number(height_cm) : null,
           weight_kg != null ? Number(weight_kg) : null,
           disabilities || null,
+          blood_group || null, belt_category || null,
           photo_url || null,
         ]
       );
@@ -1800,6 +1806,16 @@ exports.updateStudentByAdmin = async (req, res) => {
     name, email, phone,
     address, father_name, mother_name,
     date_of_birth, gender,
+    // Full-form profile fields — parity with the Student Enrollment
+    // Form so the admin can edit everything a student entered on the
+    // way in. Every one of these is optional; the SQL below uses
+    // COALESCE(NULLIF('', ''), existing) so an empty string is
+    // treated as "no change" and a real value overwrites.
+    occupation,
+    height_cm, weight_kg,
+    disabilities,    // maps to the "Health notes" field on the form
+    blood_group,     // one of the 8 ABO/Rh values, or NULL
+    belt_category,   // curated list + free-text "Other"
     // NEW: profile photo. Three signals accepted:
     //   • non-empty string   → set photo_url to this path
     //   • explicit null      → clear photo_url (admin removed the photo)
@@ -1885,10 +1901,23 @@ exports.updateStudentByAdmin = async (req, res) => {
       const wantsPhotoTouch = Object.prototype.hasOwnProperty.call(req.body || {}, 'photo_url');
       const nextPhoto = photo_url == null ? null : String(photo_url).trim() || null;
 
+      // Height/weight arrive as numbers or strings; coerce safely.
+      // A null/undefined/empty string means "don't touch", not "clear".
+      const num = (v) => {
+        if (v === undefined || v === null || v === '') return null;
+        const n = parseInt(v, 10);
+        return Number.isFinite(n) ? n : null;
+      };
+
       await client.query(
-        `INSERT INTO student_profiles
-           (user_id, full_name, address, father_name, mother_name, date_of_birth, gender, photo_url)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `INSERT INTO student_profiles (
+           user_id, full_name, address, father_name, mother_name,
+           date_of_birth, gender,
+           occupation, height_cm, weight_kg,
+           disabilities, blood_group, belt_category,
+           photo_url
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
          ON CONFLICT (user_id) DO UPDATE SET
            full_name     = COALESCE(NULLIF(EXCLUDED.full_name,     ''), student_profiles.full_name),
            address       = COALESCE(NULLIF(EXCLUDED.address,       ''), student_profiles.address),
@@ -1896,10 +1925,16 @@ exports.updateStudentByAdmin = async (req, res) => {
            mother_name   = COALESCE(NULLIF(EXCLUDED.mother_name,   ''), student_profiles.mother_name),
            date_of_birth = COALESCE(EXCLUDED.date_of_birth,             student_profiles.date_of_birth),
            gender        = COALESCE(NULLIF(EXCLUDED.gender,        ''), student_profiles.gender),
+           occupation    = COALESCE(NULLIF(EXCLUDED.occupation,    ''), student_profiles.occupation),
+           height_cm     = COALESCE(EXCLUDED.height_cm,                 student_profiles.height_cm),
+           weight_kg     = COALESCE(EXCLUDED.weight_kg,                 student_profiles.weight_kg),
+           disabilities  = COALESCE(NULLIF(EXCLUDED.disabilities,  ''), student_profiles.disabilities),
+           blood_group   = COALESCE(NULLIF(EXCLUDED.blood_group,   ''), student_profiles.blood_group),
+           belt_category = COALESCE(NULLIF(EXCLUDED.belt_category, ''), student_profiles.belt_category),
            -- photo_url only updates when the caller actually sent the key.
-           -- $9 = wantsPhotoTouch flag; when TRUE we overwrite with the
-           -- normalised value (null clears the column), else we leave it.
-           photo_url     = CASE WHEN $9 THEN EXCLUDED.photo_url ELSE student_profiles.photo_url END,
+           -- wantsPhotoTouch flag toggles overwrite; when FALSE we leave
+           -- whatever is already stored.
+           photo_url     = CASE WHEN $15 THEN EXCLUDED.photo_url ELSE student_profiles.photo_url END,
            updated_at    = CURRENT_TIMESTAMP`,
         [
           studentId,
@@ -1909,6 +1944,12 @@ exports.updateStudentByAdmin = async (req, res) => {
           mother_name || null,
           date_of_birth || null,
           gender || null,
+          occupation || null,
+          num(height_cm),
+          num(weight_kg),
+          disabilities || null,
+          blood_group || null,
+          belt_category || null,
           wantsPhotoTouch ? nextPhoto : null,
           wantsPhotoTouch,
         ],
@@ -1923,11 +1964,15 @@ exports.updateStudentByAdmin = async (req, res) => {
     }
 
     // Return the freshly-merged view so the mobile screen can refresh
-    // its state without a second round-trip.
+    // its state without a second round-trip. Returns every column the
+    // edit form knows how to render so the client can trust the
+    // server as its source of truth after Save.
     const merged = await pool.query(
       `SELECT u.id, u.name, u.email, u.phone,
-              sp.address, sp.father_name, sp.mother_name,
-              sp.date_of_birth, sp.gender, sp.photo_url
+              sp.full_name, sp.address, sp.father_name, sp.mother_name,
+              sp.date_of_birth, sp.gender, sp.photo_url,
+              sp.occupation, sp.height_cm, sp.weight_kg,
+              sp.disabilities, sp.blood_group, sp.belt_category
          FROM users u
          LEFT JOIN student_profiles sp ON sp.user_id = u.id
         WHERE u.id = $1`,

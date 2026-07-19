@@ -834,38 +834,17 @@ exports.getSubscriptionStatus = async (req, res) => {
 };
 
 // SUPER ADMIN: Approve an institution
-exports.approveInstitution = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const adminId = req.user.id;
-
-    const result = await pool.query(
-      `UPDATE institutions SET
-         onboarding_status = 'approved',
-         status = 'approved',
-         approved_by = $1,
-         approved_at = NOW()
-       WHERE id = $2
-       RETURNING *`,
-      [adminId, id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ message: 'Institution not found' });
-    }
-
-    // TODO Phase 2: Send email notification to academy owner
-    // await sendEmail(institution.email, 'Academy Approved!', '...')
-
-    res.json({
-      message: 'Institution approved successfully',
-      institution: result.rows[0]
-    });
-  } catch (err) {
-    console.error('Approve institution error:', err);
-    res.status(500).json({ message: 'Server error' });
-  }
-};
+// NOTE: The Phase-1 stub of exports.approveInstitution used to live
+// here — a bare UPDATE with a "TODO Phase 2: send email" comment and
+// no payment-link generation. It was silently overridden by the real
+// implementation further down (line ~1226), which is why approvals
+// worked in prod but emails "sometimes disappeared" (a code path
+// that thought it was the source of truth actually never fired).
+//
+// The stub has been removed. The canonical implementation lives in
+// exports.approveInstitution near the bottom of this file — it
+// sends the approval email + creates the Razorpay Payment Link +
+// opens the trial window.
 
 // SUPER ADMIN: Reject an institution
 exports.rejectInstitution = async (req, res) => {
@@ -1384,6 +1363,25 @@ exports.approveInstitution = async (req, res) => {
       warnings.push(`Email not sent: ${mailResult.error}`);
     }
 
+    // Loud console logging so ops can spot a broken approval flow at
+    // a glance. In prod these lines light up when either the Razorpay
+    // link failed to mint (creds missing) or the SMTP relay is down.
+    if (!linkResult.ok) {
+      console.error(
+        `[approve] payment link creation FAILED for institution=${institution.id} (${institution.name}) — ${linkResult.error}`,
+      );
+    }
+    if (!mailResult.ok) {
+      console.error(
+        `[approve] approval email FAILED to ${institution.owner_email} for institution=${institution.id} — ${mailResult.error}`,
+      );
+    }
+    if (linkResult.ok && mailResult.ok) {
+      console.log(
+        `[approve] institution=${institution.id} approved OK — email sent to ${institution.owner_email}, payment link ${linkResult.link.short_url}`,
+      );
+    }
+
     // Return the fresh row so the admin UI re-renders correctly.
     const fresh = await pool.query(
       `SELECT i.*, u.email AS owner_email, u.name AS owner_name,
@@ -1395,16 +1393,185 @@ exports.approveInstitution = async (req, res) => {
       [id]
     );
 
+    // Compose a message that TELLS THE SUPER ADMIN what actually
+    // succeeded — the old message always said "Payment link emailed"
+    // even when the email helper had returned an error, which hid
+    // the misconfig.
+    let message = `${institution.name} approved.`;
+    if (linkResult.ok && mailResult.ok) {
+      message += ' Payment link emailed to owner.';
+    } else if (linkResult.ok && !mailResult.ok) {
+      message += ' Payment link created but email delivery FAILED — use "Resend approval email".';
+    } else if (!linkResult.ok && mailResult.ok) {
+      message += ' Approval email sent, but payment link could NOT be created — use "Resend approval email" after fixing Razorpay creds.';
+    } else {
+      message += ' Payment link + email BOTH failed — check Razorpay + SMTP env vars, then "Resend approval email".';
+    }
+
     res.json({
-      message: `${institution.name} approved. ${
-        linkResult.ok ? 'Payment link emailed to owner.' : 'Payment link could NOT be created — see warnings.'
-      }`,
-      institution: fresh.rows[0],
-      payment_link_url: linkResult.ok ? linkResult.link.short_url : null,
-      warnings: warnings.length ? warnings : undefined,
+      message,
+      institution:       fresh.rows[0],
+      payment_link_url:  linkResult.ok ? linkResult.link.short_url : null,
+      email_sent:        !!mailResult.ok,
+      payment_link_ok:   !!linkResult.ok,
+      warnings:          warnings.length ? warnings : undefined,
     });
   } catch (err) {
     console.error('Approve error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// POST /api/onboarding/resend-approval/:id
+//
+// Super-admin manual retry when the approval flow's email or payment
+// link failed on the first attempt (SMTP down, Razorpay creds not
+// loaded, etc.). Re-mints the Razorpay Payment Link and re-sends the
+// approval email against the CURRENT institution + plan state. Safe
+// to call any number of times.
+//
+// Preconditions:
+//   • institution.onboarding_status IN ('approved', 'active')
+//     — must have been approved before. Doesn't approve on this call.
+//   • plan_id + plan_price set on the row.
+//
+// On success returns the new payment_link_url + email_sent flag. On
+// failure returns the same partial-status message shape approve does.
+exports.resendApprovalEmail = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const instResult = await pool.query(
+      `SELECT i.*, u.email AS owner_email, u.name AS owner_name, u.phone AS owner_phone,
+              sp.name AS plan_name, sp.price AS plan_price,
+              sp.trial_days AS plan_trial_days,
+              sp.grace_days AS plan_grace_days,
+              sp.discount_enabled AS plan_discount_enabled,
+              sp.discount_percent AS plan_discount_percent
+         FROM institutions i
+         JOIN users u ON i.owner_user_id = u.id
+         LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
+        WHERE i.id = $1`,
+      [id],
+    );
+    if (instResult.rows.length === 0) {
+      return res.status(404).json({ message: 'Institution not found' });
+    }
+    const institution = instResult.rows[0];
+
+    if (!['approved', 'active'].includes(institution.onboarding_status)) {
+      return res.status(400).json({
+        message: `Cannot resend — institution is ${institution.onboarding_status}. Approve it first.`,
+      });
+    }
+    if (institution.onboarding_status === 'active') {
+      // Already paid — no fresh link needed, just re-send the "you're live" note.
+      return res.status(409).json({
+        code:    'ALREADY_ACTIVE',
+        message: 'Institution is already active. No resend needed.',
+      });
+    }
+    if (!institution.plan_price) {
+      return res.status(400).json({
+        message: 'Institution has no plan / plan price set. Cannot create a payment link.',
+      });
+    }
+
+    // Recompute the effective price + referral discount fresh so a
+    // wallet credit added AFTER approval also flows into the retry.
+    const trialDays   = Number(institution.plan_trial_days)   || 0;
+    const graceDays   = Number(institution.plan_grace_days)   || 0;
+    const discountOn  = !!institution.plan_discount_enabled;
+    const discountPct = Number(institution.plan_discount_percent) || 0;
+    const basePrice   = Number(institution.plan_price);
+    const effectivePrice = discountOn && discountPct > 0
+      ? Math.round(basePrice * (1 - discountPct / 100))
+      : basePrice;
+
+    let referralDiscount = 0;
+    try {
+      const ref = await consumeDiscount(id, effectivePrice);
+      referralDiscount = ref.discount || 0;
+    } catch (err) {
+      console.warn('[resend] referral discount failed:', err?.message);
+    }
+    const finalPayable = Math.max(0, effectivePrice - referralDiscount);
+
+    const linkResult = await createPaymentLink({
+      amountInRupees: finalPayable,
+      institution,
+    });
+    if (linkResult.ok) {
+      await pool.query(
+        `UPDATE institutions SET
+           payment_link_id     = $1,
+           payment_link_url    = $2,
+           payment_link_status = 'pending',
+           payment_amount      = $3
+         WHERE id = $4`,
+        [linkResult.link.id, linkResult.link.short_url, linkResult.link.amountPaise, id],
+      );
+    }
+
+    let pricingTerms = [];
+    if (institution.plan_id) {
+      try {
+        const pp = await pool.query(
+          `SELECT billing_term, price, is_enabled
+             FROM plan_pricing
+            WHERE plan_id = $1 AND is_enabled = TRUE
+            ORDER BY CASE billing_term
+              WHEN 'monthly'     THEN 1
+              WHEN 'quarterly'   THEN 2
+              WHEN 'half_yearly' THEN 3
+              WHEN 'annual'      THEN 4
+              ELSE 5 END`,
+          [institution.plan_id],
+        );
+        pricingTerms = pp.rows.map((r) => ({
+          billing_term: r.billing_term,
+          price:        Number(r.price),
+          is_enabled:   true,
+        }));
+      } catch (err) {
+        console.warn('[resend] plan_pricing lookup failed:', err?.message);
+      }
+    }
+
+    const mailResult = await sendApprovalEmail({
+      to:              institution.owner_email,
+      ownerName:       institution.owner_name,
+      institutionName: institution.name,
+      planName:        institution.plan_name,
+      planPrice:       institution.plan_price,
+      paymentUrl:      linkResult.ok ? linkResult.link.short_url : null,
+      trialDays,
+      graceDays,
+      effectivePrice,
+      discountEnabled: discountOn,
+      discountPercent: discountPct,
+      pricingTerms,
+      institutionId:   institution.id,
+    });
+
+    console.log(
+      `[resend] institution=${institution.id} — link=${linkResult.ok ? 'ok' : 'FAIL'}, email=${mailResult.ok ? 'ok' : 'FAIL'}`,
+    );
+
+    res.json({
+      message: linkResult.ok && mailResult.ok
+        ? 'Approval email re-sent with a fresh payment link.'
+        : linkResult.ok
+          ? 'Payment link re-created but email delivery failed. Check SMTP env vars.'
+          : mailResult.ok
+            ? 'Approval email sent, but the payment link could NOT be minted. Check Razorpay env vars.'
+            : 'Both the payment link and the email FAILED. Check Razorpay + SMTP env vars.',
+      payment_link_url: linkResult.ok ? linkResult.link.short_url : null,
+      email_sent:       !!mailResult.ok,
+      payment_link_ok:  !!linkResult.ok,
+    });
+  } catch (err) {
+    console.error('Resend approval error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
@@ -3015,17 +3182,19 @@ exports.startApprovalPayment = async (req, res) => {
     const institution = rows[0];
     if (!institution) return res.status(404).send('Institution not found.');
     if (institution.onboarding_status === 'active') {
-      // Redirect to the frontend success page instead of leaking the
-      // API endpoint in the browser URL bar. `already=1` lets the
-      // frontend tweak copy from "Payment received" to "Already active".
-      const webBase =
-        process.env.WEB_APP_URL ||
+      // Redirect to a page we know exists. Same two-tier resolution
+      // Razorpay's callback uses: PAYMENT_SUCCESS_URL override wins,
+      // otherwise the backend's built-in branded success page (which
+      // this controller itself serves at /api/onboarding/payment-success).
+      const override = (process.env.PAYMENT_SUCCESS_URL || '').trim();
+      const apiBase =
+        process.env.API_BASE_URL ||
         process.env.APP_BASE_URL ||
         'https://veerifyapp.com';
-      return res.redirect(
-        302,
-        `${webBase}/payment-success?institution_id=${institutionId}&already=1`,
-      );
+      const successUrl = override
+        ? `${override}?institution_id=${institutionId}&already=1`
+        : `${apiBase}/api/onboarding/payment-success?institution_id=${institutionId}&already=1`;
+      return res.redirect(302, successUrl);
     }
     if (!institution.plan_id) {
       return res.status(400).send('This institution has no plan selected yet.');

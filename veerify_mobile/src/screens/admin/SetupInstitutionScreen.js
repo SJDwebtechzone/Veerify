@@ -1936,11 +1936,13 @@ function SkillsMultiSelect({ values, onToggle, options, other, onOtherChange, cl
   }, [closeRef]);
 
   const selected = Array.isArray(values) ? values : [];
+  // Trigger label now shows either a placeholder or a count. The
+  // full list of selected disciplines lives in the chip strip below
+  // where it's readable at any width (previously the trigger showed
+  // "A, B +N more" which truncated as soon as three were picked).
   const summary = selected.length === 0
     ? 'Select disciplines…'
-    : selected.length <= 2
-      ? selected.join(', ')
-      : `${selected.slice(0, 2).join(', ')} +${selected.length - 2} more`;
+    : `${selected.length} discipline${selected.length === 1 ? '' : 's'} selected`;
 
   return (
     <View>
@@ -1965,6 +1967,31 @@ function SkillsMultiSelect({ values, onToggle, options, other, onOtherChange, cl
           style={{ transform: [{ rotate: open ? '180deg' : '0deg' }] }}
         />
       </TouchableOpacity>
+
+      {/* Selected-skill chip strip. Every discipline the owner has
+          picked shows up as a pill directly under the trigger so all
+          of them stay visible until submission — no truncation, no
+          hidden picks. Tapping the × on a chip removes it (same
+          onToggle handler the panel row uses, which flips it off).
+          Renders WHETHER the panel is open or closed. */}
+      {selected.length > 0 ? (
+        <View style={styles.skillsSelectedRow}>
+          {selected.map((s) => (
+            <TouchableOpacity
+              key={s}
+              style={styles.skillsSelectedChip}
+              onPress={() => onToggle(s)}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.skillsSelectedChipText}>{s}</Text>
+              <Check size={12} color={BRAND} strokeWidth={2.8} />
+              <View style={styles.skillsSelectedChipRemove}>
+                <X size={11} color={BRAND} strokeWidth={2.8} />
+              </View>
+            </TouchableOpacity>
+          ))}
+        </View>
+      ) : null}
 
       {open ? (
         <View style={styles.skillsPanel}>
@@ -3199,6 +3226,42 @@ const styles = StyleSheet.create({
     color: TEXT_LIGHT,
     fontWeight: '500',
   },
+
+  // ── Selected-skill chip strip ────────────────────────────────────────
+  // Sits between the trigger and the (optional) open panel. Renders
+  // every selected discipline as a compact pill with a check + remove
+  // ×. Wraps to as many lines as needed so a 12-skill selection stays
+  // fully visible instead of being truncated to "+N more".
+  skillsSelectedRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 8,
+  },
+  skillsSelectedChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingLeft: 10, paddingRight: 6,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: BRAND_SOFT,
+    borderWidth: 1,
+    borderColor: BRAND,
+  },
+  skillsSelectedChipText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: BRAND,
+  },
+  skillsSelectedChipRemove: {
+    width: 18, height: 18,
+    borderRadius: 9,
+    backgroundColor: '#fff',
+    alignItems: 'center', justifyContent: 'center',
+    marginLeft: 2,
+  },
+
   skillsPanel: {
     marginTop: 6,
     backgroundColor: SURFACE,

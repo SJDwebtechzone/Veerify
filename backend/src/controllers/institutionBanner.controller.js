@@ -206,36 +206,17 @@ exports.publicList = async (req, res) => {
 };
 
 // GET /api/institution-banners/for-me  (student / trainer / parent)
-// Optional ?institution_id=N for students whose home isn't bound yet
-// (they may be browsing a picked academy as a guest with an explicit
-// institution id). For trainers / parents we always use their linked
-// institution from the users row.
+//
+// DEPRECATED (2026-07): institution branding is a marketing surface
+// meant for prospective students only. Per the branding spec, logged-
+// in students and trainers must NEVER see the institution's branding
+// banner / video — the surface belongs to the Guest User flow.
+//
+// This endpoint used to serve branding to signed-in accounts. It now
+// always returns an empty list so old mobile builds that still call
+// it get zero banners instead of a 404. Guest users pull branding
+// via GET /api/institution-banners/public/:id which is unchanged
+// and remains the ONLY channel that returns branding rows.
 exports.forMe = async (req, res) => {
-  try {
-    const role = req.user.role;
-    let institutionId = await getMyInstitutionId(req.user.id);
-    if (!institutionId && req.query.institution_id) {
-      institutionId = parseInt(req.query.institution_id, 10) || null;
-    }
-    if (!institutionId) {
-      return res.json({ count: 0, banners: [] });
-    }
-
-    // 'student' & 'parent' see student-targeted banners; 'trainer' sees
-    // trainer-targeted. 'both' is always visible to whichever role asks.
-    const audienceTag = role === 'trainer' ? 'trainer' : 'student';
-    const r = await pool.query(
-      `SELECT id, image_url, title, subtitle, link_url, audience, sort_order
-         FROM institution_banners
-        WHERE institution_id = $1
-          AND is_active = TRUE
-          AND (audience = $2 OR audience = 'both')
-        ORDER BY sort_order ASC, created_at DESC`,
-      [institutionId, audienceTag],
-    );
-    res.json({ count: r.rows.length, banners: r.rows });
-  } catch (err) {
-    console.error('[institutionBanner.forMe]', err);
-    res.status(500).json({ message: 'Server error', error: err.message });
-  }
+  return res.json({ count: 0, banners: [] });
 };

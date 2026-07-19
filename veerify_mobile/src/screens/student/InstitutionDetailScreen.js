@@ -27,6 +27,7 @@ import {
 import apiClient from '../../api/client';
 import resolveAssetUrl from '../../utils/assetUrl';
 import { palette, spacing, radius, shadows, type } from '../../theme';
+import { useAuth } from '../../context/AuthContext';
 
 const BADGE_STYLE = {
   popular:      { label: 'Popular',      bg: '#ef4444', fg: '#fff' },
@@ -42,6 +43,11 @@ const MODE_STYLE = {
 
 export default function InstitutionDetailScreen({ route, navigation }) {
   const { institutionId } = route.params;
+  const { user } = useAuth();
+  // Institution branding is a GUEST-ONLY surface per the branding spec.
+  // Once the visitor is logged in as a student / trainer / etc., the
+  // branded hero is replaced with a plain academy-name placeholder.
+  const isGuest = !user;
   const [institution, setInstitution] = useState(null);
   const [courses, setCourses] = useState([]);
   const [banners, setBanners] = useState([]);
@@ -52,14 +58,20 @@ export default function InstitutionDetailScreen({ route, navigation }) {
   const load = useCallback(async () => {
     try {
       // Three parallel fetches: the academy details, its active
-      // student-visible courses, and the institution branding banners
-      // (public endpoint so guests can see the branded hero too).
+      // student-visible courses, and — for GUESTS ONLY — the
+      // institution branding banners (public endpoint). Logged-in
+      // users skip the banner call entirely so the "branding for
+      // guests only" contract is enforced client-side too, even if
+      // the backend's forMe endpoint were to regress.
+      const bannerPromise = isGuest
+        ? apiClient
+            .get(`/institution-banners/public/${institutionId}`)
+            .catch(() => ({ data: { banners: [] } }))
+        : Promise.resolve({ data: { banners: [] } });
       const [instRes, coursesRes, bannersRes] = await Promise.all([
         apiClient.get(`/institutions/${institutionId}`),
         apiClient.get(`/courses/institution/${institutionId}`),
-        apiClient
-          .get(`/institution-banners/public/${institutionId}`)
-          .catch(() => ({ data: { banners: [] } })),
+        bannerPromise,
       ]);
       setInstitution(instRes.data.institution);
       // The backend already filters to status='active' for public
@@ -77,7 +89,7 @@ export default function InstitutionDetailScreen({ route, navigation }) {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [institutionId]);
+  }, [institutionId, isGuest]);
 
   useEffect(() => { load(); }, [load]);
 

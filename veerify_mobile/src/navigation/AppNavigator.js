@@ -1,7 +1,7 @@
 import React from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { View, Text, Image, ActivityIndicator, StatusBar, StyleSheet } from 'react-native';
+import { View, Text, Image, ActivityIndicator, StatusBar, StyleSheet, Platform } from 'react-native';
 import { useAuth } from '../context/AuthContext';
 import { navigationRef } from './navigationRef';
 import { palette, type } from '../theme';
@@ -155,19 +155,24 @@ export default function AppNavigator() {
   if (loading) {
     return (
       <View style={splashStyles.screen}>
-        <StatusBar barStyle="light-content" backgroundColor={palette.purple.vivid} />
+        {/* Dark status-bar content on the new white background so
+            the OS clock / battery icons stay readable. */}
+        <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
         <View style={splashStyles.logoWrap}>
           <Image
             source={require('../assets/veerify-logo.png')}
             style={splashStyles.logoImage}
+            // cover fills the 148×148 circle edge-to-edge. If the
+            // logo asset has whitespace baked in and this crops the
+            // mark tightly, switch to "contain" — the circular
+            // borderRadius on the wrap is what makes it round.
             resizeMode="cover"
           />
         </View>
-        <Text style={splashStyles.wordmark}>Veerify</Text>
         <Text style={splashStyles.tagline}>#1 Martial Arts App</Text>
         <ActivityIndicator
           size="small"
-          color="#fff"
+          color={palette.purple.vivid}
           style={splashStyles.spinner}
         />
       </View>
@@ -709,54 +714,69 @@ export default function AppNavigator() {
 }
 
 // ─── Splash / auth-restore screen styles ──────────────────────────
-// Sits at the file bottom so the fast-path `if (loading)` block above
-// stays tight to the auth check it depends on. The tagline uses the
-// display-typography token so it inherits the app's font weights;
-// colors come straight from the shared palette so brand changes
-// (purple hue etc.) automatically propagate here.
+// Clean white surface with the logo centered and the "#1 Martial Arts
+// App" tagline in the brand red. Modern, uncluttered layout — the
+// wordmark and heavy card shadow of the previous purple splash have
+// been removed so the logo does the talking.
+//
+// Red used for the tagline is BRAND_RED (#E63946) — the same red the
+// student / student-payment surfaces use for primary CTAs so the
+// splash reads as an extension of the brand identity, not a one-off
+// colour. Letter-spacing + weight = 900 + a small case give the
+// tagline a premium wordmark feel without needing a custom font.
+const BRAND_RED = '#E63946';
 const splashStyles = StyleSheet.create({
   screen: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: palette.purple.vivid,
+    backgroundColor: '#FFFFFF',
     paddingHorizontal: 24,
   },
+  // Logo container — rendered as a perfect circle. Width === height
+  // and borderRadius === width/2. `overflow: 'hidden'` clips the
+  // underlying image to the circular mask so a rectangular or
+  // rounded-corner logo asset renders as a clean disc.
+  //
+  // Soft brand-tint background so a logo with a transparent edge
+  // still reads as a bounded circle on the white splash. Subtle
+  // border keeps the disc defined without needing a shadow.
   logoWrap: {
-    width: 108,
-    height: 108,
-    borderRadius: 28,
-    backgroundColor: '#fff',
+    width: 148,
+    height: 148,
+    borderRadius: 74,
+    backgroundColor: '#FFF5F6',
+    borderWidth: 1,
+    borderColor: '#F4E4E6',
     alignItems: 'center',
     justifyContent: 'center',
     overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOpacity: 0.18,
-    shadowRadius: 18,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 10,
   },
+  // Image switches to `cover` so it fills the circular mask edge-to-
+  // edge. If your logo asset has whitespace baked in, swap this back
+  // to `contain` — the circular mask on the wrap still applies.
   logoImage: {
     width: '100%',
     height: '100%',
   },
-  wordmark: {
-    ...type.display,
-    color: '#fff',
-    marginTop: 22,
-    letterSpacing: 0.5,
-    textAlign: 'center',
-  },
+  // Tagline — modern, tight tracking, tall weight. Uppercase with
+  // measured letter-spacing gives the "premium" character requested
+  // without depending on a custom font family (which would need to be
+  // linked native-side and ship a new build).
   tagline: {
-    ...type.bodyBold,
-    color: 'rgba(255,255,255,0.92)',
-    marginTop: 8,
+    fontSize: 15,
+    fontWeight: '900',
+    color: BRAND_RED,
+    marginTop: 28,
     textAlign: 'center',
-    letterSpacing: 1.4,
+    letterSpacing: 2.4,
     textTransform: 'uppercase',
+    // Slight italic on iOS reads as "editorial / premium"; Android's
+    // system italic renders less consistently, so we keep upright there.
+    ...(Platform.OS === 'ios' ? { fontStyle: 'italic' } : null),
   },
   spinner: {
-    marginTop: 32,
+    marginTop: 40,
   },
 });
 

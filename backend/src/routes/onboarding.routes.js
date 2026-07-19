@@ -57,7 +57,15 @@ router.post('/notify-bulk', verifyToken, onboardingController.notifyInstitutions
 router.post('/bulk-delete', verifyToken, onboardingController.bulkDeleteInstitutions);
 router.get('/:id',     verifyToken, onboardingController.getInstitutionById);
 
-router.post('/approve/:id',             verifyToken, onboardingController.approveInstitution);
+// Institution approval is a SUPER-ADMIN-only action. Previously the
+// route only required verifyToken, which meant any authenticated user
+// could POST /approve/:id and flip a pending institution to approved.
+router.post('/approve/:id',             verifyToken, requireRole('super_admin'), onboardingController.approveInstitution);
+// Manual retry of the approval email + payment link — used when the
+// first send failed because SMTP or Razorpay creds weren't loaded.
+// Never approves; requires the row to already be `approved` (fails
+// with 409 ALREADY_ACTIVE if the webhook has already activated it).
+router.post('/resend-approval/:id',     verifyToken, requireRole('super_admin'), onboardingController.resendApprovalEmail);
 router.post('/reject/:id',              verifyToken, onboardingController.rejectInstitution);
 // Manual activation is a SUPER-ADMIN ONLY override for institutions
 // that paid via a channel Razorpay didn't observe (offline bank

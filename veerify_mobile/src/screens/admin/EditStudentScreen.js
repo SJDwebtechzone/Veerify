@@ -26,6 +26,7 @@ import {
 import {
   ArrowLeft, User, Mail, Phone, MapPin, Calendar, Save,
   Camera, X as XIcon,
+  ChevronDown, Check, Droplet, Award,
 } from 'lucide-react-native';
 import { launchImageLibrary, launchCamera } from 'react-native-image-picker';
 
@@ -45,6 +46,30 @@ const BORDER = '#E5E7EB';
 
 const GENDERS = ['Male', 'Female', 'Other', 'Prefer not to say'];
 
+// ABO/Rh options — same list the Student Enrollment Form uses so a
+// value picked here round-trips cleanly with what the student entered.
+const BLOOD_GROUPS = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
+
+// Current belt options — same curated list as the Student Enrollment
+// Form. Picking "Other" reveals a free-text input for academies that
+// use non-standard belt names (dan grades, stripes, "Assistant
+// Instructor", etc.).
+const BELT_OPTIONS = [
+  'New student',
+  'White',
+  'Yellow',
+  'Orange',
+  'Green',
+  'Blue I',
+  'Blue II',
+  'Gray',
+  'Brown I',
+  'Brown II',
+  'Brown III',
+  'Black',
+  'Other',
+];
+
 export default function EditStudentScreen({ route, navigation }) {
   const student = route?.params?.student || {};
   const studentId =
@@ -61,6 +86,32 @@ export default function EditStudentScreen({ route, navigation }) {
   const [address,      setAddress]      = useState(student.address || '');
   const [fatherName,   setFatherName]   = useState(student.father_name || '');
   const [motherName,   setMotherName]   = useState(student.mother_name || '');
+  // Extended profile fields — one-to-one match with the Student
+  // Enrollment Form so every value the student entered on the way in
+  // is editable here. Each field maps to a student_profiles column
+  // (see migration 066 for blood_group + belt_category).
+  const [occupation,   setOccupation]   = useState(student.occupation || '');
+  const [heightCm,     setHeightCm]     = useState(
+    student.height_cm != null && student.height_cm !== '' ? String(student.height_cm) : '',
+  );
+  const [weightKg,     setWeightKg]     = useState(
+    student.weight_kg != null && student.weight_kg !== '' ? String(student.weight_kg) : '',
+  );
+  const [healthNotes,  setHealthNotes]  = useState(student.disabilities || student.health_notes || '');
+  const [bloodGroup,   setBloodGroup]   = useState(student.blood_group || '');
+  // Current belt — offers a curated list plus "Other" for custom
+  // labels. Seed from the stored value; if it isn't in the standard
+  // list we start with "Other" selected and pre-fill the free-text
+  // input with the stored label so the admin sees exactly what's on
+  // record.
+  const initialBelt = student.belt_category || '';
+  const isStandardBelt = BELT_OPTIONS.includes(initialBelt);
+  const [beltCategory,      setBeltCategory]      = useState(
+    initialBelt ? (isStandardBelt ? initialBelt : 'Other') : 'New student',
+  );
+  const [beltCategoryOther, setBeltCategoryOther] = useState(
+    initialBelt && !isStandardBelt ? initialBelt : '',
+  );
 
   // ── Photo state ─────────────────────────────────────────────────────
   // photoUrl:  server path (e.g. "/uploads/xyz.jpg") that gets persisted.
@@ -160,6 +211,19 @@ export default function EditStudentScreen({ route, navigation }) {
     }
     setSaving(true);
     try {
+      // Resolve belt: if the admin picked "Other" we send the
+      // free-text label they typed; otherwise the picker value.
+      const beltVal = beltCategory === 'Other'
+        ? (beltCategoryOther.trim() || 'Other')
+        : (beltCategory || 'New student');
+
+      // Full-form payload — exact parity with the Student Enrollment
+      // Form. The backend's COALESCE(NULLIF(...)) logic treats an
+      // empty string as "don't change", so sending every field on
+      // every save is safe. Editing NEVER touches the enrollment row's
+      // batch, payment_status, payment_amount, paid_at, or
+      // payment_reference — those live on a separate table and this
+      // endpoint doesn't join to them.
       const payload = {
         name:          name.trim(),
         phone:         phone.trim(),
@@ -169,6 +233,12 @@ export default function EditStudentScreen({ route, navigation }) {
         address:       address.trim(),
         father_name:   fatherName.trim(),
         mother_name:   motherName.trim(),
+        occupation:    occupation.trim(),
+        height_cm:     heightCm.trim(),
+        weight_kg:     weightKg.trim(),
+        disabilities:  healthNotes.trim(),
+        blood_group:   bloodGroup || '',
+        belt_category: beltVal,
       };
       // Only include photo_url when the admin actually touched the
       // photo. Sending it always would send stale server-URL back on
@@ -384,6 +454,101 @@ export default function EditStudentScreen({ route, navigation }) {
             </Field>
           </Section>
 
+          {/* ── Personal & Health ──────────────────────────────────────
+              Exact-parity with the Student Enrollment Form: occupation,
+              height, weight, blood group, health notes, current belt.
+              No marital status / alternate contact / emergency
+              contact — those aren't on the enrollment form and would
+              introduce edit-only fields that never round-trip. */}
+          <Section title="Personal details">
+            <Field label="Occupation" icon={User}>
+              <TextInput
+                style={styles.input}
+                value={occupation}
+                onChangeText={setOccupation}
+                placeholder="e.g. Student / Software Engineer"
+                placeholderTextColor={TEXT_LIGHT}
+              />
+            </Field>
+
+            <Field label="Height (cm)" icon={User}>
+              <TextInput
+                style={styles.input}
+                value={heightCm}
+                onChangeText={(v) => setHeightCm(v.replace(/[^0-9]/g, ''))}
+                placeholder="e.g. 168"
+                placeholderTextColor={TEXT_LIGHT}
+                keyboardType="number-pad"
+                maxLength={3}
+              />
+            </Field>
+
+            <Field label="Weight (kg)" icon={User}>
+              <TextInput
+                style={styles.input}
+                value={weightKg}
+                onChangeText={(v) => setWeightKg(v.replace(/[^0-9]/g, ''))}
+                placeholder="e.g. 60"
+                placeholderTextColor={TEXT_LIGHT}
+                keyboardType="number-pad"
+                maxLength={3}
+              />
+            </Field>
+
+            <Field label="Blood group" icon={Droplet}>
+              <Dropdown
+                options={BLOOD_GROUPS}
+                value={bloodGroup}
+                onChange={setBloodGroup}
+                placeholder="Select blood group"
+                icon={Droplet}
+              />
+            </Field>
+
+            <Field label="Health notes" icon={User}>
+              <TextInput
+                style={[styles.input, styles.inputMultiline]}
+                value={healthNotes}
+                onChangeText={setHealthNotes}
+                placeholder="Allergies, asthma, dietary restrictions, or anything the trainer should know"
+                placeholderTextColor={TEXT_LIGHT}
+                multiline
+                numberOfLines={3}
+                textAlignVertical="top"
+              />
+            </Field>
+          </Section>
+
+          {/* ── Belt ───────────────────────────────────────────────────
+              Current belt category. Inline dropdown with the curated
+              list; picking "Other" reveals a free-text input for
+              academies that use non-standard belt names. Same UX as
+              the enrollment form. */}
+          <Section title="Current belt">
+            <Field label="Belt category" icon={Award}>
+              <Dropdown
+                options={BELT_OPTIONS}
+                value={beltCategory}
+                onChange={setBeltCategory}
+                placeholder="Select belt level"
+                icon={Award}
+              />
+            </Field>
+
+            {beltCategory === 'Other' ? (
+              <Field label="Specify belt level" icon={Award}>
+                <TextInput
+                  style={styles.input}
+                  value={beltCategoryOther}
+                  onChangeText={setBeltCategoryOther}
+                  placeholder="e.g. Red I, Senior Black, Provisional…"
+                  placeholderTextColor={TEXT_LIGHT}
+                  maxLength={80}
+                />
+              </Field>
+            ) : null}
+          </Section>
+
           <View style={{ height: 12 }} />
         </ScrollView>
 
@@ -429,6 +594,74 @@ function Field({ label, icon: Icon, children }) {
         <Text style={styles.fieldLabel}>{label}</Text>
       </View>
       {children}
+    </View>
+  );
+}
+
+// ───── Inline expanding dropdown ──────────────────────────────────────────
+// Renders as a chevron-tipped pill that expands the option list right
+// underneath. Chosen instead of a chip row so a 13-option list doesn't
+// wrap across four lines. Same UX + styling as the Dropdown component
+// on the Student Enrollment Form so the two screens read the same.
+function Dropdown({
+  options, value, onChange,
+  placeholder = 'Select…',
+  icon: LeadingIcon = null,
+  maxPanelHeight = 260,
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <View>
+      <TouchableOpacity
+        style={[styles.dropdownTrigger, open && styles.dropdownTriggerOpen]}
+        onPress={() => setOpen((o) => !o)}
+        activeOpacity={0.85}
+      >
+        {LeadingIcon ? (
+          <LeadingIcon size={14} color={BRAND} strokeWidth={2.4} />
+        ) : null}
+        <Text style={[styles.dropdownText, !value && styles.dropdownPlaceholder]}>
+          {value || placeholder}
+        </Text>
+        <ChevronDown
+          size={16}
+          color={TEXT_MUTED}
+          strokeWidth={2.2}
+          style={{ transform: [{ rotate: open ? '180deg' : '0deg' }] }}
+        />
+      </TouchableOpacity>
+
+      {open ? (
+        <View style={[styles.dropdownPanel, { maxHeight: maxPanelHeight }]}>
+          <ScrollView
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+            nestedScrollEnabled
+          >
+            {options.map((opt) => {
+              const selected = opt === value;
+              return (
+                <TouchableOpacity
+                  key={opt}
+                  style={[styles.dropdownItem, selected && styles.dropdownItemActive]}
+                  onPress={() => { onChange(opt); setOpen(false); }}
+                  activeOpacity={0.7}
+                >
+                  <Text style={[
+                    styles.dropdownItemText,
+                    selected && styles.dropdownItemTextActive,
+                  ]}>
+                    {opt}
+                  </Text>
+                  {selected ? (
+                    <Check size={14} color={BRAND} strokeWidth={2.8} />
+                  ) : null}
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -523,6 +756,37 @@ const styles = StyleSheet.create({
   },
   chipText: { fontSize: 12, fontWeight: '700', color: TEXT_MUTED },
   chipTextActive: { color: BRAND },
+
+  // ── Inline expanding dropdown ─────────────────────────────────────
+  dropdownTrigger: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    borderWidth: 1, borderColor: BORDER,
+    borderRadius: 10,
+    backgroundColor: SURFACE,
+    paddingHorizontal: 12, paddingVertical: 12,
+  },
+  dropdownTriggerOpen: {
+    borderColor: BRAND,
+    borderBottomLeftRadius: 0, borderBottomRightRadius: 0,
+  },
+  dropdownText: { flex: 1, fontSize: 14, fontWeight: '600', color: TEXT },
+  dropdownPlaceholder: { color: TEXT_LIGHT, fontWeight: '500' },
+  dropdownPanel: {
+    borderWidth: 1, borderColor: BRAND, borderTopWidth: 0,
+    borderBottomLeftRadius: 10, borderBottomRightRadius: 10,
+    backgroundColor: SURFACE,
+    overflow: 'hidden',
+  },
+  dropdownItem: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingVertical: 12, paddingHorizontal: 14,
+    borderBottomWidth: 1, borderBottomColor: BORDER,
+  },
+  dropdownItemActive: {
+    backgroundColor: BRAND_SOFT,
+  },
+  dropdownItemText: { fontSize: 14, color: TEXT, fontWeight: '600' },
+  dropdownItemTextActive: { color: BRAND, fontWeight: '800' },
 
   footer: {
     padding: 16, paddingBottom: 24,

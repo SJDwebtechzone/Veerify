@@ -57,19 +57,12 @@ export default function StaffDashboardScreen({ navigation }) {
   const [batches, setBatches] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  // Institution promo banners targeted at trainers ("trainer" or "both"
-  // audience). Refetched on focus so a banner uploaded from
-  // Institution Login → More → Branding shows up the moment the
-  // trainer re-opens their dashboard tab.
-  const [banners, setBanners] = useState([]);
-  const loadBanners = useCallback(() => {
-    let cancelled = false;
-    apiClient.get('/institution-banners/for-me')
-      .then((r) => { if (!cancelled) setBanners(r.data?.banners || []); })
-      .catch(() => { if (!cancelled) setBanners([]); });
-    return () => { cancelled = true; };
-  }, []);
-  useFocusEffect(useCallback(() => { loadBanners(); }, [loadBanners]));
+  // Institution branding banners are GUEST-ONLY per the branding
+  // spec — trainers must never see them. The BannerCarousel below
+  // has been removed; keeping the local state as an empty constant
+  // means the rest of the file compiles unchanged if a future refactor
+  // reintroduces the carousel.
+  const banners = [];
 
   // `myLeaves` is the trainer's OWN leave history (from /trainer-leave-requests/my,
   // backed by the trainer_leave_requests table). We compute how many days
@@ -247,11 +240,9 @@ export default function StaffDashboardScreen({ navigation }) {
         />
       </View>
 
-      {/* ───── Institution banners (trainer-targeted) ─────
-          Auto-scrolling carousel above the quick actions. Falls back
-          to a branded default banner when no institution banner has
-          been uploaded, so the surface never looks empty. */}
-      <BannerCarousel banners={banners} trainerName={user?.name} />
+      {/* Institution branding banner removed per spec — branding is
+          reserved for the Guest User marketing flow. Logged-in
+          trainers no longer see the auto-scrolling carousel here. */}
 
 
       {/* ───── Quick Actions ───── */}

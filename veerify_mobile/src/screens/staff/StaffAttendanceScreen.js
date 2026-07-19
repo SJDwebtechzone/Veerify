@@ -45,15 +45,37 @@ const STATUSES = [
 ];
 
 const DAYS_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const DAY_ABBR   = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 
-// Build [today-6, today-5, ..., today] dates for the date strip.
-function lastSevenDays() {
+// Parse the batch's days_of_week string ("Mon,Wed,Fri" / "monday, wed"
+// / etc) into a Set of 3-letter lowercase day abbreviations. Returns
+// null when the field is empty — callers treat that as "any day".
+function parseScheduleDays(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  const parts = raw.toLowerCase().split(/[\s,;]+/).map((p) => p.trim()).filter(Boolean);
+  const days = new Set();
+  for (const p of parts) {
+    const abbr = p.slice(0, 3);
+    if (DAY_ABBR.includes(abbr)) days.add(abbr);
+  }
+  return days.size > 0 ? days : null;
+}
+
+// Build the date strip: last N calendar days FILTERED to the batch's
+// scheduled class days. If no schedule is set (legacy batch) we fall
+// back to the last 7 days so the screen doesn't render empty.
+// window=28 by default so the strip picks up at least a few sessions
+// even for a batch that meets weekly.
+function scheduledDaysInWindow(daysOfWeek, windowDays = 28) {
   const out = [];
   const today = new Date();
-  for (let i = 6; i >= 0; i--) {
+  const scheduled = parseScheduleDays(daysOfWeek);
+  const limit = scheduled ? windowDays : 7;
+  for (let i = limit - 1; i >= 0; i--) {
     const d = new Date(today);
     d.setDate(today.getDate() - i);
-    out.push(d);
+    const abbr = DAY_ABBR[d.getDay()];
+    if (!scheduled || scheduled.has(abbr)) out.push(d);
   }
   return out;
 }
@@ -99,7 +121,28 @@ export default function StaffAttendanceScreen({ navigation, route }) {
   const [loadingStudents, setLoadingStudents] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  const dates = useMemo(lastSevenDays, []);
+  // Date strip is derived from the SELECTED batch's schedule. Days
+  // the batch doesn't meet are never shown. Recomputes whenever the
+  // trainer switches batches so the strip always reflects the
+  // current course's meeting days.
+  const selectedBatchForStrip = batches.find((b) => b.id === selectedBatchId);
+  const dates = useMemo(
+    () => scheduledDaysInWindow(selectedBatchForStrip?.days_of_week),
+    [selectedBatchForStrip?.days_of_week],
+  );
+
+  // If the strip changes and the currently-picked `date` isn't in it
+  // any more (e.g. trainer switched from a MWF batch to a TTh batch),
+  // snap the picker back to the latest scheduled day so the header +
+  // student list stay in sync.
+  useEffect(() => {
+    if (dates.length === 0) return;
+    const currentIso = isoDate(date);
+    if (!dates.some((d) => isoDate(d) === currentIso)) {
+      setDate(dates[dates.length - 1]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dates]);
 
   // ── Fetch my batches once ──
   const loadBatches = useCallback(async () => {
@@ -201,7 +244,18 @@ export default function StaffAttendanceScreen({ navigation, route }) {
         [{ text: 'OK', onPress: () => navigation.goBack() }],
       );
     } catch (err) {
-      Alert.alert('Could not save', err.response?.data?.message || err.message || 'Try again.');
+      // Surface the schedule guard's specific error code with a clear
+      // hint so the trainer knows to switch dates instead of thinking
+      // the network is broken.
+      const code = err.response?.data?.code;
+      if (code === 'NOT_A_CLASS_DAY') {
+        Alert.alert(
+          'Not a scheduled class day',
+          `${fmtDate(date)} isn't in this batch's schedule (${selectedBatchForStrip?.days_of_week || 'not set'}). Pick a scheduled day and try again.`,
+        );
+      } else {
+        Alert.alert('Could not save', err.response?.data?.message || err.message || 'Try again.');
+      }
     } finally {
       setSaving(false);
     }
@@ -273,34 +327,57 @@ export default function StaffAttendanceScreen({ navigation, route }) {
           </ScrollView>
         )}
 
-        {/* Date strip */}
+        {/* Date strip — only shows days the selected batch meets.
+            Non-class days are never rendered here, so the trainer
+            can't accidentally mark attendance for a Sunday on a
+            Mon/Wed/Fri batch. The tiny schedule chip on the right
+            shows exactly which days the batch runs on. */}
         <View style={[styles.sectionLabel, { marginTop: spacing.lg }]}>
           <CalendarDays size={12} color={palette.textMuted} strokeWidth={2.2} />
-          <Text style={styles.sectionLabelText}>DATE</Text>
+          <Text style={styles.sectionLabelText}>CLASS DAYS</Text>
+          {selectedBatchForStrip?.days_of_week ? (
+            <Text style={[styles.sectionLabelText, {
+              marginLeft: 'auto', color: palette.text, fontWeight: '800',
+            }]}>
+              {selectedBatchForStrip.days_of_week}
+            </Text>
+          ) : null}
         </View>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={{ paddingHorizontal: spacing.xl, gap: spacing.sm }}
-        >
-          {dates.map((d) => {
-            const active = sameDate(d, date);
-            return (
-              <TouchableOpacity
-                key={isoDate(d)}
-                style={[styles.dateCard, active && styles.dateCardActive]}
-                onPress={() => setDate(new Date(d))}
-                activeOpacity={0.85}
-              >
-                <Text style={[styles.dateDay, active && styles.dateDayActive]}>{DAYS_SHORT[d.getDay()]}</Text>
-                <Text style={[styles.dateNum, active && styles.dateNumActive]}>{d.getDate()}</Text>
-                {sameDate(d, new Date()) ? (
-                  <View style={[styles.todayDot, active && { backgroundColor: '#fff' }]} />
-                ) : null}
-              </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
+        {dates.length === 0 ? (
+          <View style={{ paddingHorizontal: spacing.xl, paddingVertical: spacing.md }}>
+            <Text style={{
+              fontSize: 12, color: palette.textMuted, fontStyle: 'italic',
+            }}>
+              No scheduled class days in the last month. Set{' '}
+              <Text style={{ fontWeight: '800' }}>Days of Week</Text> on the
+              batch to enable attendance marking.
+            </Text>
+          </View>
+        ) : (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={{ paddingHorizontal: spacing.xl, gap: spacing.sm }}
+          >
+            {dates.map((d) => {
+              const active = sameDate(d, date);
+              return (
+                <TouchableOpacity
+                  key={isoDate(d)}
+                  style={[styles.dateCard, active && styles.dateCardActive]}
+                  onPress={() => setDate(new Date(d))}
+                  activeOpacity={0.85}
+                >
+                  <Text style={[styles.dateDay, active && styles.dateDayActive]}>{DAYS_SHORT[d.getDay()]}</Text>
+                  <Text style={[styles.dateNum, active && styles.dateNumActive]}>{d.getDate()}</Text>
+                  {sameDate(d, new Date()) ? (
+                    <View style={[styles.todayDot, active && { backgroundColor: '#fff' }]} />
+                  ) : null}
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        )}
 
         {/* Live counters */}
         {students.length > 0 && (

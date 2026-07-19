@@ -3,6 +3,20 @@ const pool = require('../config/db');
 // see (or mark) a sub-branch batch's attendance, and a sub-branch
 // admin can only touch their own branch's.
 const { getBranchScope } = require('../utils/branchScope');
+// Schedule guard — refuses attendance marks on days the batch isn't
+// scheduled to run. Same helper the mobile uses to build the date strip.
+const { isScheduledClassDay } = require('../utils/batchSchedule');
+
+// Fetch the batch's days_of_week once so both mark handlers can enforce
+// the schedule. Returns null when the batch has no schedule declared —
+// callers treat that as "unrestricted" per legacy contract.
+async function getBatchScheduleDays(batchId) {
+  const r = await pool.query(
+    `SELECT days_of_week FROM batches WHERE id = $1`,
+    [batchId],
+  );
+  return r.rows[0]?.days_of_week || null;
+}
 
 // Helper: verify the trainer owns this batch
 const verifyTrainerOwnsBatch = async (userId, batchId) => {
@@ -154,6 +168,18 @@ exports.markAttendance = async (req, res) => {
     const access = await verifyMarkAccess(actorRole, actorId, batch_id);
     if (!access.ok) return res.status(access.status).json({ message: access.message });
 
+    // Schedule gate — refuse marks on days the batch isn't scheduled
+    // to run. Legacy batches with days_of_week=null are unrestricted.
+    // Same guard applies to the bulk endpoint below.
+    const scheduleDays = await getBatchScheduleDays(batch_id);
+    if (!isScheduledClassDay(scheduleDays, date)) {
+      return res.status(400).json({
+        code: 'NOT_A_CLASS_DAY',
+        message: `This batch does not run on ${date}. Schedule: ${scheduleDays || 'none set'}.`,
+        schedule: scheduleDays,
+      });
+    }
+
     // Verify student is enrolled in this batch.
     const enrollCheck = await pool.query(
       'SELECT id FROM enrollments WHERE student_id = $1 AND batch_id = $2',
@@ -203,6 +229,19 @@ exports.markBulkAttendance = async (req, res) => {
 
     const access = await verifyMarkAccess(actorRole, actorId, batch_id);
     if (!access.ok) return res.status(access.status).json({ message: access.message });
+
+    // Schedule gate — same as the single-mark endpoint. Refuses the
+    // entire bulk write when the date isn't a scheduled class day for
+    // this batch so a stale mobile calendar can't silently create
+    // rows for a day the batch doesn't meet.
+    const scheduleDays = await getBatchScheduleDays(batch_id);
+    if (!isScheduledClassDay(scheduleDays, date)) {
+      return res.status(400).json({
+        code: 'NOT_A_CLASS_DAY',
+        message: `This batch does not run on ${date}. Schedule: ${scheduleDays || 'none set'}.`,
+        schedule: scheduleDays,
+      });
+    }
 
     await client.query('BEGIN');
     const results = [];

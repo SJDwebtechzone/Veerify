@@ -127,20 +127,20 @@ export default function HomeTabScreen({ navigation }) {
                 : { lat: nearbyOrigin.lat, lng: nearbyOrigin.lng, limit: 8 })
             : { limit: 8 },
         ).toString()).catch(() => ({ data: { results: [] } })),
-        // Academy branding banners:
-        //   • Logged-in student → /for-me returns published banners
-        //     targeted at the student's own institution (auth-gated).
+        // Academy branding banners are GUEST-ONLY. Per the branding
+        // spec, logged-in students / trainers never see the
+        // institution's branding banner or video — the surface is
+        // reserved for the Guest User marketing flow.
         //   • Guest with a picked academy → /public/:institutionId
-        //     bypasses auth so the branded hero still loads. The
-        //     public endpoint returns the same active banners any
-        //     guest browsing this academy is meant to see.
-        //   • Guest with no academy picked → empty. The default hero
-        //     copy takes over below.
-        user
-          ? apiClient.get('/institution-banners/for-me').catch(() => ({ data: { banners: [] } }))
-          : selectedInstitution?.id
-            ? apiClient.get(`/institution-banners/public/${selectedInstitution.id}`).catch(() => ({ data: { banners: [] } }))
-            : Promise.resolve({ data: { banners: [] } }),
+        //     bypasses auth so the branded hero loads.
+        //   • Guest with no academy picked → empty. The default
+        //     welcome hero takes over below.
+        //   • Logged-in student → SKIP the call entirely. Empty
+        //     list means only the platform's global CMS banners
+        //     (bannersRes above) drive the carousel.
+        (!user && selectedInstitution?.id)
+          ? apiClient.get(`/institution-banners/public/${selectedInstitution.id}`).catch(() => ({ data: { banners: [] } }))
+          : Promise.resolve({ data: { banners: [] } }),
       ]);
       // Merge institution-specific banners in front of the global CMS
       // banners so the academy's own promos lead the carousel.

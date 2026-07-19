@@ -27,6 +27,23 @@ const WEB_APP_URL =
   process.env.APP_BASE_URL ||
   'https://veerifyapp.com';
 
+// Where Razorpay redirects the payer AFTER a successful checkout.
+// Two-tier resolution:
+//   1. PAYMENT_SUCCESS_URL (explicit override) — set this to a real
+//      frontend page like "https://veerifyapp.com/payment-success"
+//      once the frontend has that route wired.
+//   2. Otherwise fall back to the backend's built-in branded success
+//      page (renderPaymentSuccessPage) at
+//      "${API_BASE_URL}/api/onboarding/payment-success". This ALWAYS
+//      exists — the backend serves it directly — so payers never
+//      land on a 404 even if the frontend doesn't yet have a real
+//      route for the callback.
+const PAYMENT_SUCCESS_URL_OVERRIDE = (process.env.PAYMENT_SUCCESS_URL || '').trim();
+const API_BASE_URL_RESOLVED =
+  process.env.API_BASE_URL ||
+  process.env.APP_BASE_URL ||
+  'https://veerifyapp.com';
+
 let client = null;
 
 function getClient() {
@@ -90,12 +107,12 @@ async function createPaymentLink({ amountInRupees, institution, notes: extraNote
         plan_name: institution.plan_name || '',
         ...(extraNotes && typeof extraNotes === 'object' ? extraNotes : {}),
       },
-      // Post-payment landing page. Points at the frontend web app —
-      // NOT the API. The frontend route renders a friendly "Payment
-      // received" confirmation card. In dev when the frontend isn't
-      // running, the backend serves a plain fallback HTML at
-      // /api/onboarding/payment-success so the payer isn't stranded.
-      callback_url: `${WEB_APP_URL}/payment-success?institution_id=${institution.id}`,
+      // Post-payment landing page. Uses PAYMENT_SUCCESS_URL when set
+      // (frontend route), otherwise the backend's built-in branded
+      // success page which ALWAYS exists — never a 404.
+      callback_url: PAYMENT_SUCCESS_URL_OVERRIDE
+        ? `${PAYMENT_SUCCESS_URL_OVERRIDE}?institution_id=${institution.id}`
+        : `${API_BASE_URL_RESOLVED}/api/onboarding/payment-success?institution_id=${institution.id}`,
       callback_method: 'get',
     });
 
