@@ -13,6 +13,7 @@ import RegisterScreen from '../screens/RegisterScreen';
 import ForgotPasswordScreen from '../screens/ForgotPasswordScreen';
 import ChangePasswordScreen from '../screens/ChangePasswordScreen';
 import SendFeedbackScreen from '../screens/SendFeedbackScreen';
+import DeleteAccountScreen from '../screens/DeleteAccountScreen';
 import SelectInstitutionScreen from '../screens/SelectInstitutionScreen';
 
 // Admin — onboarding
@@ -281,6 +282,14 @@ export default function AppNavigator() {
             component={SendFeedbackScreen}
             options={{ headerShown: false }}
           />
+          {/* DeleteAccount — self-service permanent deletion. Renders
+              its own header. Accessible from every role's stack so a
+              future entry point on any tab can reuse this route. */}
+          <Stack.Screen
+            name="DeleteAccount"
+            component={DeleteAccountScreen}
+            options={{ headerShown: false }}
+          />
           <Stack.Screen name="StudentDetail" component={StudentDetailScreen} />
           <Stack.Screen name="EditStudent" component={EditStudentScreen} options={{ headerShown: false }} />
           <Stack.Screen name="CoursesList" component={CoursesListScreen} />
@@ -469,6 +478,14 @@ export default function AppNavigator() {
             component={SendFeedbackScreen}
             options={{ headerShown: false }}
           />
+          {/* DeleteAccount — self-service permanent deletion. Renders
+              its own header. Accessible from every role's stack so a
+              future entry point on any tab can reuse this route. */}
+          <Stack.Screen
+            name="DeleteAccount"
+            component={DeleteAccountScreen}
+            options={{ headerShown: false }}
+          />
           <Stack.Screen name="SelectInstitution" component={SelectInstitutionScreen}
             // No nav header at all — the screen body already has a big
             // "Choose your academy" heading, and the user can use the
@@ -586,6 +603,14 @@ export default function AppNavigator() {
             component={SendFeedbackScreen}
             options={{ headerShown: false }}
           />
+          {/* DeleteAccount — self-service permanent deletion. Renders
+              its own header. Accessible from every role's stack so a
+              future entry point on any tab can reuse this route. */}
+          <Stack.Screen
+            name="DeleteAccount"
+            component={DeleteAccountScreen}
+            options={{ headerShown: false }}
+          />
           {/* Shared event detail — trainers reach this by tapping an event
               card on their dashboard. */}
           <Stack.Screen name="EventDetail" component={EventDetailScreen}
@@ -674,6 +699,14 @@ export default function AppNavigator() {
           <Stack.Screen
             name="SendFeedback"
             component={SendFeedbackScreen}
+            options={{ headerShown: false }}
+          />
+          {/* DeleteAccount — self-service permanent deletion. Renders
+              its own header. Accessible from every role's stack so a
+              future entry point on any tab can reuse this route. */}
+          <Stack.Screen
+            name="DeleteAccount"
+            component={DeleteAccountScreen}
             options={{ headerShown: false }}
           />
           <Stack.Screen name="LinkedChildren" component={LinkedChildrenScreen} />

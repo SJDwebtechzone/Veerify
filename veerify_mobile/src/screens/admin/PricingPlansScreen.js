@@ -411,23 +411,57 @@ function CurrentPlanCard({ status, onAction }) {
   const price = Number(plan.effective_price ?? plan.price ?? 0);
   const cycle = plan.billing_cycle || 'monthly';
 
+  // ── Days-until-renewal window ────────────────────────────────────
+  // For a PAID subscription, we only want to show a payment CTA when
+  // renewal is close (7-day window per spec). Outside that window
+  // the card should say "Paid" and nothing more.
+  const RENEWAL_WINDOW_DAYS = 7;
+  const daysToRenewal = (() => {
+    if (!status?.next_renewal_at) return null;
+    const t = new Date(status.next_renewal_at).getTime();
+    if (!Number.isFinite(t)) return null;
+    const diffMs = t - Date.now();
+    return Math.ceil(diffMs / (24 * 60 * 60 * 1000));
+  })();
+  const isRenewalDue =
+    daysToRenewal != null && daysToRenewal <= RENEWAL_WINDOW_DAYS;
+
   // Phase-aware styling and CTA copy.
+  //   paid + renewal not due → Green "Paid" badge, NO button.
+  //   paid + within 7 days   → Green "Paid" badge + "Renew now" button.
+  //   trial / grace          → Amber. Existing behaviour.
+  //   locked / expired       → Red "Expired" + "Renew now" button.
+  //   pending                → Slate, awaiting super-admin approval (no CTA).
   const phaseInfo = {
-    paid:    { label: 'Active',    color: GREEN, icon: CheckCircle2, action: 'Renew now',    showAction: true  },
-    trial:   { label: 'Free trial', color: AMBER, icon: Clock,        action: 'Pay now',      showAction: true  },
-    grace:   { label: 'Grace period', color: AMBER, icon: AlertTriangle, action: 'Pay now',   showAction: true  },
-    locked:  { label: 'Locked',    color: BRAND, icon: Lock,         action: 'Pay now',      showAction: true  },
-    pending: { label: 'Awaiting approval', color: SLATE, icon: Clock, action: '',            showAction: false },
+    paid: {
+      label:      'Paid',
+      color:      GREEN,
+      icon:       CheckCircle2,
+      action:     'Renew now',
+      // Only show the Renew CTA in the last 7 days before renewal.
+      // Any earlier and the card is purely informational.
+      showAction: isRenewalDue,
+    },
+    trial:   { label: 'Free trial',   color: AMBER, icon: Clock,        action: 'Pay now',   showAction: true  },
+    grace:   { label: 'Pending',      color: AMBER, icon: AlertTriangle, action: 'Pay now',   showAction: true  },
+    locked:  { label: 'Pending',      color: BRAND, icon: Lock,         action: 'Pay now',   showAction: true  },
+    expired: { label: 'Expired',      color: BRAND, icon: AlertTriangle, action: 'Renew now', showAction: true  },
+    pending: { label: 'Awaiting approval', color: SLATE, icon: Clock,   action: '',          showAction: false },
   }[phase] || { label: phase, color: SLATE, icon: Clock, action: '', showAction: false };
 
   const PhaseIcon = phaseInfo.icon;
 
-  // Days left badge — surfaces the urgency for trial / grace.
+  // Days left badge — surfaces urgency for trial, grace, and the
+  // 7-day pre-renewal window on paid subscriptions.
   let daysBadge = null;
   if (phase === 'trial' && status?.days_left_in_trial != null) {
     daysBadge = `${status.days_left_in_trial} day${status.days_left_in_trial === 1 ? '' : 's'} left in trial`;
   } else if (phase === 'grace' && status?.days_left_in_grace != null) {
     daysBadge = `${status.days_left_in_grace} day${status.days_left_in_grace === 1 ? '' : 's'} left in grace`;
+  } else if (phase === 'paid' && isRenewalDue && daysToRenewal >= 0) {
+    daysBadge = daysToRenewal === 0
+      ? 'Renews today'
+      : `Renews in ${daysToRenewal} day${daysToRenewal === 1 ? '' : 's'}`;
   }
 
   return (

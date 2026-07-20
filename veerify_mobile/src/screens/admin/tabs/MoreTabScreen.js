@@ -24,7 +24,7 @@ import {
   UserCog, BookOpen, Building2, CalendarRange, Bell, Megaphone,
   MessageSquare, BarChart3, Palette, CreditCard, Settings, LifeBuoy,
   LogOut, ChevronRight, Edit3, ShieldCheck, Layers, KeyRound, MapPin,
-  Award, FileText,
+  Award, FileText, Trash2,
 } from 'lucide-react-native';
 
 import { useAuth } from '../../../context/AuthContext';
@@ -378,6 +378,19 @@ export default function MoreTabScreen({ navigation }) {
           label="Send feedback"
           accent={palette.pink}
           onPress={() => navigation.navigate('SendFeedback')}
+        />
+        <View style={styles.divider} />
+        {/* Delete Account — self-service permanent deletion. Routes
+            into the dedicated DeleteAccountScreen which handles the
+            password re-verification + confirmation dialog + logout.
+            Rendered with the destructive rose accent so the entry
+            point reads as clearly-different from support / feedback
+            rows above it. */}
+        <ListRow
+          icon={Trash2}
+          label="Delete Account"
+          accent={palette.rose}
+          onPress={() => navigation.navigate('DeleteAccount')}
         />
       </View>
 

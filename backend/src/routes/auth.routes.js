@@ -20,5 +20,11 @@ router.put('/me/profile', verifyToken, authController.updateMyProfile);
 
 // Change own password
 router.post('/change-password', verifyToken, authController.changePassword);
+// Self-service account deletion. Requires a valid JWT + the caller's
+// password in the body to guard against session-hijack deletions.
+// Anonymises the users row + student_profiles + trainer profile;
+// financial / legal records (enrolments, payments, invoices) stay
+// intact for audit + tax retention.
+router.post('/delete-account', verifyToken, authController.deleteAccount);
 
 module.exports = router;

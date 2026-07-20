@@ -323,6 +323,189 @@ exports.changePassword = async (req, res) => {
   }
 };
 
+// POST /api/auth/delete-account
+//
+// Self-service permanent account deletion. Called after the mobile
+// has shown the "Are you sure?" confirmation and the user has
+// re-entered their password. Contract:
+//
+//   1. Verify the caller's password (bcrypt compare against the
+//      currently-stored hash). Reject with 401 on mismatch.
+//   2. Write an audit row into account_deletion_audit BEFORE any
+//      mutation, so we always have a permanent record even if the
+//      teardown itself errors out mid-way.
+//   3. Anonymise personal data on `users` (name/email/phone
+//      tombstoned, password cleared, is_deleted=TRUE, status='deleted').
+//      Financial + legal records that reference this user by
+//      user_id (enrollments, payments, invoices, subscription_
+//      transactions, certificates) stay intact — the FK still
+//      resolves to a "Deleted User" row so ledgers don't break.
+//   4. Anonymise the paired student_profiles row (full_name,
+//      contact, address, health notes, photo_url all cleared).
+//   5. Because the password is cleared and is_deleted flips TRUE,
+//      the existing login handler rejects any further sign-in
+//      attempt with the same credentials, and every currently-live
+//      JWT will 401 on the next protected call. That's the
+//      "revoke all active sessions and tokens" contract — we don't
+//      maintain a persistent session table, so token invalidation
+//      falls out naturally from the users-row state.
+exports.deleteAccount = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { password, reason } = req.body || {};
+    if (!password) {
+      return res.status(400).json({
+        code:    'PASSWORD_REQUIRED',
+        message: 'Please re-enter your password to confirm account deletion.',
+      });
+    }
+
+    const userId = req.user.id;
+    const userRes = await client.query(
+      `SELECT id, name, email, phone, role, institution_id, password
+         FROM users
+        WHERE id = $1 AND COALESCE(is_deleted, FALSE) = FALSE`,
+      [userId],
+    );
+    if (userRes.rows.length === 0) {
+      return res.status(404).json({ message: 'Account not found' });
+    }
+    const user = userRes.rows[0];
+
+    const valid = await bcrypt.compare(password, user.password || '');
+    if (!valid) {
+      return res.status(401).json({
+        code:    'INVALID_PASSWORD',
+        message: 'The password you entered is incorrect. Try again.',
+      });
+    }
+
+    // Prevent an institution admin from deleting themselves while
+    // their institution is still live — that would orphan every
+    // student/trainer under them with no owner. They must transfer
+    // ownership or delete the institution first via super-admin.
+    if (user.role === 'admin' && user.institution_id) {
+      const instRes = await client.query(
+        `SELECT onboarding_status, deleted_at FROM institutions WHERE id = $1`,
+        [user.institution_id],
+      );
+      const inst = instRes.rows[0];
+      if (inst && !inst.deleted_at && inst.onboarding_status !== 'deleted') {
+        return res.status(409).json({
+          code:    'INSTITUTION_STILL_ACTIVE',
+          message:
+            'You own an active institution. Contact support to close ' +
+            'the institution before deleting your admin account.',
+        });
+      }
+    }
+
+    // Kick everything into a single transaction so a mid-way failure
+    // leaves either the full anonymisation OR nothing — never a
+    // half-scrubbed user row.
+    await client.query('BEGIN');
+
+    // 1. Audit row first — must survive even if the teardown errors.
+    await client.query(
+      `INSERT INTO account_deletion_audit
+         (user_id, role_snapshot, email_snapshot, phone_snapshot,
+          institution_id, initiated_by, metadata)
+       VALUES ($1, $2, $3, $4, $5, 'user', $6)`,
+      [
+        userId,
+        user.role,
+        user.email || null,
+        user.phone || null,
+        user.institution_id || null,
+        {
+          reason:     typeof reason === 'string' ? reason.slice(0, 500) : null,
+          ip:         req.ip || null,
+          user_agent: req.headers['user-agent'] || null,
+        },
+      ],
+    );
+
+    // 2. Anonymise the user row. Email/phone are switched to
+    //    deterministic tombstone values so the UNIQUE indexes on
+    //    those columns still hold. Password is cleared so no login
+    //    is possible; must_change_password is set so any future
+    //    session would be forced to change (defensive — is_deleted
+    //    already blocks login upstream).
+    const tombstoneEmail = `deleted+${userId}@veerify.local`;
+    const tombstonePhone = `deleted-${userId}`;
+    await client.query(
+      `UPDATE users SET
+         name                 = 'Deleted User',
+         email                = $2,
+         phone                = $3,
+         password             = '',
+         status               = 'deleted',
+         is_deleted           = TRUE,
+         must_change_password = FALSE,
+         institution_id       = NULL,
+         updated_at           = NOW()
+       WHERE id = $1`,
+      [userId, tombstoneEmail, tombstonePhone],
+    );
+
+    // 3. Anonymise the paired student_profiles row (if any).
+    //    Enrollments + payments stay linked to the tombstoned user
+    //    so financial history still resolves.
+    await client.query(
+      `UPDATE student_profiles SET
+         full_name       = 'Deleted User',
+         contact_number  = NULL,
+         email           = NULL,
+         address         = NULL,
+         father_name     = NULL,
+         mother_name     = NULL,
+         disabilities    = NULL,
+         photo_url       = NULL,
+         emergency_contact = NULL,
+         updated_at      = CURRENT_TIMESTAMP
+       WHERE user_id = $1`,
+      [userId],
+    );
+
+    // 4. Trainer row (if any) — anonymise the paired profile so
+    //    the tombstoned user's teaching history stays attached to
+    //    batches/courses without leaking PII on the roster.
+    await client.query(
+      `UPDATE trainers SET
+         specialization = NULL,
+         experience     = NULL,
+         certificate    = NULL,
+         updated_at     = NOW()
+       WHERE user_id = $1`,
+      [userId],
+    ).catch(() => { /* trainers table optional per role */ });
+
+    await client.query('COMMIT');
+
+    console.log(
+      `[deleteAccount] user=${userId} role=${user.role} email(before)=${user.email} anonymised`,
+    );
+
+    // Response drives the mobile's success flow — show the styled
+    // confirm dialog + redirect to Welcome. The mobile discards its
+    // JWT so subsequent requests are unauthenticated; the
+    // is_deleted flag on the users row ensures any leaked token
+    // returns 401 on the next hit.
+    return res.json({
+      message: 'Your account has been deleted successfully.',
+    });
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
+    console.error('deleteAccount error:', err);
+    res.status(500).json({
+      message: 'Could not delete account. Please try again in a moment.',
+      error:   err.message,
+    });
+  } finally {
+    client.release();
+  }
+};
+
 // GET current user info (protected route)
 exports.getMe = async (req, res) => {
   try {

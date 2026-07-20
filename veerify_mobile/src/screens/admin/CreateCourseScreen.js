@@ -524,6 +524,11 @@ export default function CreateCourseScreen({ navigation, route }) {
         <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, marginTop: 6, marginBottom: spacing.md }}>
           {BILLING_CYCLE_OPTIONS.map((opt) => {
             const on = (form.billing_cycle || 'monthly') === opt.value;
+            // Matches the "Level & Audience" pill row (Beginner /
+            // Intermediate / Advanced) so the whole form reads with
+            // one consistent brand red for the selected state. That
+            // group uses palette.purple.vivid which the theme maps
+            // to the brand red (#EF4444) — see theme.js.
             return (
               <TouchableOpacity
                 key={opt.value}
@@ -533,8 +538,8 @@ export default function CreateCourseScreen({ navigation, route }) {
                   paddingHorizontal: 12, paddingVertical: 8,
                   borderRadius: 999,
                   borderWidth: 1,
-                  borderColor: on ? palette.pink : palette.borderSoft,
-                  backgroundColor: on ? palette.pink : palette.surface,
+                  borderColor: on ? palette.purple.vivid : palette.borderSoft,
+                  backgroundColor: on ? palette.purple.vivid : palette.surface,
                 }}
               >
                 <Text style={{
