@@ -901,8 +901,16 @@ exports.activateStudentAfterPayment = async function (enrollmentId) {
 
     // Send credentials email — same helper the offline / trainer
     // flows already use, so the copy stays consistent.
+    //
+    // sendStudentCredentialsEmail returns { ok, error } — it never
+    // throws — so the previous try/catch always saw "success" even
+    // when the mailer had actually failed silently. We now inspect
+    // the return value, log the reason loudly, and surface it in
+    // the response so callers (webhook + reconciler) can react.
+    let credentialsSent = false;
+    let credentialsError = null;
     try {
-      await sendStudentCredentialsEmail({
+      const mail = await sendStudentCredentialsEmail({
         to:              row.student_email,
         name:            row.student_name,
         loginEmail:      row.student_email,
@@ -910,8 +918,22 @@ exports.activateStudentAfterPayment = async function (enrollmentId) {
         institutionName: row.institution_name,
         courseName:      row.course_name,
       });
+      if (mail && mail.ok) {
+        credentialsSent = true;
+        console.log(
+          `[activateStudent] credentials emailed to ${row.student_email} (enrollment=${enrollmentId})`,
+        );
+      } else {
+        credentialsError = mail?.error || 'Unknown mailer error';
+        console.error(
+          `[activateStudent] credentials email FAILED for enrollment=${enrollmentId} to=${row.student_email}: ${credentialsError}`,
+        );
+      }
     } catch (mailErr) {
-      console.warn('[activateStudent] credentials mail failed:', mailErr?.message);
+      credentialsError = mailErr?.message || 'Send threw';
+      console.error(
+        `[activateStudent] credentials email THREW for enrollment=${enrollmentId}: ${credentialsError}`,
+      );
     }
 
     // Welcome SMS (fire-and-forget). Falls through silently when the
@@ -926,7 +948,12 @@ exports.activateStudentAfterPayment = async function (enrollmentId) {
       });
     }
 
-    return { ok: true, sent: true };
+    return {
+      ok:                true,
+      sent:              credentialsSent,
+      credentials_sent:  credentialsSent,
+      credentials_error: credentialsError,
+    };
   } catch (err) {
     console.error('[activateStudent] error:', err);
     return { ok: false, error: err?.message || 'Activate failed' };
@@ -1269,6 +1296,132 @@ exports.enrollmentPaymentSuccess = async (req, res) => {
   } catch (err) {
     console.error('enrollmentPaymentSuccess error:', err);
     return res.status(500).send('Server error. Please try again in a moment.');
+  }
+};
+
+// POST /api/enrollments/:id/resend-credentials
+//
+// Admin manual retry for the credentials email that goes out after a
+// student's payment clears. Used when the first attempt failed
+// silently (SMTP hiccup, Gmail app password rotation, etc.) and the
+// student never received their login details.
+//
+// Rotates the temp password so no one — including the admin — can
+// know the previous one, then re-sends the email. Requires the
+// enrollment to already be paid (this endpoint doesn't grant access;
+// it only re-delivers credentials for an account that's already
+// active).
+exports.resendStudentCredentials = async (req, res) => {
+  try {
+    const enrollmentId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(enrollmentId)) {
+      return res.status(400).json({ message: 'Invalid enrollment id' });
+    }
+
+    // Confirm the caller can touch this enrollment (branch scope
+    // check, same rule the mark-attendance endpoints use). Pull the
+    // student + course + institution while we're at it.
+    const r = await pool.query(
+      `SELECT e.id, e.student_id, e.payment_status, e.institution_id,
+              c.name AS course_name,
+              i.name AS institution_name,
+              u.name AS student_name, u.email AS student_email,
+              u.phone AS student_phone
+         FROM enrollments e
+         JOIN batches b       ON b.id = e.batch_id
+         JOIN courses c       ON c.id = b.course_id
+         JOIN institutions i  ON i.id = e.institution_id
+         JOIN users u         ON u.id = e.student_id
+        WHERE e.id = $1`,
+      [enrollmentId],
+    );
+    if (r.rows.length === 0) {
+      return res.status(404).json({ message: 'Enrollment not found' });
+    }
+    const row = r.rows[0];
+
+    // Branch scope — main admin can touch any student, sub-branch
+    // admin only their own branch. Same helper the update-student
+    // endpoint uses.
+    const scope = await getBranchScope(req.user.id);
+    if (!scope) {
+      return res.status(403).json({ message: 'Admin not linked to an institution' });
+    }
+    if (scope.rootId !== row.institution_id
+        && !(scope.callerInstId === row.institution_id)) {
+      return res.status(403).json({ message: 'Not your student' });
+    }
+
+    if (row.payment_status !== 'paid') {
+      return res.status(400).json({
+        code:    'NOT_PAID',
+        message: 'This enrollment is not yet paid. Credentials are only sent after payment clears.',
+      });
+    }
+
+    // Rotate password + re-send. The user is already active, so
+    // this bypasses the activate-once idempotency guard — that
+    // guard exists to prevent DUPLICATE mails from webhook retries,
+    // not to block an admin-initiated resend.
+    const tempPassword = generateTempPassword();
+    const hashed = await bcrypt.hash(tempPassword, 10);
+    await pool.query(
+      `UPDATE users SET
+         password             = $1,
+         must_change_password = TRUE,
+         updated_at           = NOW()
+       WHERE id = $2`,
+      [hashed, row.student_id],
+    );
+
+    let sent = false;
+    let error = null;
+    try {
+      const mail = await sendStudentCredentialsEmail({
+        to:              row.student_email,
+        name:            row.student_name,
+        loginEmail:      row.student_email,
+        password:        tempPassword,
+        institutionName: row.institution_name,
+        courseName:      row.course_name,
+      });
+      sent  = !!(mail && mail.ok);
+      error = sent ? null : (mail?.error || 'Unknown mailer error');
+    } catch (e) {
+      error = e?.message || 'Send threw';
+    }
+
+    // Welcome SMS with the fresh password so at least ONE channel
+    // delivers, even if SMTP is still broken.
+    if (row.student_phone) {
+      dispatchWelcomeSms({
+        phone:        row.student_phone,
+        name:         row.student_name,
+        role:         'student',
+        loginId:      row.student_email,
+        tempPassword,
+      });
+    }
+
+    console.log(
+      `[resendStudentCredentials] enrollment=${enrollmentId} to=${row.student_email} sent=${sent} err=${error || 'none'}`,
+    );
+
+    if (sent) {
+      return res.json({
+        message: `Fresh login credentials emailed to ${row.student_email}.`,
+        credentials_sent: true,
+      });
+    }
+    return res.status(502).json({
+      code:    'MAIL_FAILED',
+      message: `Password was rotated but the email could NOT be delivered: ${error}. Try again after fixing SMTP.`,
+      credentials_sent: false,
+      credentials_error: error,
+    });
+  } catch (err) {
+    console.error('resendStudentCredentials error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
 

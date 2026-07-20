@@ -11,6 +11,7 @@
 //   SUPPORT_EMAIL       Optional. Shown in email footers. Defaults to SMTP_USER.
 
 const nodemailer = require('nodemailer');
+const fs = require('fs');
 
 const SMTP_USER = process.env.SMTP_USER;
 // ── URL resolution ───────────────────────────────────────────────────
@@ -858,21 +859,52 @@ async function sendBranchSetupEmail({
 }
 
 // Generic sendMail — used by ad-hoc transactional flows (payment
-// link, resend link) that don't warrant a dedicated template. Accepts
-// { to, subject, text?, html? }. Returns { ok, messageId } on success
-// or { ok: false, error } on failure. Never throws.
-async function sendMail({ to, subject, text, html }) {
+// link, resend link, INVOICE PDF) that don't warrant a dedicated
+// template. Accepts { to, subject, text?, html?, attachments?, cc?,
+// bcc? }. `attachments` is passed through to nodemailer unchanged;
+// each entry is { filename, path } (absolute path recommended) or
+// { filename, content, contentType }.
+//
+// Previously this helper silently dropped `attachments` — the
+// invoice email left the PDF on disk but never included it as an
+// attachment. Fixed here so every caller that hands in attachments
+// (invoiceService.generateEnrollmentInvoice /
+// generateSubscriptionInvoice) actually delivers them.
+//
+// Returns { ok, messageId } on success or { ok: false, error } on
+// failure. Never throws.
+async function sendMail({ to, subject, text, html, attachments, cc, bcc }) {
   try {
     const t = getTransporter();
     if (!t) return { ok: false, error: 'SMTP not configured' };
     const from = `"${FROM_NAME}" <${SMTP_USER}>`;
     const finalText = text || (html ? toPlainText(html) : '');
+
+    // Pre-flight the attachment paths so a stale file reference logs
+    // clearly instead of nodemailer swallowing the ENOENT into a
+    // silent "no attachment sent" outcome.
+    const cleanAttachments = Array.isArray(attachments)
+      ? attachments.filter((a) => {
+          if (!a) return false;
+          if (a.content) return true; // inline buffer/string — always OK
+          if (a.path && !fs.existsSync(a.path)) {
+            console.warn(
+              `[mailer.sendMail] attachment path missing, dropping: ${a.path}`,
+            );
+            return false;
+          }
+          return true;
+        })
+      : undefined;
+
     const info = await t.sendMail({
       from, to, subject,
-      text:    finalText,
-      html:    html || undefined,
-      replyTo: SUPPORT_EMAIL,
-      headers: transactionalHeaders(),
+      text:        finalText,
+      html:        html || undefined,
+      replyTo:     SUPPORT_EMAIL,
+      headers:     transactionalHeaders(),
+      attachments: cleanAttachments,
+      cc, bcc,
     });
     return { ok: true, messageId: info.messageId };
   } catch (err) {

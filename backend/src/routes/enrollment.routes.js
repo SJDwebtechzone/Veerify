@@ -56,6 +56,15 @@ router.post('/:id/resend-payment-link',
   verifyToken, requireRole('admin'),
   enrollmentController.resendPaymentLink);
 
+// Admin re-sends the student's login credentials email after a paid
+// enrolment — used when the first attempt failed silently (SMTP
+// hiccup, Gmail app-password rotation, spam-filter block). Rotates
+// the temp password so the old one is invalidated. Requires the
+// enrolment to already be paid.
+router.post('/:id/resend-credentials',
+  verifyToken, requireRole('admin'),
+  enrollmentController.resendStudentCredentials);
+
 // Student-initiated renewal — mints a Razorpay payment link scoped to
 // the student. Mobile opens the returned URL in the browser; the
 // existing Razorpay webhook flips payment_status to 'paid' on success.
