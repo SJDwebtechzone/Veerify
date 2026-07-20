@@ -68,7 +68,7 @@ function getClient() {
  * Reference for the API:
  *   https://razorpay.com/docs/api/payments/payment-links/
  */
-async function createPaymentLink({ amountInRupees, institution, notes: extraNotes }) {
+async function createPaymentLink({ amountInRupees, institution, notes: extraNotes, callbackUrl: callbackOverride }) {
   const c = getClient();
   if (!c) return { ok: false, error: 'Razorpay not configured' };
 
@@ -107,12 +107,17 @@ async function createPaymentLink({ amountInRupees, institution, notes: extraNote
         plan_name: institution.plan_name || '',
         ...(extraNotes && typeof extraNotes === 'object' ? extraNotes : {}),
       },
-      // Post-payment landing page. Uses PAYMENT_SUCCESS_URL when set
-      // (frontend route), otherwise the backend's built-in branded
-      // success page which ALWAYS exists — never a 404.
-      callback_url: PAYMENT_SUCCESS_URL_OVERRIDE
-        ? `${PAYMENT_SUCCESS_URL_OVERRIDE}?institution_id=${institution.id}`
-        : `${API_BASE_URL_RESOLVED}/api/onboarding/payment-success?institution_id=${institution.id}`,
+      // Post-payment landing page. Priority:
+      //   1. Explicit callbackUrl arg from the caller (enrollment
+      //      payments hand in an enrollment-specific reconciliation
+      //      URL so we don't collide with the institution success
+      //      page).
+      //   2. PAYMENT_SUCCESS_URL env override — frontend route.
+      //   3. Backend fallback success page (always exists).
+      callback_url: callbackOverride
+        || (PAYMENT_SUCCESS_URL_OVERRIDE
+             ? `${PAYMENT_SUCCESS_URL_OVERRIDE}?institution_id=${institution.id}`
+             : `${API_BASE_URL_RESOLVED}/api/onboarding/payment-success?institution_id=${institution.id}`),
       callback_method: 'get',
     });
 
@@ -160,7 +165,44 @@ function verifyWebhookSignature(rawBody, signature) {
   return crypto.timingSafeEqual(a, b);
 }
 
+/**
+ * Fetch a Payment Link's current status directly from Razorpay's REST
+ * API. Used by the post-payment reconciliation flow: if a payer lands
+ * on the success callback but our DB row still says 'pending' (webhook
+ * hasn't fired yet, or was lost), we call this to confirm whether
+ * Razorpay actually saw the charge. Returns { ok, status, paymentId,
+ * amountPaise }.
+ *
+ * Statuses per Razorpay Payment Link API:
+ *   'created' | 'partially_paid' | 'expired' | 'cancelled' | 'paid'
+ * We only ever treat 'paid' as authoritative — anything else means the
+ * charge hasn't fully cleared and the DB should stay 'pending'.
+ */
+async function fetchPaymentLinkStatus(linkId) {
+  const c = getClient();
+  if (!c) return { ok: false, error: 'Razorpay not configured' };
+  if (!linkId) return { ok: false, error: 'Missing payment_link id' };
+  try {
+    const link = await c.paymentLink.fetch(linkId);
+    return {
+      ok: true,
+      status: link.status,
+      // Razorpay embeds the confirmed payment id under `payments[0]`
+      // once the link is fully paid. Guard the lookup so a partially-
+      // paid link doesn't throw here.
+      paymentId: Array.isArray(link.payments) && link.payments.length
+        ? link.payments[0].payment_id
+        : null,
+      amountPaise: link.amount_paid || link.amount || 0,
+    };
+  } catch (err) {
+    const desc = err?.error?.description || err.message || 'Razorpay fetch failed';
+    return { ok: false, error: desc };
+  }
+}
+
 module.exports = {
   createPaymentLink,
+  fetchPaymentLinkStatus,
   verifyWebhookSignature,
 };

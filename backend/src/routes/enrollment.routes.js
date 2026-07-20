@@ -11,6 +11,16 @@ const { requireActiveSubscription } = require('../utils/subscriptionGuard');
 // controller branches on req.user.role + admin_mode flag: students enrol
 // themselves directly, admins create a new student account first then
 // link the enrolment to that user.
+// Post-payment reconciliation landing page. Razorpay redirects the
+// payer here after successful checkout with ?enrollment_id=<id>.
+// PUBLIC — no auth. The handler flips the row to paid via active
+// Razorpay verification if the webhook fails to arrive, then mails
+// credentials + generates the invoice. Every side-effect is
+// idempotent so refreshing the page or duplicate callbacks are safe.
+// Must come BEFORE any generic /:id route so Express doesn't capture
+// "payment-success" as an id param.
+router.get('/payment-success', enrollmentController.enrollmentPaymentSuccess);
+
 router.post('/', verifyToken, requireRole('student', 'admin'), requireActiveSubscription, enrollmentController.enrollInBatch);
 router.get('/my', verifyToken, requireRole('student'), enrollmentController.getMyEnrollments);
 router.get('/my-profile', verifyToken, requireRole('student'), enrollmentController.getMyProfile);

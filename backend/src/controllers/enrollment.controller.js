@@ -487,6 +487,16 @@ exports.enrollInBatch = async (req, res) => {
         [batch.institution_id],
       );
       const { createPaymentLink } = require('../utils/razorpay');
+      // Enrollment-specific callback URL. Points at the backend
+      // reconciliation handler which we KNOW exists — no dependency
+      // on a frontend /payment-success route. The handler flips the
+      // row to paid via active Razorpay verification if the webhook
+      // fails to arrive, then mails credentials + generates the
+      // invoice. See enrollment.controller.js#enrollmentPaymentSuccess.
+      const apiBase =
+        (process.env.API_BASE_URL || process.env.APP_BASE_URL || 'https://veerifyapp.com')
+          .replace(/\/+$/, '');
+      const callbackUrl = `${apiBase}/api/enrollments/payment-success?enrollment_id=${enrollmentId}`;
       const link = await createPaymentLink({
         amountInRupees: amount,
         institution: {
@@ -502,6 +512,7 @@ exports.enrollInBatch = async (req, res) => {
           enrollment_id: String(enrollmentId),
           student_id:    String(studentId),
         },
+        callbackUrl,
       });
       if (!link.ok) {
         await client.query('ROLLBACK');
@@ -765,6 +776,12 @@ exports.createEnrollmentPaymentLink = async (req, res) => {
     const cycleLabel = billingCycleLabel(row.course_billing_cycle);
 
     const { createPaymentLink } = require('../utils/razorpay');
+    // Enrollment-specific callback URL — routes to the reconciliation
+    // handler on this same controller. See enrollmentPaymentSuccess.
+    const apiBase =
+      (process.env.API_BASE_URL || process.env.APP_BASE_URL || 'https://veerifyapp.com')
+        .replace(/\/+$/, '');
+    const callbackUrl = `${apiBase}/api/enrollments/payment-success?enrollment_id=${row.id}`;
     const link = await createPaymentLink({
       amountInRupees: amount,
       institution: {
@@ -784,6 +801,7 @@ exports.createEnrollmentPaymentLink = async (req, res) => {
         student_id:    String(studentId),
         billing_cycle: String(row.course_billing_cycle || 'monthly'),
       },
+      callbackUrl,
     });
 
     if (!link.ok) {
@@ -1052,6 +1070,205 @@ exports.paymentStatus = async (req, res) => {
   } catch (err) {
     console.error('paymentStatus error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// GET /api/enrollments/payment-success
+//
+// Razorpay redirects the payer here after a successful checkout. This
+// endpoint is the second half of the "webhook + active reconciliation"
+// contract — even if the Razorpay webhook fails, is misconfigured, or
+// arrives late, this handler:
+//
+//   1. Reads the enrollment id from the query string.
+//   2. Checks the enrollment's current server-side status.
+//   3. If already 'paid' → renders success page (idempotent).
+//   4. Otherwise, calls Razorpay's Payment Link API to confirm the
+//      link is genuinely paid. If Razorpay says paid but our DB says
+//      pending → runs the same activation code the webhook runs
+//      (flips to paid, activates student, mails credentials, generates
+//      invoice). Every side-effect is idempotency-guarded internally.
+//   5. Renders a branded HTML success page that ALWAYS works — no
+//      dependency on a frontend `/payment-success` route existing.
+//
+// Public — no auth. Safe because we only expose the student's name
+// and course; nothing sensitive. Enrollment id in URL is the same
+// posture as the pay-approval link that survives from onboarding.
+exports.enrollmentPaymentSuccess = async (req, res) => {
+  try {
+    const enrollmentId = parseInt(req.query.enrollment_id, 10);
+    if (!Number.isFinite(enrollmentId)) {
+      return res.status(400).send('Missing or invalid enrollment_id.');
+    }
+
+    // Pull enrollment + student + course + institution for the render.
+    const enrolRes = await pool.query(
+      `SELECT e.id, e.student_id, e.payment_status, e.payment_amount,
+              e.payment_reference,
+              c.name AS course_name,
+              i.name AS institution_name,
+              u.name AS student_name, u.email AS student_email
+         FROM enrollments e
+         JOIN batches b       ON b.id = e.batch_id
+         JOIN courses c       ON c.id = b.course_id
+         JOIN institutions i  ON i.id = e.institution_id
+         JOIN users u         ON u.id = e.student_id
+        WHERE e.id = $1`,
+      [enrollmentId],
+    );
+    if (enrolRes.rows.length === 0) {
+      return res.status(404).send('Enrollment not found.');
+    }
+    const row = enrolRes.rows[0];
+
+    // ── Active reconciliation ─────────────────────────────────────
+    // If the DB still says 'pending', don't wait for the webhook —
+    // ask Razorpay directly. This closes the loop on webhook
+    // failures (misconfigured URL, dropped payloads, signature
+    // mismatch) so a paid student ALWAYS gets activated.
+    let reconciled = false;
+    let reconciledError = null;
+    if (row.payment_status !== 'paid' && row.payment_reference) {
+      try {
+        const { fetchPaymentLinkStatus } = require('../utils/razorpay');
+        const info = await fetchPaymentLinkStatus(row.payment_reference);
+        if (info.ok && info.status === 'paid') {
+          // Flip to paid + record the confirmed payment id. Guarded
+          // with `WHERE payment_status <> 'paid'` so a concurrent
+          // webhook run doesn't double-write.
+          const upd = await pool.query(
+            `UPDATE enrollments
+                SET payment_status    = 'paid',
+                    paid_at           = NOW(),
+                    payment_reference = COALESCE($2, payment_reference)
+              WHERE id = $1
+                AND payment_status <> 'paid'
+              RETURNING id`,
+            [enrollmentId, info.paymentId || row.payment_reference],
+          );
+          reconciled = upd.rowCount > 0;
+
+          if (reconciled) {
+            // Fire the same side-effects the webhook fires. Both are
+            // idempotent internally (activate skips when user is
+            // already active; invoice service skips duplicates).
+            try {
+              const r = await exports.activateStudentAfterPayment(enrollmentId);
+              console.log('[enrollmentPaymentSuccess] activation via reconcile:', r);
+            } catch (e) {
+              reconciledError = e?.message || 'activation failed';
+              console.error('[enrollmentPaymentSuccess] activation error:', e);
+            }
+            try {
+              const { generateEnrollmentInvoice } = require('../utils/invoiceService');
+              await generateEnrollmentInvoice({ enrollmentId });
+            } catch (e) {
+              console.error('[enrollmentPaymentSuccess] invoice error:', e?.message);
+            }
+          }
+        } else if (info.ok) {
+          reconciledError = `Payment link status is "${info.status}" — Razorpay hasn't confirmed the charge yet. Refresh in a few seconds.`;
+        } else {
+          reconciledError = info.error || 'Could not verify payment with Razorpay.';
+        }
+      } catch (e) {
+        reconciledError = e?.message || 'Reconciliation failed';
+        console.error('[enrollmentPaymentSuccess] reconcile error:', e);
+      }
+    }
+
+    // Re-fetch the row so we render the latest state.
+    const finalRow = await pool.query(
+      `SELECT payment_status FROM enrollments WHERE id = $1`,
+      [enrollmentId],
+    );
+    const paid = finalRow.rows[0]?.payment_status === 'paid';
+
+    // Render a branded HTML page. Never a 404 — always a friendly
+    // status page, whether paid, still-processing, or explicit fail.
+    const esc = (s) => String(s || '').replace(/[<>&"']/g, (c) => (
+      { '<':'&lt;', '>':'&gt;', '&':'&amp;', '"':'&quot;', "'":'&#39;' }[c]
+    ));
+    const title = paid
+      ? 'Payment received'
+      : (reconciledError ? 'Still confirming payment' : 'Payment processing');
+    const sub = paid
+      ? `Thanks! ${esc(row.student_name || 'You')}'s enrolment in ${esc(row.course_name)} at ${esc(row.institution_name)} is now active. Login details have been emailed to ${esc(row.student_email)}.`
+      : (reconciledError
+          ? `Your payment succeeded on Razorpay but our server hasn't confirmed it yet. ${esc(reconciledError)} Refresh this page or open the Veerify app — credentials will arrive by email within a minute.`
+          : `Your payment is being processed. This page will update automatically once we confirm the charge — usually within 5 seconds.`);
+    const tickColor = paid ? '#10B981' : '#F59E0B';
+
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    // Auto-refresh every 3s while still pending so the payer sees
+    // the confirmed state without touching the reload button.
+    const refreshMeta = paid ? '' : '<meta http-equiv="refresh" content="3">';
+    return res.status(200).send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  ${refreshMeta}
+  <title>${esc(title)} — Veerify</title>
+  <style>
+    :root { color-scheme: light; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh;
+      display: flex; align-items: center; justify-content: center;
+      background: linear-gradient(135deg, #F5F3FF 0%, #FDF2F8 100%);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      color: #111827; padding: 24px;
+    }
+    .card {
+      max-width: 460px; width: 100%; background: #fff;
+      border-radius: 20px; padding: 32px 28px;
+      box-shadow: 0 20px 60px rgba(15,23,42,0.08),
+                  0 4px 12px rgba(15,23,42,0.04);
+      text-align: center;
+    }
+    .tick {
+      width: 72px; height: 72px; border-radius: 50%;
+      background: ${tickColor}; margin: 4px auto 20px;
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 10px 30px ${tickColor}55;
+    }
+    .tick svg { width: 40px; height: 40px; stroke: #fff; }
+    h1 { margin: 0 0 8px; font-size: 22px; font-weight: 800; }
+    p  { margin: 0 0 8px; color: #6B7280; line-height: 1.55; font-size: 14px; }
+    .inst {
+      display: inline-block; margin: 14px 0 6px;
+      padding: 8px 14px; border-radius: 999px;
+      background: #F3E8FF; color: #6D28D9; font-weight: 700; font-size: 13px;
+    }
+    .cta {
+      display: inline-block; margin-top: 22px;
+      padding: 12px 22px; border-radius: 12px;
+      background: #6D28D9; color: #fff; font-weight: 700;
+      text-decoration: none; font-size: 14px;
+    }
+    .foot { margin-top: 22px; font-size: 11px; color: #9CA3AF; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="tick">
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="3"
+           stroke-linecap="round" stroke-linejoin="round">
+        ${paid ? '<polyline points="20 6 9 17 4 12"/>' : '<circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 15"/>'}
+      </svg>
+    </div>
+    <h1>${esc(title)}</h1>
+    <div class="inst">${esc(row.course_name)}</div>
+    <p>${sub}</p>
+    <a class="cta" href="veerify://payment-complete">Open Veerify</a>
+    <div class="foot">You can safely close this tab.</div>
+  </div>
+</body>
+</html>`);
+  } catch (err) {
+    console.error('enrollmentPaymentSuccess error:', err);
+    return res.status(500).send('Server error. Please try again in a moment.');
   }
 };
 
