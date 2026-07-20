@@ -14,10 +14,11 @@
 // Every item is tap-routable; for now each shows an alert until the dedicated
 // screens are built.
 
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
-  View, Text, ScrollView, TouchableOpacity, StyleSheet, Alert,
+  View, Text, ScrollView, TouchableOpacity, StyleSheet, Alert, Image,
 } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import apiClient from '../../../api/client';
 import {
   UserCog, BookOpen, Building2, CalendarRange, Bell, Megaphone,
@@ -30,6 +31,7 @@ import { useAuth } from '../../../context/AuthContext';
 import { palette, spacing, radius, shadows, type } from '../../../theme';
 import { useBellScrollHandler } from '../../../components/bellScrollBus';
 import { confirm } from '../../../components/ConfirmDialog';
+import resolveAssetUrl from '../../../utils/assetUrl';
 
 // ─── Menu definition ─────────────────────────────────────────────────────────
 const MENU = [
@@ -90,6 +92,19 @@ export default function MoreTabScreen({ navigation }) {
   // Main-branch admins have parent_institution_id = null, so the row
   // stays hidden for them (they edit head-office location via Settings).
   const [isSubBranch, setIsSubBranch] = useState(false);
+
+  // Institution logo + display name — served from /institutions/me/details.
+  //   • logoUrl: the resolved, base-prefixed URL we hand to <Image>.
+  //     Null when the institution hasn't uploaded a logo yet.
+  //   • logoError: true after the <Image>'s onError fires so we fall
+  //     back to initials without leaving a broken image in place.
+  //   • institutionName: preferred over user.name (which for admins
+  //     equals the academy name at signup but drifts if the academy
+  //     is renamed via the Academy Profile edit flow).
+  const [logoUrl, setLogoUrl] = useState(null);
+  const [logoError, setLogoError] = useState(false);
+  const [institutionName, setInstitutionName] = useState(null);
+
   useEffect(() => {
     let cancelled = false;
     apiClient.get('/plans/usage')
@@ -103,16 +118,27 @@ export default function MoreTabScreen({ navigation }) {
       .catch(() => {
         if (!cancelled) setPlanLabel('Free Plan • Active');
       });
-    // Separate probe — /me/details tells us if this admin is a sub-branch.
-    apiClient.get('/institutions/me/details')
-      .then((r) => {
-        if (cancelled) return;
-        const inst = r.data?.institution || r.data || {};
-        setIsSubBranch(!!inst.parent_institution_id);
-      })
-      .catch(() => { /* not fatal — row just stays hidden */ });
     return () => { cancelled = true; };
   }, []);
+
+  // Re-fetch the institution row every time the tab regains focus.
+  // This is the "no logout required" contract — an admin uploads a
+  // new logo on AcademyProfile, taps back → this effect refires and
+  // the header immediately renders the new image.
+  const loadInstitution = useCallback(async () => {
+    try {
+      const r = await apiClient.get('/institutions/me/details');
+      const inst = r.data?.institution || r.data || {};
+      setIsSubBranch(!!inst.parent_institution_id);
+      const nextLogo = resolveAssetUrl(inst.logo_url || inst.brand_logo_url);
+      setLogoUrl(nextLogo);
+      setLogoError(false); // reset so a previously-broken URL retries
+      setInstitutionName(inst.name || inst.brand_name || null);
+    } catch (_) {
+      // Non-fatal — profile card still renders with initials fallback.
+    }
+  }, []);
+  useFocusEffect(useCallback(() => { loadInstitution(); }, [loadInstitution]));
 
   // Real navigation targets for tiles that already have screens built.
   const TILE_ROUTES = {
@@ -182,12 +208,20 @@ export default function MoreTabScreen({ navigation }) {
     });
   };
 
-  const initials = (user?.name || 'Academy')
+  // Prefer the freshly-fetched institution name so a rename via
+  // Academy Profile shows up here instantly. Fall back to whatever
+  // AuthContext has (which was written at login and may be stale).
+  const displayName = institutionName || user?.name || 'Veerify Academy';
+  const initials = (displayName || 'Academy')
     .split(' ')
-    .map(w => w[0])
+    .map((w) => w[0])
+    .filter(Boolean)
     .slice(0, 2)
     .join('')
     .toUpperCase();
+  // Show the logo only when the URL resolved AND the last <Image>
+  // load didn't error. Errors → collapse back to initials.
+  const showLogo = !!logoUrl && !logoError;
 
   return (
     <ScrollView
@@ -215,11 +249,23 @@ export default function MoreTabScreen({ navigation }) {
         activeOpacity={0.9}
       >
         <View style={styles.profileAvatar}>
-          <Text style={styles.profileInitials}>{initials}</Text>
+          {showLogo ? (
+            <Image
+              source={{ uri: logoUrl }}
+              style={styles.profileLogo}
+              resizeMode="cover"
+              // Broken URL / 404 / network error → drop to initials
+              // silently. Kept as component-level state so the same
+              // URL doesn't retry-and-fail every render.
+              onError={() => setLogoError(true)}
+            />
+          ) : (
+            <Text style={styles.profileInitials}>{initials}</Text>
+          )}
         </View>
         <View style={{ flex: 1 }}>
           <Text style={styles.profileName} numberOfLines={1}>
-            {user?.name || 'Veerify Academy'}
+            {displayName}
           </Text>
           <Text style={styles.profileEmail} numberOfLines={1}>
             {user?.email || 'academy@veerify.com'}
@@ -410,6 +456,13 @@ const styles = StyleSheet.create({
     width: 56, height: 56, borderRadius: 28,
     backgroundColor: palette.purple.vivid,
     alignItems: 'center', justifyContent: 'center',
+    // Clip the child <Image> to the circular avatar. Without this
+    // the logo would render as a square inside the round background.
+    overflow: 'hidden',
+  },
+  profileLogo: {
+    width: '100%',
+    height: '100%',
   },
   profileInitials: {
     color: '#fff',

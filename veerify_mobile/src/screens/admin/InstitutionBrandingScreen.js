@@ -25,6 +25,7 @@ import { launchImageLibrary, launchCamera } from 'react-native-image-picker';
 
 import apiClient from '../../api/client';
 import { confirm } from '../../components/ConfirmDialog';
+import { useFocusEffect } from '@react-navigation/native';
 
 const BRAND       = '#E63946';
 const BG          = '#FAFAFC';
