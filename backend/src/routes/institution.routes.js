@@ -38,6 +38,14 @@ router.post('/events/:eventId/pay', verifyToken, institutionController.payForIns
 // full events refetch.
 router.get('/events/:eventId/payment-status', verifyToken, institutionController.getEventPaymentStatus);
 
+// /events/:eventId/payment-success — Razorpay redirects the payer
+// here after successful checkout. PUBLIC (no auth) — the URL carries
+// the event id + user id needed to reconcile. Actively verifies with
+// Razorpay's API, flips the row to paid if confirmed, renders a
+// branded success page. Guarantees the row is never stuck at
+// 'pending' after a genuine paid charge, even if the webhook fails.
+router.get('/events/:eventId/payment-success', institutionController.eventPaymentSuccess);
+
 // Branch → Parent event approval flow.
 //   GET  /me/events/pending — parent admin lists pending branch events.
 //   PATCH /events/:eventId/approve — parent admin approves a branch event.

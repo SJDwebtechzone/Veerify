@@ -1299,6 +1299,19 @@ exports.payForInstitutionEvent = async (req, res) => {
 
     const amountPaise = Math.round(amountRupees * 100);
     const referenceId = `evt_${eventId}_u${userId}_${Date.now()}`;
+
+    // Callback URL — points at the backend reconciliation endpoint
+    // added below (institution.controller.js#eventPaymentSuccess). If
+    // the Razorpay webhook doesn't reach us (misconfigured URL,
+    // signature secret drift, blocked port), the reconciler on the
+    // callback still flips the row to paid by asking Razorpay's own
+    // API whether the link was actually paid. Guarantees the row
+    // never gets stuck in 'pending' after a successful charge.
+    const apiBase =
+      (process.env.API_BASE_URL || process.env.APP_BASE_URL || 'https://veerifyapp.com')
+        .replace(/\/+$/, '');
+    const callbackUrl = `${apiBase}/api/institutions/events/${eventId}/payment-success?user_id=${userId}`;
+
     let link;
     try {
       link = await client.paymentLink.create({
@@ -1320,6 +1333,8 @@ exports.payForInstitutionEvent = async (req, res) => {
           event_id: String(eventId),
           user_id:  String(userId),
         },
+        callback_url:    callbackUrl,
+        callback_method: 'get',
       });
     } catch (err) {
       const desc = err?.error?.description || err.message || 'Razorpay error';
@@ -1398,6 +1413,179 @@ exports.getEventPaymentStatus = async (req, res) => {
   } catch (err) {
     console.error('getEventPaymentStatus error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// GET /api/institutions/events/:eventId/payment-success
+//
+// Razorpay redirects the payer here after successful event-fee
+// checkout. Same "webhook + active reconciliation" contract we use
+// for enrollments — this endpoint:
+//
+//   1. Looks up the payer's most recent event_payments row.
+//   2. If already 'paid' → renders confirmation page (idempotent).
+//   3. Otherwise queries the Razorpay REST API to confirm the link
+//      is genuinely paid. If yes and our DB still says pending →
+//      flips the row to 'paid' + stamps the real payment id.
+//   4. Renders a branded HTML page that ALWAYS works — never a 404.
+//      Auto-refreshes every 3s while still pending so a slow
+//      webhook doesn't leave the payer staring at "processing".
+//
+// Public — no auth. The event_id + user_id in the URL identify
+// exactly which row to reconcile; nothing sensitive is exposed.
+exports.eventPaymentSuccess = async (req, res) => {
+  try {
+    const eventId = parseInt(req.params.eventId, 10);
+    const userId  = parseInt(req.query.user_id, 10);
+    if (!Number.isFinite(eventId) || !Number.isFinite(userId)) {
+      return res.status(400).send('Missing or invalid event_id / user_id.');
+    }
+
+    // Pull the payer's most recent event_payments row + display
+    // context for the confirmation card.
+    const r = await pool.query(
+      `SELECT ep.id, ep.status, ep.razorpay_link_id, ep.razorpay_payment_id,
+              ep.paid_at, ep.amount_paise,
+              e.title AS event_title,
+              i.name  AS institution_name,
+              u.name  AS payer_name, u.email AS payer_email
+         FROM event_payments ep
+         JOIN mobile_events e ON e.id = ep.event_id
+         LEFT JOIN institutions i ON i.id = e.institution_id
+         JOIN users u ON u.id = ep.user_id
+        WHERE ep.event_id = $1 AND ep.user_id = $2
+        ORDER BY ep.created_at DESC
+        LIMIT 1`,
+      [eventId, userId],
+    );
+    if (r.rows.length === 0) {
+      return res.status(404).send('Event payment record not found.');
+    }
+    const row = r.rows[0];
+
+    // ── Active reconciliation ─────────────────────────────────────
+    let reconciled = false;
+    let reconciledError = null;
+    if (row.status !== 'paid' && row.razorpay_link_id) {
+      try {
+        const { fetchPaymentLinkStatus } = require('../utils/razorpay');
+        const info = await fetchPaymentLinkStatus(row.razorpay_link_id);
+        if (info.ok && info.status === 'paid') {
+          const upd = await pool.query(
+            `UPDATE event_payments
+                SET status              = 'paid',
+                    razorpay_payment_id = COALESCE($2, razorpay_payment_id),
+                    paid_at             = NOW()
+              WHERE id = $1
+                AND status <> 'paid'
+              RETURNING id`,
+            [row.id, info.paymentId || null],
+          );
+          reconciled = upd.rowCount > 0;
+          if (reconciled) {
+            console.log(
+              `[eventPaymentSuccess] reconciled event=${eventId} user=${userId} via Razorpay API`,
+            );
+          }
+        } else if (info.ok) {
+          reconciledError = `Razorpay reports status "${info.status}" — the charge hasn't fully cleared yet. Refresh in a few seconds.`;
+        } else {
+          reconciledError = info.error || 'Could not verify payment with Razorpay.';
+        }
+      } catch (e) {
+        reconciledError = e?.message || 'Reconciliation failed';
+        console.error('[eventPaymentSuccess] reconcile error:', e);
+      }
+    }
+
+    // Re-fetch to render the latest state.
+    const finalRow = await pool.query(
+      `SELECT status FROM event_payments WHERE id = $1`,
+      [row.id],
+    );
+    const paid = finalRow.rows[0]?.status === 'paid';
+
+    const esc = (s) => String(s || '').replace(/[<>&"']/g, (c) => (
+      { '<':'&lt;', '>':'&gt;', '&':'&amp;', '"':'&quot;', "'":'&#39;' }[c]
+    ));
+    const title = paid
+      ? 'Registration confirmed'
+      : (reconciledError ? 'Still confirming payment' : 'Payment processing');
+    const sub = paid
+      ? `You're registered for ${esc(row.event_title)}${row.institution_name ? ` at ${esc(row.institution_name)}` : ''}. See you there.`
+      : (reconciledError
+          ? `Your payment succeeded on Razorpay but our server hasn't confirmed it yet. ${esc(reconciledError)} This page will refresh automatically.`
+          : `Your payment is being processed. This page will update automatically once we confirm the charge — usually within 5 seconds.`);
+    const tickColor = paid ? '#10B981' : '#F59E0B';
+    const refreshMeta = paid ? '' : '<meta http-equiv="refresh" content="3">';
+
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    return res.status(200).send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  ${refreshMeta}
+  <title>${esc(title)} — Veerify</title>
+  <style>
+    :root { color-scheme: light; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh;
+      display: flex; align-items: center; justify-content: center;
+      background: linear-gradient(135deg, #F5F3FF 0%, #FDF2F8 100%);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      color: #111827; padding: 24px;
+    }
+    .card {
+      max-width: 460px; width: 100%; background: #fff;
+      border-radius: 20px; padding: 32px 28px;
+      box-shadow: 0 20px 60px rgba(15,23,42,0.08),
+                  0 4px 12px rgba(15,23,42,0.04);
+      text-align: center;
+    }
+    .tick {
+      width: 72px; height: 72px; border-radius: 50%;
+      background: ${tickColor}; margin: 4px auto 20px;
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 10px 30px ${tickColor}55;
+    }
+    .tick svg { width: 40px; height: 40px; stroke: #fff; }
+    h1 { margin: 0 0 8px; font-size: 22px; font-weight: 800; }
+    p  { margin: 0 0 8px; color: #6B7280; line-height: 1.55; font-size: 14px; }
+    .evt {
+      display: inline-block; margin: 14px 0 6px;
+      padding: 8px 14px; border-radius: 999px;
+      background: #F3E8FF; color: #6D28D9; font-weight: 700; font-size: 13px;
+    }
+    .cta {
+      display: inline-block; margin-top: 22px;
+      padding: 12px 22px; border-radius: 12px;
+      background: #6D28D9; color: #fff; font-weight: 700;
+      text-decoration: none; font-size: 14px;
+    }
+    .foot { margin-top: 22px; font-size: 11px; color: #9CA3AF; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="tick">
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="3"
+           stroke-linecap="round" stroke-linejoin="round">
+        ${paid ? '<polyline points="20 6 9 17 4 12"/>' : '<circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 15"/>'}
+      </svg>
+    </div>
+    <h1>${esc(title)}</h1>
+    <div class="evt">${esc(row.event_title)}</div>
+    <p>${sub}</p>
+    <a class="cta" href="veerify://event-registered">Open Veerify</a>
+    <div class="foot">You can safely close this tab.</div>
+  </div>
+</body>
+</html>`);
+  } catch (err) {
+    console.error('eventPaymentSuccess error:', err);
+    return res.status(500).send('Server error. Please try again in a moment.');
   }
 };
 
