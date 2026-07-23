@@ -5,6 +5,7 @@ import {
 } from 'react-native';
 import apiClient from '../../api/client';
 import { colors } from '../../utils/styles';
+import { useInstitution } from '../../context/InstitutionContext';
 
 // Resolve a stored image_url to something the emulator can fetch.
 const ASSET_HOST = (apiClient.defaults.baseURL || '').replace(/\/api\/?$/, '');
@@ -19,6 +20,7 @@ function resolveAssetUrl(src) {
 }
 
 export default function AllInstitutionsScreen({ navigation }) {
+  const { selectInstitution } = useInstitution();
   const [institutions, setInstitutions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -50,7 +52,15 @@ export default function AllInstitutionsScreen({ navigation }) {
   }, [institutions, search]);
 
   const handlePress = (id) => {
-    navigation.navigate('InstitutionDetail', { institutionId: id });
+    // InstitutionDetail screen has been removed — its content now
+    // renders inline on the Home tab. Select the tapped academy so
+    // Home re-hydrates with its banner + details + courses, then
+    // jump back to Home.
+    const picked = institutions.find((i) => i.id === id);
+    if (picked) selectInstitution(picked);
+    try { navigation.navigate('Main'); } catch (_) {
+      try { navigation.getParent()?.navigate('Main'); } catch (__) {}
+    }
   };
 
   if (loading) {

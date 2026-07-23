@@ -1784,13 +1784,29 @@ exports.getEnrollmentsByBatch = async (req, res) => {
       return res.status(403).json({ message: 'Access denied' });
     }
 
-    // Get enrollments
+    // Get enrollments — LEFT JOIN student_profiles so the trainer's
+    // Attendance + cross-branch Students screens have the same
+    // profile fields (belt_category, photo, gender, DOB, etc.) as
+    // the home-branch /trainer/my-students endpoint. Prevents belt
+    // badges reverting to grey / synthetic values when viewing a
+    // sister branch.
     const result = await pool.query(
-      `SELECT e.*, u.name AS student_name, u.email AS student_email, u.phone AS student_phone
-       FROM enrollments e
-       JOIN users u ON e.student_id = u.id
-       WHERE e.batch_id = $1
-       ORDER BY e.enrolled_at`,
+      `SELECT e.*,
+              u.name  AS student_name,
+              u.email AS student_email,
+              u.phone AS student_phone,
+              sp.photo_url        AS student_photo_url,
+              sp.gender           AS student_gender,
+              sp.date_of_birth    AS student_date_of_birth,
+              sp.address          AS student_address,
+              sp.belt_category    AS belt_category,
+              sp.blood_group      AS blood_group,
+              sp.emergency_contact AS emergency_contact
+         FROM enrollments e
+         JOIN users u        ON e.student_id = u.id
+         LEFT JOIN student_profiles sp ON sp.user_id = u.id
+        WHERE e.batch_id = $1
+        ORDER BY e.enrolled_at`,
       [id]
     );
 
@@ -1819,6 +1835,163 @@ exports.getEnrollmentsByBatch = async (req, res) => {
 //   • De-duplication is left to the client (one student may be in two
 //     of the trainer's batches). We return one row PER enrollment so
 //     "which batch" info is preserved.
+// GET /api/enrollments/trainer/student/:studentId
+//
+// Fresh, full-detail view of a single student for the trainer detail
+// screen. Contract:
+//   • The trainer MUST teach at least one batch this student is
+//     enrolled in — otherwise 403. Prevents a stale route param from
+//     leaking another trainer's roster.
+//   • Returns EVERY enrolment the trainer's batches share with the
+//     student (so a student in two of the trainer's batches shows
+//     both). Each row carries course, batch, institution/branch,
+//     schedule, payment status.
+//   • Includes the merged student_profiles fields (address, gender,
+//     DOB, blood_group, belt_category, health_notes, contact_number,
+//     photo_url) so the detail screen doesn't rely on stale route
+//     params for personal info.
+//   • Attendance summary (present / absent / late / leave counts +
+//     percentage) computed across every batch the trainer teaches
+//     that this student is enrolled in.
+exports.getStudentDetailForTrainer = async (req, res) => {
+  try {
+    const userId    = req.user.id;
+    const studentId = parseInt(req.params.studentId, 10);
+    if (!Number.isFinite(studentId)) {
+      return res.status(400).json({ message: 'Invalid student id' });
+    }
+
+    const trainerRow = await pool.query(
+      `SELECT id FROM trainers WHERE user_id = $1`,
+      [userId],
+    );
+    if (trainerRow.rows.length === 0) {
+      return res.status(403).json({ message: 'Not linked to a trainer profile' });
+    }
+    const trainerId = trainerRow.rows[0].id;
+
+    // Access check — trainer must teach at least one batch this
+    // student is enrolled in. Combined with the WHERE below on the
+    // main query this guarantees we never leak another trainer's
+    // roster via a guessed studentId in the URL.
+    const accessRes = await pool.query(
+      `SELECT 1
+         FROM enrollments e
+         JOIN batches b ON b.id = e.batch_id
+        WHERE e.student_id = $1 AND b.trainer_id = $2
+        LIMIT 1`,
+      [studentId, trainerId],
+    );
+    if (accessRes.rows.length === 0) {
+      return res.status(403).json({ message: 'This student is not in your roster' });
+    }
+
+    // Merged profile + every relevant enrolment. LEFT JOIN
+    // student_profiles because it's optional.
+    const profileRes = await pool.query(
+      `SELECT u.id            AS student_id,
+              u.name          AS student_name,
+              u.email         AS student_email,
+              u.phone         AS student_phone,
+              u.institution_id AS user_institution_id,
+              sp.full_name    AS profile_full_name,
+              sp.gender,
+              sp.date_of_birth,
+              sp.father_name,
+              sp.mother_name,
+              sp.contact_number,
+              sp.address,
+              sp.occupation,
+              sp.height_cm,
+              sp.weight_kg,
+              sp.disabilities AS health_notes,
+              sp.blood_group,
+              sp.belt_category,
+              sp.photo_url,
+              sp.emergency_contact
+         FROM users u
+         LEFT JOIN student_profiles sp ON sp.user_id = u.id
+        WHERE u.id = $1
+          AND COALESCE(u.is_deleted, false) = false`,
+      [studentId],
+    );
+    if (profileRes.rows.length === 0) {
+      return res.status(404).json({ message: 'Student not found' });
+    }
+    const profile = profileRes.rows[0];
+
+    const enrolsRes = await pool.query(
+      `SELECT e.id                       AS enrollment_id,
+              e.enrolled_at,
+              e.payment_status,
+              e.payment_amount,
+              e.payment_mode,
+              e.paid_at,
+              e.payment_reference,
+              c.id                       AS course_id,
+              c.name                     AS course_name,
+              c.category                 AS course_category,
+              c.duration_months          AS course_duration_months,
+              c.billing_cycle            AS course_billing_cycle,
+              c.price                    AS course_price,
+              b.id                       AS batch_id,
+              b.name                     AS batch_name,
+              b.days_of_week,
+              b.start_time,
+              b.end_time,
+              b.mode                     AS batch_mode,
+              b.branch_id                AS batch_branch_id,
+              COALESCE(bi.name, i.name)  AS institution_name,
+              (bi.parent_institution_id IS NOT NULL) AS is_sub_branch_batch
+         FROM enrollments e
+         JOIN batches b       ON b.id = e.batch_id
+         JOIN courses c       ON c.id = b.course_id
+         JOIN institutions i  ON i.id = e.institution_id
+         LEFT JOIN institutions bi ON bi.id = b.branch_id
+        WHERE e.student_id = $1
+          AND b.trainer_id = $2
+        ORDER BY e.enrolled_at DESC`,
+      [studentId, trainerId],
+    );
+
+    // Attendance across every relevant batch. Percentage uses the
+    // same formula the admin dashboard uses: present / (present +
+    // absent + late) * 100 — leave is excluded from the denominator.
+    const attRes = await pool.query(
+      `SELECT status, COUNT(*)::int AS n
+         FROM attendance a
+         JOIN batches b ON b.id = a.batch_id
+        WHERE a.student_id = $1 AND b.trainer_id = $2
+        GROUP BY status`,
+      [studentId, trainerId],
+    );
+    const counts = { present: 0, absent: 0, late: 0, leave: 0 };
+    attRes.rows.forEach((r) => {
+      if (counts[r.status] != null) counts[r.status] = Number(r.n) || 0;
+    });
+    const denom = counts.present + counts.absent + counts.late;
+    const attendancePct = denom > 0 ? Math.round((counts.present / denom) * 100) : null;
+
+    return res.json({
+      student: {
+        ...profile,
+        // Prefer the profile.full_name when set; fall back to users.name.
+        display_name: profile.profile_full_name || profile.student_name,
+      },
+      enrollments: enrolsRes.rows,
+      attendance: {
+        ...counts,
+        total_marked: counts.present + counts.absent + counts.late + counts.leave,
+        percentage:   attendancePct,
+      },
+      fetched_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('getStudentDetailForTrainer error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
 exports.getStudentsForMyTrainerBatches = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -1859,6 +2032,8 @@ exports.getStudentsForMyTrainerBatches = async (req, res) => {
          sp.gender                  AS student_gender,
          sp.date_of_birth           AS student_date_of_birth,
          sp.address                 AS student_address,
+         sp.belt_category           AS belt_category,
+         sp.blood_group             AS blood_group,
 
          c.id                       AS course_id,
          c.name                     AS course_name,

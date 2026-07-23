@@ -21,7 +21,7 @@
 // Status codes match the (newly widened) attendance.status CHECK constraint:
 // 'present' | 'absent' | 'late' | 'leave'.
 
-import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, TextInput, Alert,
   ActivityIndicator, StyleSheet, FlatList,
@@ -33,6 +33,8 @@ import {
 
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
+import { confirm } from '../../components/ConfirmDialog';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 // ── Status config ─────────────────────────────────────────────────────────
 // Single source of truth — order here drives both the live-counter strip and
@@ -188,14 +190,63 @@ export default function StaffAttendanceScreen({ navigation, route }) {
       list.forEach((s) => { next[s.student_id] = 'present'; });
       existing.forEach((rec) => { next[rec.student_id] = rec.status; });
       setAttendance(next);
+      // Reset dirty / submitted state whenever the working set
+      // changes (batch or date switched, or edit-flow re-hydrated).
+      // Rows that came back from the server are considered "already
+      // saved" — an unedited screen isn't a pending submission.
+      setDirty(false);
+      setSubmitted(existing.length > 0);
+      // Snapshot the current state so the beforeRemove guard can
+      // deep-compare and let the user leave silently if they haven't
+      // actually touched anything since load.
+      baselineRef.current = next;
     } finally {
       setLoadingStudents(false);
     }
   }, []);
   useEffect(() => { loadStudents(selectedBatchId, date); }, [selectedBatchId, date, loadStudents]);
 
+  // ── Dirty tracking ───────────────────────────────────────────────
+  //   • dirty      → true once the trainer has changed any pill from
+  //                  the loaded baseline. Enables the Save button and
+  //                  arms the beforeRemove guard.
+  //   • submitted  → true after a successful save. Reset when the
+  //                  batch or date changes so a fresh session starts
+  //                  clean. Blocks duplicate submissions.
+  //   • baselineRef → snapshot of the initial attendance map for the
+  //                  current (batch, date). We compare against this
+  //                  on every tap rather than dead-reckoning from a
+  //                  separate flag, so undoing a change back to the
+  //                  original clears the dirty state cleanly.
+  const [dirty, setDirty] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+
+  // Compute where the save bar sits vertically. The trainer's bottom
+  // tab bar is a FLOATING pill: `position:'absolute'`, 64pt tall,
+  // inset from the screen edges with `bottom = Math.max(insets.bottom, 8)`
+  // (see StaffTabNavigator.styles.tabBar). The save bar has to clear
+  // that pill entirely — otherwise it's rendered UNDER the floating
+  // strip and looks invisible. Total clearance:
+  //   safe-area bottom inset + 64 (tab height) + 8 (breathing room)
+  const insets = useSafeAreaInsets();
+  const saveBarBottom = Math.max(insets.bottom, 8) + 64 + 8;
+  const baselineRef = useRef({});
+
   const setStatus = (studentId, status) => {
-    setAttendance((prev) => ({ ...prev, [studentId]: status }));
+    setAttendance((prev) => {
+      const next = { ...prev, [studentId]: status };
+      // Recompute dirty by comparing every key to the baseline. Cheap
+      // — the map only holds one enum value per student, worst case
+      // ~40 comparisons per tap.
+      const base = baselineRef.current || {};
+      const changed = Object.keys(next).some((k) => next[k] !== base[k]);
+      setDirty(changed);
+      // Touching any pill after a submitted save moves the row back
+      // into "unsaved edits" territory. We reset `submitted` so the
+      // beforeRemove guard fires again if the trainer walks away.
+      if (changed && submitted) setSubmitted(false);
+      return next;
+    });
   };
   const markAllPresent = () => {
     const next = {};
@@ -224,9 +275,20 @@ export default function StaffAttendanceScreen({ navigation, route }) {
 
   const submit = async () => {
     if (!selectedBatchId) {
-      Alert.alert('Pick a batch first.');
+      confirm({
+        title:       'Pick a batch first',
+        message:     'Choose a batch from the row above before marking attendance.',
+        variant:     'warning',
+        confirmText: 'Got it',
+        hideCancel:  true,
+      });
       return;
     }
+    // Duplicate-submit guards. `saving` is the network-in-flight flag;
+    // `submitted` is the "already saved on this batch/date" flag —
+    // together they short-circuit a second tap on the same button
+    // and a re-render that momentarily re-enables the button.
+    if (saving || submitted) return;
     setSaving(true);
     try {
       const records = Object.entries(attendance).map(([studentId, status]) => ({
@@ -238,28 +300,85 @@ export default function StaffAttendanceScreen({ navigation, route }) {
         date: isoDate(date),
         records,
       });
-      Alert.alert(
-        'Attendance saved',
-        `${records.length} students marked for ${fmtDate(date)}.`,
-        [{ text: 'OK', onPress: () => navigation.goBack() }],
-      );
+      // Flip both flags BEFORE the success dialog so if the trainer
+      // taps quickly the button stays disabled.
+      setSubmitted(true);
+      setDirty(false);
+      baselineRef.current = { ...attendance };
+
+      // Branded success card + a "View history" shortcut so the
+      // trainer can immediately confirm the write landed.
+      confirm({
+        title:       'Attendance saved',
+        message:
+          `${records.length} students marked for ${fmtDate(date)}. ` +
+          `Records are available in Attendance History.`,
+        variant:     'success',
+        confirmText: 'View history',
+        cancelText:  'Done',
+        onConfirm: () => {
+          try {
+            navigation.replace('StaffAttendanceHistory');
+          } catch (_) {
+            try { navigation.navigate('StaffAttendanceHistory'); } catch (__) {}
+          }
+        },
+        onCancel:  () => { try { navigation.goBack(); } catch (_) {} },
+      });
     } catch (err) {
       // Surface the schedule guard's specific error code with a clear
       // hint so the trainer knows to switch dates instead of thinking
       // the network is broken.
       const code = err.response?.data?.code;
       if (code === 'NOT_A_CLASS_DAY') {
-        Alert.alert(
-          'Not a scheduled class day',
-          `${fmtDate(date)} isn't in this batch's schedule (${selectedBatchForStrip?.days_of_week || 'not set'}). Pick a scheduled day and try again.`,
-        );
+        confirm({
+          title:       'Not a scheduled class day',
+          message:     `${fmtDate(date)} isn't in this batch's schedule (${selectedBatchForStrip?.days_of_week || 'not set'}). Pick a scheduled day and try again.`,
+          variant:     'warning',
+          confirmText: 'OK',
+          hideCancel:  true,
+        });
       } else {
-        Alert.alert('Could not save', err.response?.data?.message || err.message || 'Try again.');
+        confirm({
+          title:       'Could not save',
+          message:     err.response?.data?.message || err.message || 'Try again.',
+          variant:     'destructive',
+          confirmText: 'OK',
+          hideCancel:  true,
+        });
       }
     } finally {
       setSaving(false);
     }
   };
+
+  // ── Before-leave guard ───────────────────────────────────────────
+  // Refuses to let the trainer walk away with unsaved changes. Only
+  // arms when `dirty` is true AND the trainer hasn't just successfully
+  // submitted — so a clean landing (or a fresh submit) never blocks
+  // the back arrow. Uses navigation.addListener('beforeRemove') so it
+  // catches header back, hardware back, and swipe-back all at once.
+  useEffect(() => {
+    const beforeRemove = (e) => {
+      if (!dirty || submitted) return;
+      e.preventDefault();
+      confirm({
+        title:       'Discard unsaved attendance?',
+        message:     'You marked attendance but haven\'t saved yet. Leaving now will lose your changes.',
+        variant:     'warning',
+        confirmText: 'Discard',
+        cancelText:  'Keep editing',
+        onConfirm: () => {
+          // Flip submitted so the re-dispatched action isn't blocked
+          // by this same listener recursively.
+          setSubmitted(true);
+          navigation.dispatch(e.data.action);
+        },
+      });
+    };
+    const unsub = navigation.addListener('beforeRemove', beforeRemove);
+    return unsub;
+  }, [navigation, dirty, submitted]);
 
   // ── Render ──
   return (
@@ -288,8 +407,13 @@ export default function StaffAttendanceScreen({ navigation, route }) {
       </View>
 
       <ScrollView
+        style={{ flex: 1 }}
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: 140 }}
+        // Padding needs to clear BOTH the floating save bar (~68pt)
+        // AND the floating tab pill below it (see saveBarBottom
+        // calc above) so the last student row isn't hidden under
+        // either.
+        contentContainerStyle={{ paddingBottom: saveBarBottom + 80 }}
       >
         {/* Batch chips */}
         <View style={styles.sectionLabel}>
@@ -443,27 +567,51 @@ export default function StaffAttendanceScreen({ navigation, route }) {
         )}
       </ScrollView>
 
-      {/* Sticky save bar */}
-      {students.length > 0 && (
-        <View style={styles.saveBar}>
-          <View>
-            <Text style={styles.saveBarLabel}>{fmtDate(date)}</Text>
-            <Text style={styles.saveBarCount}>{Object.keys(attendance).length} students marked</Text>
-          </View>
-          <TouchableOpacity
-            style={[styles.saveBtn, saving && { opacity: 0.6 }]}
-            onPress={submit}
-            disabled={saving}
-            activeOpacity={0.9}
-          >
-            {saving ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <Text style={styles.saveBtnText}>Save attendance</Text>
-            )}
-          </TouchableOpacity>
+      {/* Sticky save bar — ALWAYS rendered so the button is visible
+          even before a batch is picked. Only the button label /
+          background changes with state. The disabled state uses a
+          solid grey background (not 50% opacity) so the button is
+          unmistakably present even when it can't be tapped.
+          Button state contract:
+            • disabled while the network write is in flight (saving)
+            • disabled after a successful save (submitted) — prevents
+              duplicate submissions on double-taps or re-renders
+            • disabled when nothing has been changed since load
+              (dirty === false) — spec: "becomes enabled after
+              attendance is marked for the batch"
+            • disabled when there are no students to mark */}
+      <View style={[styles.saveBar, { bottom: saveBarBottom }]}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.saveBarLabel} numberOfLines={1}>{fmtDate(date)}</Text>
+          <Text style={styles.saveBarCount} numberOfLines={1}>
+            {students.length === 0
+              ? 'No students to mark'
+              : `${Object.keys(attendance).length} students${
+                  dirty ? ' · unsaved changes' : (submitted ? ' · saved ✓' : '')
+                }`}
+          </Text>
         </View>
-      )}
+        <TouchableOpacity
+          style={[
+            styles.saveBtn,
+            // Grey (not 50% opacity) when the button can't be tapped
+            // — makes "disabled" visually obvious instead of "missing".
+            (saving || submitted || !dirty || students.length === 0) && styles.saveBtnDisabled,
+            submitted && styles.saveBtnDone,
+          ]}
+          onPress={submit}
+          disabled={saving || submitted || !dirty || students.length === 0}
+          activeOpacity={0.9}
+        >
+          {saving ? (
+            <ActivityIndicator color="#fff" />
+          ) : submitted ? (
+            <Text style={styles.saveBtnText}>Saved ✓</Text>
+          ) : (
+            <Text style={styles.saveBtnText}>Submit attendance</Text>
+          )}
+        </TouchableOpacity>
+      </View>
     </View>
   );
 }
@@ -697,16 +845,22 @@ const styles = StyleSheet.create({
   emptyTitle: { ...type.bodyBold, color: palette.text, marginTop: 4 },
   emptySub: { ...type.caption, color: palette.textMuted, textAlign: 'center' },
 
-  // Save bar
+  // Save bar — absolute positioned so it floats above the tab pill
+  // instead of being pushed off the screen. The `bottom` offset is
+  // set at render time to (safe-area + tab-height + breathing room)
+  // so the bar clears the trainer's floating tab bar cleanly.
   saveBar: {
     position: 'absolute',
-    left: 0, right: 0, bottom: 0,
+    left: spacing.lg,
+    right: spacing.lg,
+    // bottom is set inline via saveBarBottom
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    gap: spacing.md,
     backgroundColor: palette.surface,
-    paddingHorizontal: spacing.xl,
-    paddingTop: spacing.md,
-    paddingBottom: spacing.xl,
-    borderTopWidth: 1, borderTopColor: palette.borderSoft,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    borderRadius: radius.lg,
+    borderWidth: 1, borderColor: palette.borderSoft,
     ...shadows.raised,
   },
   saveBarLabel: { ...type.bodyBold, color: palette.text },
@@ -716,6 +870,18 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.xl,
     paddingVertical: spacing.md,
     borderRadius: radius.lg,
+    minWidth: 160,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  // Disabled state — solid grey, not translucent. Makes "you can't
+  // tap this yet" visually obvious instead of looking absent.
+  saveBtnDisabled: {
+    backgroundColor: palette.borderSoft,
+  },
+  // Post-save state — green fill so the trainer sees success at a
+  // glance in the sticky bar as well as the dialog.
+  saveBtnDone: {
+    backgroundColor: palette.green.vivid,
   },
   saveBtnText: { ...type.bodyBold, color: '#fff', fontWeight: '700' },
 });

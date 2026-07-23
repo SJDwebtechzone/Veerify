@@ -34,13 +34,92 @@ const PLACEHOLDER_KEYS = [
   'certificate_no', 'issue_date', 'completion_date',
   'instructor_name', 'institution_name', 'branch_name',
   'venue', 'duration',
-  'qr_code', 'verification_url',
+  'verification_url',
   'seal', 'digital_signature',
 ];
 
 // Placeholders whose rendered form is an image (backed by the
 // template's signature_url / seal_url).
 const IMAGE_KEYS = new Set(['digital_signature', 'seal']);
+
+// Canonical belt-rank order used to gate certificate dispatch by the
+// template's [from_belt, to_belt] range. Must stay in sync with the
+// mobile pickers (EditStudentScreen / EnrollmentFormScreen /
+// CertificateTemplateEditorScreen). "New student" sits before White
+// so pre-enrolment rows can still be filtered.
+const BELT_ORDER = [
+  'New student',
+  'White',
+  'Yellow',
+  'Orange',
+  'Green',
+  'Blue I',
+  'Blue II',
+  'Gray',
+  'Brown I',
+  'Brown II',
+  'Brown III',
+  'Black',
+];
+const BELT_INDEX = new Map(BELT_ORDER.map((b, i) => [b.toLowerCase(), i]));
+
+// Normalise a raw belt label ("Grey Belt", "blue-i", "BLACK") down to
+// its canonical form for the order lookup. Anything unknown returns
+// -1 so the range check falls through to a soft-fail (never dispatch
+// a certificate against an unrecognised belt when the gate is on).
+function beltRankIndex(raw) {
+  if (!raw) return -1;
+  let s = String(raw).trim().toLowerCase();
+  // Strip trailing "belt" so "White Belt" and "White" collide.
+  s = s.replace(/\s+belt$/i, '').trim();
+  // British / American spelling — treat grey as gray.
+  if (s === 'grey') s = 'gray';
+  if (BELT_INDEX.has(s)) return BELT_INDEX.get(s);
+  // Roman numeral quirks — the mobile stores "Blue I" but some older
+  // rows use "Blue 1". Normalise digits to numerals.
+  s = s.replace(/\b1\b/g, 'i').replace(/\b2\b/g, 'ii').replace(/\b3\b/g, 'iii');
+  if (BELT_INDEX.has(s)) return BELT_INDEX.get(s);
+  return -1;
+}
+
+// Exported so the course-completion controller can enforce the same
+// belt-range gate at dispatch time.
+exports.beltRankIndex = beltRankIndex;
+exports.BELT_ORDER = BELT_ORDER;
+
+// Given a template row and a candidate belt label, decide whether the
+// certificate should be dispatched. When belt_range_active is FALSE we
+// return { ok: true } — the gate is off. When it's TRUE we require
+// both bounds to resolve AND the candidate to sit inside the closed
+// interval. Missing bounds fail-closed with a clear message so the
+// admin knows what to fix.
+exports.checkBeltRange = function checkBeltRange(template, candidateBelt) {
+  if (!template) return { ok: true };
+  if (!template.belt_range_active) return { ok: true };
+  const from = beltRankIndex(template.from_belt);
+  const to   = beltRankIndex(template.to_belt);
+  if (from < 0 || to < 0) {
+    return {
+      ok: false,
+      message: 'This template has an active belt range but From / To are not set. Open the template and pick both belts, or turn the range Off.',
+    };
+  }
+  const [lo, hi] = from <= to ? [from, to] : [to, from];
+  const idx = beltRankIndex(candidateBelt);
+  if (idx < 0) {
+    return {
+      ok: false,
+      message: `Student's belt ("${candidateBelt || '—'}") is not on the standard list, so it can't be checked against the template's belt range. Turn the range Off on this template or update the student's belt.`,
+    };
+  }
+  if (idx < lo || idx > hi) {
+    return {
+      ok: false,
+      message: `Student's belt (${candidateBelt}) is outside this template's active range (${template.from_belt} → ${template.to_belt}). Pick another template or widen / disable the range.`,
+    };
+  }
+  return { ok: true };
+};
 
 async function getMyInstitutionId(userId) {
   const r = await pool.query(
@@ -137,8 +216,10 @@ exports.create = async (req, res) => {
            (institution_id, name, background_url, background_kind,
             canvas_width, canvas_height, placeholders,
             signature_url, seal_url,
+            from_belt, to_belt, belt_range_active,
             is_default, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9,
+                 $10, $11, $12, $13, $14)
          RETURNING *`,
         [
           institutionId,
@@ -152,6 +233,12 @@ exports.create = async (req, res) => {
           // to NULL so the frontend can send '' to clear them.
           b.signature_url ? String(b.signature_url).slice(0, 500) : null,
           b.seal_url      ? String(b.seal_url).slice(0, 500)      : null,
+          // Belt-range gate — persisted so we can enforce it at
+          // dispatch time. Defaults keep the gate off so a fresh
+          // template accepts any belt.
+          b.from_belt ? String(b.from_belt).slice(0, 40) : null,
+          b.to_belt   ? String(b.to_belt).slice(0, 40)   : null,
+          !!b.belt_range_active,
           wantDefault,
           req.user.id,
         ],
@@ -199,17 +286,30 @@ exports.update = async (req, res) => {
     const sigValue     = sigProvided  ? (b.signature_url ? String(b.signature_url).slice(0, 500) : null) : undefined;
     const sealValue    = sealProvided ? (b.seal_url      ? String(b.seal_url).slice(0, 500)      : null) : undefined;
 
+    // Belt-range fields — same tri-state pattern as signature/seal so
+    // the frontend can send '' to clear a bound and undefined to leave
+    // it untouched. The boolean flag flips independently.
+    const fromProvided  = Object.prototype.hasOwnProperty.call(b, 'from_belt');
+    const toProvided    = Object.prototype.hasOwnProperty.call(b, 'to_belt');
+    const activeProvided = Object.prototype.hasOwnProperty.call(b, 'belt_range_active');
+    const fromValue     = fromProvided ? (b.from_belt ? String(b.from_belt).slice(0, 40) : null) : undefined;
+    const toValue       = toProvided   ? (b.to_belt   ? String(b.to_belt).slice(0, 40)   : null) : undefined;
+    const activeValue   = activeProvided ? !!b.belt_range_active : null;
+
     const r = await pool.query(
       `UPDATE certificate_templates SET
-         name             = COALESCE($2, name),
-         background_url   = COALESCE(NULLIF($3, ''), background_url),
-         background_kind  = COALESCE($4, background_kind),
-         canvas_width     = COALESCE($5, canvas_width),
-         canvas_height    = COALESCE($6, canvas_height),
-         placeholders     = COALESCE($7::jsonb, placeholders),
-         signature_url    = CASE WHEN $9::boolean THEN $8 ELSE signature_url END,
-         seal_url         = CASE WHEN $11::boolean THEN $10 ELSE seal_url    END,
-         updated_at       = NOW()
+         name              = COALESCE($2, name),
+         background_url    = COALESCE(NULLIF($3, ''), background_url),
+         background_kind   = COALESCE($4, background_kind),
+         canvas_width      = COALESCE($5, canvas_width),
+         canvas_height     = COALESCE($6, canvas_height),
+         placeholders      = COALESCE($7::jsonb, placeholders),
+         signature_url     = CASE WHEN $9::boolean  THEN $8  ELSE signature_url     END,
+         seal_url          = CASE WHEN $11::boolean THEN $10 ELSE seal_url          END,
+         from_belt         = CASE WHEN $13::boolean THEN $12 ELSE from_belt         END,
+         to_belt           = CASE WHEN $15::boolean THEN $14 ELSE to_belt           END,
+         belt_range_active = CASE WHEN $17::boolean THEN $16 ELSE belt_range_active END,
+         updated_at        = NOW()
        WHERE id = $1
        RETURNING *`,
       [
@@ -224,6 +324,9 @@ exports.update = async (req, res) => {
           ? JSON.stringify(sanitisePlaceholders(b.placeholders)) : null,
         sigValue  ?? null, sigProvided,
         sealValue ?? null, sealProvided,
+        fromValue ?? null, fromProvided,
+        toValue   ?? null, toProvided,
+        activeValue, activeProvided,
       ],
     );
     res.json({ template: r.rows[0] });
@@ -323,6 +426,10 @@ exports.prepare = async (req, res) => {
 
     const completionId = parseInt(req.body?.completion_id, 10);
     let data = null;
+    // Pull the student's current belt for the belt-range gate below.
+    // Preview flows (no completion_id) skip the gate — the admin is
+    // just eyeballing the layout.
+    let candidateBelt = null;
     if (Number.isInteger(completionId)) {
       // Extended query — pulls the branch name (from institutions.name
       // when a batch pinned the enrolment to a sub-branch), course
@@ -333,6 +440,7 @@ exports.prepare = async (req, res) => {
            cc.id, cc.certificate_sent_at, cc.course_completed_at,
            cc.belt_test_completed_at, cc.test_remarks,
            u.name  AS student_name,
+           sp.belt_category AS student_belt,
            c.name  AS course_name,
            c.duration_months     AS course_duration_months,
            i.name  AS institution_name,
@@ -341,6 +449,7 @@ exports.prepare = async (req, res) => {
            trainer.name AS trainer_name
          FROM course_completions cc
          JOIN users u    ON u.id = cc.student_id
+         LEFT JOIN student_profiles sp ON sp.user_id = cc.student_id
          JOIN courses c  ON c.id = cc.course_id
          LEFT JOIN institutions i ON i.id = cc.institution_id
          LEFT JOIN batches       b ON b.id = cc.batch_id
@@ -350,6 +459,18 @@ exports.prepare = async (req, res) => {
         [completionId],
       );
       data = dRes.rows[0] || null;
+      candidateBelt = req.body?.belt_name || data?.student_belt || null;
+
+      // Belt-range gate — reject preview when the student's belt sits
+      // outside the template's active range. The admin sees the
+      // message immediately and can pick a different template.
+      const gate = exports.checkBeltRange(template, candidateBelt);
+      if (!gate.ok) {
+        return res.status(422).json({
+          message: gate.message,
+          code: 'BELT_RANGE_BLOCKED',
+        });
+      }
     }
 
     // Public verify page — the QR / verification_url placeholders point
@@ -374,7 +495,7 @@ exports.prepare = async (req, res) => {
     const sample = {
       student_name:     data?.student_name     || 'Sample Student',
       course_name:      data?.course_name      || 'Sample Course',
-      belt_name:        req.body?.belt_name     || 'White Belt',
+      belt_name:        candidateBelt          || req.body?.belt_name || 'White Belt',
       certificate_no:   generateCertificateNo(institutionId),
       issue_date:       formatDate(new Date()),                    // NEW — today
       completion_date:  formatDate(data?.belt_test_completed_at || data?.course_completed_at),
@@ -383,8 +504,7 @@ exports.prepare = async (req, res) => {
       branch_name:      data?.branch_name      || '',              // NEW — sub-branch
       venue:            data?.institution_city  || 'Chennai',
       duration:         durationLabel,                             // NEW — course duration
-      qr_code:          verifyUrl,   // mobile renders a QR from this URL
-      verification_url: verifyUrl,   // NEW — printed as text alongside the QR
+      verification_url: verifyUrl,   // printed as text on the certificate
       digital_signature:'',           // image-driven; renderer looks at template.signature_url
       seal:             '',           // image-driven; renderer looks at template.seal_url
     };

@@ -498,6 +498,208 @@ async function sendApprovalEmail({
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Free Trial Subscription Flow — two dedicated templates.
+// ─────────────────────────────────────────────────────────────────────
+// 1. sendTrialWelcomeEmail — sent immediately on approval when the
+//    plan includes a free trial. No payment link included per spec;
+//    the reminder email 3 days before expiry carries the link.
+// 2. sendTrialEndingSoonEmail — sent by the hourly scheduler once,
+//    3 days before trial_ends_at. Contains the Razorpay payment link.
+// ─────────────────────────────────────────────────────────────────────
+
+function fmtLongDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-IN', {
+    day: '2-digit', month: 'long', year: 'numeric',
+  });
+}
+
+function trialWelcomeEmailHtml({
+  ownerName, institutionName, planName,
+  trialDays, trialStartsAt, trialEndsAt,
+}) {
+  return `
+  <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+              max-width:560px;margin:0 auto;padding:24px;color:#0f172a;background:#f8fafc;">
+    <div style="background:#fff;border-radius:14px;padding:32px;border:1px solid #e2e8f0;">
+      <div style="display:inline-block;background:#16a34a;color:#fff;font-weight:600;
+                  font-size:12px;padding:6px 12px;border-radius:999px;letter-spacing:.5px;">
+        FREE TRIAL STARTED
+      </div>
+      <h1 style="font-size:22px;margin:18px 0 8px;">Hi ${ownerName || 'there'},</h1>
+      <p style="font-size:15px;line-height:1.6;color:#334155;margin:0 0 16px;">
+        Thank you for choosing Veerify for <b>${institutionName}</b>. Your
+        <b>${trialDays}-day free trial</b> on the ${planName || 'Subscription'} plan
+        has started.
+      </p>
+
+      <div style="background:#ecfdf5;border:1px solid #a7f3d0;border-radius:10px;
+                  padding:18px;margin:22px 0;">
+        <div style="font-size:12px;color:#065f46;text-transform:uppercase;letter-spacing:.6px;">
+          Trial window
+        </div>
+        <table style="width:100%;margin-top:10px;font-size:14px;color:#065f46;line-height:1.6;">
+          <tr>
+            <td style="padding:4px 0;">Trial start</td>
+            <td style="padding:4px 0;text-align:right;font-weight:700;">${fmtLongDate(trialStartsAt)}</td>
+          </tr>
+          <tr>
+            <td style="padding:4px 0;">Trial ends</td>
+            <td style="padding:4px 0;text-align:right;font-weight:700;">${fmtLongDate(trialEndsAt)}</td>
+          </tr>
+          <tr>
+            <td style="padding:4px 0;">Duration</td>
+            <td style="padding:4px 0;text-align:right;font-weight:700;">${trialDays} day${trialDays === 1 ? '' : 's'}</td>
+          </tr>
+        </table>
+      </div>
+
+      <p style="font-size:15px;line-height:1.7;color:#334155;margin:0 0 12px;">
+        You now have full access to every Veerify feature — enrol students,
+        create batches, run attendance, publish events, issue certificates,
+        and more. <b>Please explore all features during your trial</b> to see
+        how Veerify fits your academy.
+      </p>
+
+      <div style="background:#f1f5f9;border-radius:10px;padding:16px;margin:20px 0;">
+        <div style="font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;">
+          What happens at the end of your trial
+        </div>
+        <div style="font-size:14px;color:#334155;margin-top:6px;line-height:1.6;">
+          Three days before your trial ends we'll email you a payment link
+          so you can continue on your chosen plan without interruption.
+          No action is needed from you today.
+        </div>
+      </div>
+
+      <p style="font-size:12px;color:#94a3b8;margin:24px 0 0;">
+        Questions? Reply to this email or write to
+        <a href="mailto:${SUPPORT_EMAIL}" style="color:#64748b;">${SUPPORT_EMAIL}</a>.
+      </p>
+    </div>
+    <p style="font-size:11px;color:#94a3b8;text-align:center;margin-top:16px;">
+      Veerify — the command center for martial arts academies.
+    </p>
+  </div>`;
+}
+
+async function sendTrialWelcomeEmail({
+  to, ownerName, institutionName, planName,
+  trialDays, trialStartsAt, trialEndsAt,
+}) {
+  const t = getTransporter();
+  if (!t) return { ok: false, error: 'SMTP not configured' };
+  try {
+    const subject = 'Welcome to Veerify – Your Free Trial Has Started';
+    const html = trialWelcomeEmailHtml({
+      ownerName, institutionName, planName,
+      trialDays, trialStartsAt, trialEndsAt,
+    });
+    const info = await t.sendMail({
+      from: `"${FROM_NAME}" <${SMTP_USER}>`,
+      to,
+      subject,
+      replyTo: SUPPORT_EMAIL,
+      html,
+      text: toPlainText(html),
+      headers: transactionalHeaders(),
+    });
+    return { ok: true, messageId: info.messageId };
+  } catch (err) {
+    console.error('[mailer] sendTrialWelcomeEmail failed:', err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
+function trialEndingSoonEmailHtml({
+  ownerName, institutionName, planName, trialEndsAt,
+  daysLeft, paymentUrl, pickerUrl, pricingTerms,
+}) {
+  return `
+  <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+              max-width:560px;margin:0 auto;padding:24px;color:#0f172a;background:#f8fafc;">
+    <div style="background:#fff;border-radius:14px;padding:32px;border:1px solid #e2e8f0;">
+      <div style="display:inline-block;background:#F59E0B;color:#fff;font-weight:600;
+                  font-size:12px;padding:6px 12px;border-radius:999px;letter-spacing:.5px;">
+        TRIAL ENDING SOON
+      </div>
+      <h1 style="font-size:22px;margin:18px 0 8px;">Hi ${ownerName || 'there'},</h1>
+      <p style="font-size:15px;line-height:1.6;color:#334155;margin:0 0 16px;">
+        Your Veerify free trial for <b>${institutionName}</b> ends on
+        <b>${fmtLongDate(trialEndsAt)}</b>${daysLeft != null ? ` — that's about <b>${daysLeft} day${daysLeft === 1 ? '' : 's'} from today</b>` : ''}.
+        Complete payment now to keep your ${planName || 'Subscription'} plan
+        active without interruption.
+      </p>
+
+      <p style="text-align:center;margin:24px 0;">
+        <a href="${pickerUrl || paymentUrl}"
+           style="display:inline-block;background:#E63946;color:#fff;
+                  padding:14px 26px;border-radius:10px;font-weight:700;
+                  font-size:15px;text-decoration:none;">
+          Pay Now to Continue
+        </a>
+      </p>
+
+      ${renderPricingTermsTable(pricingTerms)}
+
+      <div style="background:#fef3c7;border:1px solid #fde68a;border-radius:10px;
+                  padding:14px;margin:20px 0;">
+        <div style="font-size:13px;color:#78350f;line-height:1.6;">
+          If payment isn't completed before the trial ends, access to your
+          academy dashboard will be restricted until you pay.
+        </div>
+      </div>
+
+      <p style="font-size:13px;color:#64748b;margin:20px 0 0;">
+        Prefer to pay from the app? Open Veerify → More → Pricing &amp; Plans
+        and tap <b>Pay Now</b>.
+      </p>
+
+      <p style="font-size:12px;color:#94a3b8;margin:24px 0 0;">
+        Questions? Reply to this email or write to
+        <a href="mailto:${SUPPORT_EMAIL}" style="color:#64748b;">${SUPPORT_EMAIL}</a>.
+      </p>
+    </div>
+    <p style="font-size:11px;color:#94a3b8;text-align:center;margin-top:16px;">
+      Veerify — the command center for martial arts academies.
+    </p>
+  </div>`;
+}
+
+async function sendTrialEndingSoonEmail({
+  to, ownerName, institutionName, planName, trialEndsAt,
+  daysLeft, paymentUrl, institutionId, pricingTerms = null,
+}) {
+  const t = getTransporter();
+  if (!t) return { ok: false, error: 'SMTP not configured' };
+  try {
+    const pickerUrl = institutionId
+      ? `${APP_BASE_URL}/api/onboarding/pay-approval/${institutionId}`
+      : null;
+    const subject = `Your Veerify trial ends soon – pay to keep ${institutionName} active`;
+    const html = trialEndingSoonEmailHtml({
+      ownerName, institutionName, planName, trialEndsAt,
+      daysLeft, paymentUrl, pickerUrl, pricingTerms,
+    });
+    const info = await t.sendMail({
+      from: `"${FROM_NAME}" <${SMTP_USER}>`,
+      to,
+      subject,
+      replyTo: SUPPORT_EMAIL,
+      html,
+      text: toPlainText(html),
+      headers: transactionalHeaders(),
+    });
+    return { ok: true, messageId: info.messageId };
+  } catch (err) {
+    console.error('[mailer] sendTrialEndingSoonEmail failed:', err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
 // ---------- Password reset template ----------
 
 function passwordResetEmailHtml({ name, otp, expiresMinutes }) {
@@ -915,6 +1117,8 @@ async function sendMail({ to, subject, text, html, attachments, cc, bcc }) {
 
 module.exports = {
   sendApprovalEmail,
+  sendTrialWelcomeEmail,
+  sendTrialEndingSoonEmail,
   sendActivationEmail,
   sendPasswordResetEmail,
   sendTrainerCredentialsEmail,

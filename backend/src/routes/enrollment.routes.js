@@ -82,6 +82,13 @@ router.get('/trainer/my-students',
   verifyToken,
   requireRole('trainer'),
   enrollmentController.getStudentsForMyTrainerBatches);
+// Fresh, full-detail view of a single student for the trainer detail
+// screen. Refuses (403) if the trainer doesn't teach at least one
+// batch this student is enrolled in — prevents cross-trainer leaks.
+router.get('/trainer/student/:studentId',
+  verifyToken,
+  requireRole('trainer'),
+  enrollmentController.getStudentDetailForTrainer);
 // Admin-only — aggregated enrollments across every batch of a course
 router.get('/course/:id', verifyToken, requireRole('admin'), enrollmentController.getEnrollmentsByCourse);
 // Super admin — latest enrollments across all institutions (dashboard)

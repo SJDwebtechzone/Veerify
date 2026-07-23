@@ -128,6 +128,10 @@ app.use('/api/marketplace-settings', marketplaceRoutes);
 // Feedback module — mobile submit + super-admin read.
 app.use('/api/feedback', require('./src/routes/feedback.routes'));
 
+// Dynamic FAQ module — super-admin CRUDs entries on the web panel,
+// mobile app fetches them role-scoped via GET /api/faqs.
+app.use('/api/faqs', require('./src/routes/faq.routes'));
+
 // Legal / policy pages — platform-wide (super-admin) + per-institution
 // (institution admin). Consumer reads at /me/platform + /me/institution
 // are role-gated so students see only their four platform policies +
@@ -161,4 +165,14 @@ app.listen(PORT, () => {
     const { verifyTransporter } = require('./src/utils/mailer');
     verifyTransporter();
   } catch (_) { /* mailer is optional */ }
+
+  // Free Trial reminder scheduler — hourly scan for institutions whose
+  // free trial ends within 3 days and hasn't been reminded yet. Sends
+  // the payment link email exactly once per institution.
+  try {
+    const trialReminder = require('./src/services/trialReminder.service');
+    trialReminder.start();
+  } catch (err) {
+    console.warn('[startup] trialReminder scheduler not started:', err?.message);
+  }
 });

@@ -65,10 +65,22 @@ exports.listMy = async (req, res) => {
     // Issued certificates (real rows) + pending awaits so the student's
     // Certificates screen can show BOTH sections in one round-trip.
     const [certs, awaits] = await Promise.all([
+      // Pull the template's artwork alongside each certificate so the
+      // student's viewer renders the exact layout the admin dispatched
+      // — background image, canvas ratio, and signature / seal URLs so
+      // image-backed pins can resolve without another round-trip.
       pool.query(
-        `SELECT c.*, i.name AS institution_name
+        `SELECT c.*, i.name AS institution_name,
+                t.name             AS template_name,
+                t.background_url   AS template_background_url,
+                t.background_kind  AS template_background_kind,
+                t.canvas_width     AS template_canvas_width,
+                t.canvas_height    AS template_canvas_height,
+                t.signature_url    AS template_signature_url,
+                t.seal_url         AS template_seal_url
            FROM certificates c
            JOIN institutions i ON c.institution_id = i.id
+           LEFT JOIN certificate_templates t ON t.id = c.template_id
           WHERE c.student_id = $1
           ORDER BY c.issue_date DESC, c.id DESC`,
         [req.user.id],
@@ -149,10 +161,18 @@ exports.listForStudent = async (req, res) => {
     }
 
     const r = await pool.query(
-      `SELECT c.*, i.name AS institution_name, u.name AS student_name
+      `SELECT c.*, i.name AS institution_name, u.name AS student_name,
+              t.name             AS template_name,
+              t.background_url   AS template_background_url,
+              t.background_kind  AS template_background_kind,
+              t.canvas_width     AS template_canvas_width,
+              t.canvas_height    AS template_canvas_height,
+              t.signature_url    AS template_signature_url,
+              t.seal_url         AS template_seal_url
          FROM certificates c
          JOIN institutions i ON c.institution_id = i.id
          JOIN users u ON c.student_id = u.id
+         LEFT JOIN certificate_templates t ON t.id = c.template_id
         WHERE c.student_id = $1
         ORDER BY c.issue_date DESC, c.id DESC`,
       [studentId],
@@ -169,10 +189,18 @@ exports.getById = async (req, res) => {
   try {
     const id = Number(req.params.id);
     const r = await pool.query(
-      `SELECT c.*, i.name AS institution_name, u.name AS student_name
+      `SELECT c.*, i.name AS institution_name, u.name AS student_name,
+              t.name             AS template_name,
+              t.background_url   AS template_background_url,
+              t.background_kind  AS template_background_kind,
+              t.canvas_width     AS template_canvas_width,
+              t.canvas_height    AS template_canvas_height,
+              t.signature_url    AS template_signature_url,
+              t.seal_url         AS template_seal_url
          FROM certificates c
          JOIN institutions i ON c.institution_id = i.id
          JOIN users u ON c.student_id = u.id
+         LEFT JOIN certificate_templates t ON t.id = c.template_id
         WHERE c.id = $1`,
       [id],
     );

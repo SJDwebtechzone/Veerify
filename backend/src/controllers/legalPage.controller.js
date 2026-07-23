@@ -362,3 +362,36 @@ exports.listInstitutionForMe = async (req, res) => {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
+
+// ─────────────────────────────────────────────────────────────────────
+// PUBLIC (no-auth) endpoint — published platform page by slug
+// ─────────────────────────────────────────────────────────────────────
+
+// GET /api/legal-pages/public/:slug
+// Returns the single published platform page for the given slug.
+// No authentication required — intended for the public-facing /privacy-policy,
+// /terms-and-conditions, and /refund-cancellation-policy web pages.
+exports.getPublicPage = async (req, res) => {
+  try {
+    const slug = String(req.params.slug || '').trim();
+    if (!PLATFORM_SLUGS.has(slug)) {
+      return res.status(404).json({ message: 'Page not found' });
+    }
+    const r = await pool.query(
+      `SELECT slug, title, content, sections, updated_at
+         FROM legal_pages
+        WHERE scope = 'platform'
+          AND slug = $1
+          AND is_published = TRUE
+        LIMIT 1`,
+      [slug],
+    );
+    if (r.rowCount === 0) {
+      return res.status(404).json({ message: 'Page not published yet' });
+    }
+    res.json({ page: r.rows[0] });
+  } catch (err) {
+    console.error('[legalPage.getPublicPage]', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};

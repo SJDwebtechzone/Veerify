@@ -197,14 +197,23 @@ export default function ParentMoreScreen({ navigation }) {
         <View style={styles.group}>
           <Row
             icon={HelpCircle}
-            iconBg={palette.borderSoft}
-            iconColor={palette.textMuted}
-            label="Help & Support"
-            sub="Reach out at support@veerify.app"
-            onPress={() => Alert.alert(
-              'Need a hand?',
-              'Drop us a line at support@veerify.app and we\'ll get back within one business day.',
-            )}
+            iconBg={palette.blue?.soft || '#DBEAFE'}
+            iconColor={palette.blue?.vivid || '#2563EB'}
+            label="Support"
+            sub="Reach Veerify or your child's academy"
+            onPress={() => navigation.navigate('Support')}
+          />
+          <Divider />
+          {/* FAQs — role-scoped dynamic content managed on the
+              super-admin web. Parents see the FAQs whose audience
+              list includes their role. */}
+          <Row
+            icon={HelpCircle}
+            iconBg={palette.orange?.soft || '#FED7AA'}
+            iconColor={palette.orange?.vivid || '#EA580C'}
+            label="FAQs"
+            sub="Common questions about batches, fees & progress"
+            onPress={() => navigation.navigate('Faq')}
           />
           <Divider />
           <Row

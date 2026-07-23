@@ -29,6 +29,7 @@ import { useInstitution } from '../../../context/InstitutionContext';
 import { palette, spacing, radius, shadows, type } from '../../../theme';
 import { useBellScrollHandler } from '../../../components/bellScrollBus';
 import { confirm } from '../../../components/ConfirmDialog';
+import { formatBatchTimeRange } from '../../../utils/formatTime';
 
 const ACCENTS = [palette.purple, palette.blue, palette.green, palette.orange, palette.pink, palette.teal];
 const cycleAccent = (i) => ACCENTS[i % ACCENTS.length];
@@ -54,9 +55,12 @@ function deriveStatus(b) {
 }
 
 function formatSchedule(b) {
-  // Try several common time-shape conventions.
+  // Try several common time-shape conventions. Raw DB values arrive as
+  // "HH:MM:SS" strings; formatBatchTimeRange normalises them to a
+  // friendly 12-hour label (e.g. "6:00 AM – 7:30 AM") without touching
+  // the stored value.
   const time =
-    (b.start_time && b.end_time && `${b.start_time} – ${b.end_time}`) ||
+    formatBatchTimeRange(b.start_time, b.end_time) ||
     b.time ||
     b.timing ||
     '';

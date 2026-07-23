@@ -35,6 +35,7 @@ import { useAuth } from '../../context/AuthContext';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 import YouTubeThumbPlayer from '../../components/YouTubeThumbPlayer';
 import { confirm } from '../../components/ConfirmDialog';
+import { formatBatchTimeRange } from '../../utils/formatTime';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const ASSET_HOST = (apiClient.defaults.baseURL || '').replace(/\/api\/?$/, '');
@@ -571,7 +572,7 @@ export default function CourseDetailScreen({ navigation, route }) {
               const left = Math.max(cap - used, 0);
               const nearlyFull = cap > 0 && left / cap <= 0.15;
               const time =
-                (b.start_time && b.end_time && `${String(b.start_time).slice(0,5)} – ${String(b.end_time).slice(0,5)}`) ||
+                formatBatchTimeRange(b.start_time, b.end_time) ||
                 b.time || '';
               const days = b.days || b.days_of_week || '';
               return (

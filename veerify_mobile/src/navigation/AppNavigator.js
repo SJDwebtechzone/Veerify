@@ -52,6 +52,8 @@ import AdminSalaryScreen from '../screens/admin/AdminSalaryScreen';
 import AdminAttendanceSummaryScreen from '../screens/admin/AdminAttendanceSummaryScreen';
 import InstitutionLegalScreen from '../screens/admin/InstitutionLegalScreen';
 import LegalScreen from '../screens/shared/LegalScreen';
+import SupportScreen from '../screens/shared/SupportScreen';
+import FaqScreen from '../screens/shared/FaqScreen';
 import StudentCertificatesScreen from '../screens/student/StudentCertificatesScreen';
 import StudentEnrolledProgramsScreen from '../screens/student/StudentEnrolledProgramsScreen';
 import StudentAttendanceScreen from '../screens/student/StudentAttendanceScreen';
@@ -67,7 +69,9 @@ import AcademyProfileScreen from '../screens/admin/AcademyProfileScreen';
 
 // Student
 import StudentTabNavigator from './StudentTabNavigator';
-import InstitutionDetailScreen from '../screens/student/InstitutionDetailScreen';
+// InstitutionDetailScreen was removed — its content is now rendered
+// inline on the Home tab (banner + academy details + course list) so
+// tapping a nearby academy no longer pushes a new screen.
 import AllInstitutionsScreen from '../screens/student/AllInstitutionsScreen';
 import CategoryAcademiesScreen from '../screens/student/CategoryAcademiesScreen';
 import CourseDetailScreen from '../screens/student/CourseDetailScreen';
@@ -149,10 +153,15 @@ export default function AppNavigator() {
   // ── Splash / loading state ──
   // Rendered while AuthContext restores the saved session from
   // storage. Doubles as the app's JS-level splash: brand logo,
-  // Veerify wordmark, and the "#1 Martial Arts App" tagline stay
+  // "Veerify" wordmark, and the "#1 Martial Arts App" tagline stay
   // visible for the entire duration of the auth-restore step so the
   // viewer never sees a jarring blank screen between the native
   // splash and the first navigator screen.
+  //
+  // Order (top → bottom):
+  //   1. Logo (existing circular mark)
+  //   2. "Veerify"  — brand name in the brand red
+  //   3. "#1 Martial Arts App" — tagline, tighter tracking
   if (loading) {
     return (
       <View style={splashStyles.screen}>
@@ -170,6 +179,7 @@ export default function AppNavigator() {
             resizeMode="cover"
           />
         </View>
+        <Text style={splashStyles.brand}>Veerify</Text>
         <Text style={splashStyles.tagline}>#1 Martial Arts App</Text>
         <ActivityIndicator
           size="small"
@@ -199,8 +209,6 @@ export default function AppNavigator() {
             // Android hardware back button or iOS swipe-back gesture to
             // return to the previous screen.
             options={{ headerShown: false }} />
-          <Stack.Screen name="InstitutionDetail" component={InstitutionDetailScreen}
-            options={{ headerShown: true, title: '' }} />
           <Stack.Screen name="AllInstitutions" component={AllInstitutionsScreen}
             options={{ headerShown: true, title: 'All Academies' }} />
           {/* CategoryAcademies — list of academies offering a specific
@@ -443,6 +451,18 @@ export default function AppNavigator() {
             component={LegalScreen}
             options={{ headerShown: false }}
           />
+          {/* Support — More tab → Support tile. Institution admins see
+              only the App Support address (support@veerifyapp.com). */}
+          <Stack.Screen
+            name="Support"
+            component={SupportScreen}
+            options={{ headerShown: false }}
+          />
+          <Stack.Screen
+            name="Faq"
+            component={FaqScreen}
+            options={{ headerShown: false }}
+          />
           {/* Admin "Add Student" quick action opens the same enrollment
               form a student fills when buying a course. Both screens
               render their own headers so the native stack bar is hidden
@@ -492,8 +512,6 @@ export default function AppNavigator() {
             // Android hardware back button or iOS swipe-back gesture to
             // return to the previous screen.
             options={{ headerShown: false }} />
-          <Stack.Screen name="InstitutionDetail" component={InstitutionDetailScreen}
-            options={{ headerShown: true, title: '' }} />
           <Stack.Screen name="AllInstitutions" component={AllInstitutionsScreen}
             options={{ headerShown: true, title: 'All Academies' }} />
           {/* CategoryAcademies — list of academies offering a specific
@@ -518,6 +536,13 @@ export default function AppNavigator() {
               lets students see T&C / Privacy / Refund / Child Safety
               from the platform and Academy Rules from their institution. */}
           <Stack.Screen name="Legal" component={LegalScreen}
+            options={{ headerShown: false }} />
+          {/* Support — Profile tab → Support row. Students see both the
+              App Support address and their own institution's registered
+              contact email. */}
+          <Stack.Screen name="Support" component={SupportScreen}
+            options={{ headerShown: false }} />
+          <Stack.Screen name="Faq" component={FaqScreen}
             options={{ headerShown: false }} />
           {/* Enrollment flow: form -> payment -> back to MyEnrollments. Both
               screens render their own headers so we hide the native stack bar. */}
@@ -629,6 +654,13 @@ export default function AppNavigator() {
               + Academy Rules / Belt Test Policy). */}
           <Stack.Screen name="Legal" component={LegalScreen}
             options={{ headerShown: false }} />
+          {/* Support — Profile → Support row. Trainers see both the
+              platform App Support address and their institution's
+              registered contact email. */}
+          <Stack.Screen name="Support" component={SupportScreen}
+            options={{ headerShown: false }} />
+          <Stack.Screen name="Faq" component={FaqScreen}
+            options={{ headerShown: false }} />
           {/* StaffVideosScreen renders its own header. */}
           <Stack.Screen name="StaffVideos" component={StaffVideosScreen}
             options={{ headerShown: false }} />
@@ -730,6 +762,13 @@ export default function AppNavigator() {
           <Stack.Screen name="ChildProfile" component={ChildProfileScreen} />
           {/* Parents reuse the same Notifications screen the staff module uses. */}
           <Stack.Screen name="StaffNotifications" component={StaffNotificationsScreen} />
+          {/* Shared Support + FAQ screens — reachable from the parent
+              More tab. Roll-your-own headers so the native stack bar
+              stays hidden. */}
+          <Stack.Screen name="Support" component={SupportScreen}
+            options={{ headerShown: false }} />
+          <Stack.Screen name="Faq" component={FaqScreen}
+            options={{ headerShown: false }} />
         </Stack.Navigator>
       </NavigationContainer>
     );
@@ -792,15 +831,28 @@ const splashStyles = StyleSheet.create({
     width: '100%',
     height: '100%',
   },
+  // Brand wordmark — sits between the logo and the tagline. Big,
+  // heavy weight, brand red so it reads as the primary identity
+  // element. Kept in mixed case (not uppercase) so it stays visually
+  // distinct from the smaller, tracked-out tagline underneath.
+  brand: {
+    fontSize: 32,
+    fontWeight: '900',
+    color: BRAND_RED,
+    marginTop: 28,
+    textAlign: 'center',
+    letterSpacing: 0.5,
+  },
   // Tagline — modern, tight tracking, tall weight. Uppercase with
   // measured letter-spacing gives the "premium" character requested
   // without depending on a custom font family (which would need to be
-  // linked native-side and ship a new build).
+  // linked native-side and ship a new build). Sits just below the
+  // "Veerify" wordmark.
   tagline: {
     fontSize: 15,
     fontWeight: '900',
     color: BRAND_RED,
-    marginTop: 28,
+    marginTop: 10,
     textAlign: 'center',
     letterSpacing: 2.4,
     textTransform: 'uppercase',

@@ -4,6 +4,7 @@ import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import apiClient from '../../api/client';
 import { colors, commonStyles } from '../../utils/styles';
 import { confirm } from '../../components/ConfirmDialog';
+import { formatBatchTime } from '../../utils/formatTime';
 
 export default function MyEnrollmentsScreen() {
   const navigation = useNavigation();
@@ -137,7 +138,7 @@ export default function MyEnrollmentsScreen() {
                 <Text style={{ fontSize: 13, color: colors.primary, marginTop: 2 }}>{item.batch_name}</Text>
                 <Text style={{ fontSize: 12, color: colors.textLight, marginTop: 6 }}>🏫 {item.institution_name}</Text>
                 <Text style={{ fontSize: 12, color: colors.textLight, marginTop: 2 }}>👨‍🏫 {item.trainer_name || 'TBA'}</Text>
-                <Text style={{ fontSize: 12, color: colors.textLight, marginTop: 2 }}>📆 {item.days_of_week} • {item.start_time?.slice(0,5)}</Text>
+                <Text style={{ fontSize: 12, color: colors.textLight, marginTop: 2 }}>📆 {item.days_of_week} • {formatBatchTime(item.start_time)}</Text>
               </View>
               <View style={{ 
                 paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8,

@@ -27,6 +27,7 @@ import {
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
+import { formatBatchTime } from '../../utils/formatTime';
 
 // ─── Theme tokens ──────────────────────────────────────────────────────
 const BRAND = '#E63946';
@@ -57,10 +58,10 @@ function fmtDate(s) {
   if (Number.isNaN(d.getTime())) return s;
   return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 }
-function fmtTime(t) {
-  if (!t) return '';
-  return String(t).slice(0, 5);
-}
+// Delegate to the shared 12-hour formatter — batch/course timings
+// now read as "6:00 AM" instead of "06:00" here as well as everywhere
+// else the student can view a schedule.
+const fmtTime = formatBatchTime;
 function fmtDuration(seconds) {
   if (!seconds) return null;
   const s = Number(seconds);

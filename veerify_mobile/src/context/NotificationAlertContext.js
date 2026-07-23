@@ -147,6 +147,14 @@ export function NotificationAlertProvider({ children }) {
 
   // The poller. Re-installed whenever the user changes (sign in / out)
   // so we run only while signed in.
+  //
+  // First tick is DELAYED by a short beat on cold start. The concern:
+  // on a first-launch cold boot the Android network stack, keychain,
+  // and axios interceptor init can race with this effect's mount. If
+  // the notification poll fires before all three are stable we've seen
+  // the app crash on that first launch (works on the second because
+  // the native modules are already warm). The 1200 ms delay is
+  // imperceptible to the user but reliably outlasts the boot race.
   useEffect(() => {
     if (!user) {
       lastSeenIdRef.current = null;
@@ -189,10 +197,18 @@ export function NotificationAlertProvider({ children }) {
       } catch (_e) { /* silent — next tick will retry */ }
     };
 
-    // Fire once immediately, then on an interval.
-    tick();
+    // Fire the first tick AFTER a short cold-start delay so native
+    // modules (Keychain, network stack, axios interceptor) have
+    // stabilised. Subsequent ticks run on the normal interval.
+    const firstTickTimer = setTimeout(() => {
+      if (!cancelled) tick();
+    }, 1200);
     const id = setInterval(tick, POLL_MS);
-    return () => { cancelled = true; clearInterval(id); };
+    return () => {
+      cancelled = true;
+      clearTimeout(firstTickTimer);
+      clearInterval(id);
+    };
   }, [user, showBanner]);
 
   return (

@@ -33,6 +33,7 @@ import PlanLimitModal from '../../components/PlanLimitModal';
 import { confirm } from '../../components/ConfirmDialog';
 import { useAuth } from '../../context/AuthContext';
 import { useInstitution } from '../../context/InstitutionContext';
+import { formatBatchTimeRange } from '../../utils/formatTime';
 
 // ─── Theme tokens ──────────────────────────────────────────────────────
 const BRAND = '#E63946';
@@ -866,8 +867,7 @@ export default function EnrollmentFormScreen({ route, navigation }) {
               label="Schedule"
               value={(() => {
                 const time =
-                  (pickedBatch.start_time && pickedBatch.end_time &&
-                    `${pickedBatch.start_time} – ${pickedBatch.end_time}`) ||
+                  formatBatchTimeRange(pickedBatch.start_time, pickedBatch.end_time) ||
                   pickedBatch.time ||
                   pickedBatch.timing ||
                   '';

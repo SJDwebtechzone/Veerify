@@ -3,10 +3,12 @@ import { View, Text, FlatList, TouchableOpacity, RefreshControl, ActivityIndicat
 import { useFocusEffect } from '@react-navigation/native';
 import apiClient from '../../api/client';
 import { useAuth } from '../../context/AuthContext';
+import { useInstitution } from '../../context/InstitutionContext';
 import { colors, commonStyles } from '../../utils/styles';
 
 export default function StudentDashboardScreen({ navigation }) {
   const { user, logout } = useAuth();
+  const { selectInstitution } = useInstitution();
   const [institutions, setInstitutions] = useState([]);
   const [filtered, setFiltered] = useState([]);
   const [search, setSearch] = useState('');
@@ -101,9 +103,17 @@ export default function StudentDashboardScreen({ navigation }) {
           </View>
         }
         renderItem={({ item }) => (
-          <TouchableOpacity 
+          <TouchableOpacity
             style={commonStyles.card}
-            onPress={() => navigation.navigate('InstitutionDetail', { institutionId: item.id })}
+            onPress={() => {
+              // InstitutionDetail was removed — select the academy so
+              // the Home tab hydrates with its banner / details /
+              // courses inline, then jump to Home.
+              selectInstitution(item);
+              try { navigation.navigate('Main'); } catch (_) {
+                try { navigation.getParent()?.navigate('Main'); } catch (__) {}
+              }
+            }}
           >
             <Text style={commonStyles.cardTitle}>🥋 {item.name}</Text>
             {item.city ? <Text style={{ fontSize: 13, color: colors.primary, marginTop: 4 }}>📍 {item.city}</Text> : null}

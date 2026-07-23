@@ -3,6 +3,7 @@ const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const {
   sendApprovalEmail, sendActivationEmail, sendBranchSetupEmail,
+  sendTrialWelcomeEmail,
 } = require('../utils/mailer');
 const { dispatchWelcomeSms } = require('../utils/smsService');
 const { createPaymentLink, verifyWebhookSignature } = require('../utils/razorpay');
@@ -724,7 +725,8 @@ exports.getSubscriptionStatus = async (req, res) => {
               sp.discount_enabled AS plan_discount_enabled,
               sp.discount_percent AS plan_discount_percent,
               sp.max_students     AS plan_max_students,
-              sp.max_trainers     AS plan_max_trainers
+              sp.max_trainers     AS plan_max_trainers,
+              i.trial_reminder_sent_at
        FROM institutions i
        LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
        WHERE i.owner_user_id = $1`,
@@ -798,6 +800,24 @@ exports.getSubscriptionStatus = async (req, res) => {
       nextRenewalAt = r.grace_ends_at;
     }
 
+    // ── payment_ready ────────────────────────────────────────────
+    // Signals to the mobile Pricing screen whether the Pay Now
+    // button should appear during the trial phase.
+    //   • Trial phase: true once the trial-ending reminder has been
+    //     sent (i.e. within 3 days of trial_ends_at) OR when
+    //     days_left_in_trial <= 3 as a client-side safety net.
+    //   • Grace / locked / expired: always true (payment overdue).
+    //   • Paid / pending: false (nothing to pay right now).
+    const trialDaysRemaining = daysLeft(r.trial_ends_at);
+    const isTrialEndingSoon = phase === 'trial' && (
+      !!r.trial_reminder_sent_at ||
+      (trialDaysRemaining != null && trialDaysRemaining <= 3)
+    );
+    const paymentReady =
+      phase === 'grace' || phase === 'locked' || phase === 'expired'
+        ? true
+        : phase === 'trial' ? isTrialEndingSoon : false;
+
     res.json({
       phase,
       institution_id: r.id,
@@ -806,8 +826,12 @@ exports.getSubscriptionStatus = async (req, res) => {
       trial_starts_at:  r.trial_starts_at,
       trial_ends_at:    r.trial_ends_at,
       grace_ends_at:    r.grace_ends_at,
-      days_left_in_trial: daysLeft(r.trial_ends_at),
+      days_left_in_trial: trialDaysRemaining,
       days_left_in_grace: daysLeft(r.grace_ends_at),
+      // Trial-phase UX flags for the mobile Pricing screen.
+      payment_ready:          paymentReady,
+      trial_ending_soon:      isTrialEndingSoon,
+      trial_reminder_sent_at: r.trial_reminder_sent_at || null,
       plan: {
         id: r.plan_id,
         name: r.plan_name,
@@ -1275,6 +1299,14 @@ exports.approveInstitution = async (req, res) => {
 
     const warnings = [];
 
+    // ── Free Trial gate ─────────────────────────────────────────────
+    // Per the Free Trial spec: when the selected plan includes a free
+    // trial we DO NOT mint a Razorpay payment link at approval time.
+    // The scheduler mints the link (and sends the payment email) 3
+    // days before trial expiry. Sending the link now would violate
+    // the "no duplicate payment-link emails" rule.
+    const hasTrial = trialDays > 0;
+
     // 3a. Apply referral-wallet discount (if any) before generating the link.
     //     This is the FIRST renewal payment so we consume points here.
     let referralDiscount = 0;
@@ -1286,25 +1318,28 @@ exports.approveInstitution = async (req, res) => {
     }
     const finalPayable = Math.max(0, effectivePrice - referralDiscount);
 
-    // 3b. Create payment link at the FINAL price (after plan discount and
-    //     referral discount).
-    const linkResult = await createPaymentLink({
-      amountInRupees: finalPayable,
-      institution,
-    });
+    // 3b. Create payment link ONLY for the no-trial path. Trial plans
+    //     skip this — the scheduler handles it 3 days before expiry.
+    let linkResult = { ok: false, error: 'skipped (trial)' };
+    if (!hasTrial) {
+      linkResult = await createPaymentLink({
+        amountInRupees: finalPayable,
+        institution,
+      });
 
-    if (linkResult.ok) {
-      await pool.query(
-        `UPDATE institutions SET
-           payment_link_id     = $1,
-           payment_link_url    = $2,
-           payment_link_status = 'pending',
-           payment_amount      = $3
-         WHERE id = $4`,
-        [linkResult.link.id, linkResult.link.short_url, linkResult.link.amountPaise, id]
-      );
-    } else {
-      warnings.push(`Payment link not created: ${linkResult.error}`);
+      if (linkResult.ok) {
+        await pool.query(
+          `UPDATE institutions SET
+             payment_link_id     = $1,
+             payment_link_url    = $2,
+             payment_link_status = 'pending',
+             payment_amount      = $3
+           WHERE id = $4`,
+          [linkResult.link.id, linkResult.link.short_url, linkResult.link.amountPaise, id]
+        );
+      } else {
+        warnings.push(`Payment link not created: ${linkResult.error}`);
+      }
     }
 
     // 4. Email the owner. Previously this was gated on `linkResult.ok` which
@@ -1344,41 +1379,61 @@ exports.approveInstitution = async (req, res) => {
       }
     }
 
-    const mailResult = await sendApprovalEmail({
-      to:              institution.owner_email,
-      ownerName:       institution.owner_name,
-      institutionName: institution.name,
-      planName:        institution.plan_name,
-      planPrice:       institution.plan_price,
-      paymentUrl:      linkResult.ok ? linkResult.link.short_url : null,
-      trialDays,
-      graceDays,
-      effectivePrice,
-      discountEnabled: discountOn,
-      discountPercent: discountPct,
-      pricingTerms,
-      institutionId:   institution.id,
-    });
+    // Pull the freshly-set trial window so the welcome email carries
+    // the exact dates the institution now sees on their pricing screen.
+    let mailResult;
+    if (hasTrial) {
+      const tw = await pool.query(
+        `SELECT trial_starts_at, trial_ends_at FROM institutions WHERE id = $1`,
+        [id],
+      );
+      const trialRow = tw.rows[0] || {};
+      mailResult = await sendTrialWelcomeEmail({
+        to:              institution.owner_email,
+        ownerName:       institution.owner_name,
+        institutionName: institution.name,
+        planName:        institution.plan_name,
+        trialDays,
+        trialStartsAt:   trialRow.trial_starts_at,
+        trialEndsAt:     trialRow.trial_ends_at,
+      });
+    } else {
+      mailResult = await sendApprovalEmail({
+        to:              institution.owner_email,
+        ownerName:       institution.owner_name,
+        institutionName: institution.name,
+        planName:        institution.plan_name,
+        planPrice:       institution.plan_price,
+        paymentUrl:      linkResult.ok ? linkResult.link.short_url : null,
+        trialDays,
+        graceDays,
+        effectivePrice,
+        discountEnabled: discountOn,
+        discountPercent: discountPct,
+        pricingTerms,
+        institutionId:   institution.id,
+      });
+    }
     if (!mailResult.ok) {
       warnings.push(`Email not sent: ${mailResult.error}`);
     }
 
     // Loud console logging so ops can spot a broken approval flow at
-    // a glance. In prod these lines light up when either the Razorpay
-    // link failed to mint (creds missing) or the SMTP relay is down.
-    if (!linkResult.ok) {
+    // a glance. Trial flow deliberately skips payment link creation
+    // — that's not an error, so don't scream about it.
+    if (!hasTrial && !linkResult.ok) {
       console.error(
         `[approve] payment link creation FAILED for institution=${institution.id} (${institution.name}) — ${linkResult.error}`,
       );
     }
     if (!mailResult.ok) {
       console.error(
-        `[approve] approval email FAILED to ${institution.owner_email} for institution=${institution.id} — ${mailResult.error}`,
+        `[approve] ${hasTrial ? 'trial welcome' : 'approval'} email FAILED to ${institution.owner_email} for institution=${institution.id} — ${mailResult.error}`,
       );
     }
-    if (linkResult.ok && mailResult.ok) {
+    if (mailResult.ok) {
       console.log(
-        `[approve] institution=${institution.id} approved OK — email sent to ${institution.owner_email}, payment link ${linkResult.link.short_url}`,
+        `[approve] institution=${institution.id} approved OK (${hasTrial ? `trial ${trialDays}d` : 'no trial'}) — email sent to ${institution.owner_email}${!hasTrial && linkResult.ok ? `, payment link ${linkResult.link.short_url}` : ''}`,
       );
     }
 
@@ -1398,7 +1453,11 @@ exports.approveInstitution = async (req, res) => {
     // even when the email helper had returned an error, which hid
     // the misconfig.
     let message = `${institution.name} approved.`;
-    if (linkResult.ok && mailResult.ok) {
+    if (hasTrial) {
+      message += mailResult.ok
+        ? ` Free ${trialDays}-day trial started; welcome email sent. Payment link will be sent 3 days before trial ends.`
+        : ` Free ${trialDays}-day trial started, but welcome email delivery FAILED — use "Resend approval email".`;
+    } else if (linkResult.ok && mailResult.ok) {
       message += ' Payment link emailed to owner.';
     } else if (linkResult.ok && !mailResult.ok) {
       message += ' Payment link created but email delivery FAILED — use "Resend approval email".';

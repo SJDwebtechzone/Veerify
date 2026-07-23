@@ -24,7 +24,8 @@ import {
 import {
   ArrowLeft, Mail, Phone, Award, BookOpen, Briefcase, Lock,
   Wallet, LogOut, ChevronRight, X as XIcon, Eye, EyeOff,
-  GraduationCap, Users, Calendar, MessageSquare, FileText,
+  GraduationCap, Users, Calendar, MessageSquare, FileText, LifeBuoy,
+  HelpCircle,
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
@@ -248,6 +249,28 @@ export default function StaffProfileScreen({ navigation }) {
             label="Send Feedback"
             description="Tell us what you think about Veerify"
             onPress={() => navigation.navigate('SendFeedback')}
+          />
+          <Divider />
+          {/* Support — App Support (Veerify platform) and Institution
+              Support (the trainer's academy contact email, resolved
+              dynamically from the institution's registration data). */}
+          <SettingRow
+            icon={LifeBuoy}
+            accent={palette.purple}
+            label="Support"
+            description="Contact Veerify or your academy"
+            onPress={() => navigation.navigate('Support')}
+          />
+          <Divider />
+          {/* FAQs — role-scoped dynamic content managed on the
+              super-admin web. Trainers see their own bucket
+              (batches, payroll, attendance, etc.). */}
+          <SettingRow
+            icon={HelpCircle}
+            accent={palette.orange}
+            label="FAQs"
+            description="Answers to common trainer questions"
+            onPress={() => navigation.navigate('Faq')}
           />
         </Card>
 

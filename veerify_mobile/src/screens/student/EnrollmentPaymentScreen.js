@@ -45,6 +45,7 @@ const ShieldCheck = Shield;
 import apiClient from '../../api/client';
 import { confirm } from '../../components/ConfirmDialog';
 import { billingCycleLabel } from '../../utils/billingCycle';
+import { formatBatchTimeRange } from '../../utils/formatTime';
 
 // ─── Theme tokens ──────────────────────────────────────────────────────
 const BRAND = '#E63946';
@@ -479,7 +480,7 @@ export default function EnrollmentPaymentScreen({ route, navigation }) {
               <KVRow
                 icon={Clock}
                 label="Time"
-                value={`${(batch.start_time || '').slice(0, 5)}${batch.end_time ? ' – ' + (batch.end_time || '').slice(0, 5) : ''}`}
+                value={formatBatchTimeRange(batch.start_time, batch.end_time)}
               />
             ) : null}
             {batch?.institution_name || course?.institution_name ? (

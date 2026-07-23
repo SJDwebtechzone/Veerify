@@ -189,54 +189,128 @@ export default function StudentCertificatesScreen({ navigation }) {
   );
 }
 
+// Full-fidelity renderer for a dispatched certificate. Reads the same
+// data the admin PreviewModal uses:
+//   • template_background_url — the artwork the admin uploaded
+//   • template_canvas_width/height — sets the canvas ratio so pin (x,y)
+//     positions align across devices
+//   • placeholder_data — snapshot of the pins WITH resolved values +
+//     image_url for the digital_signature / seal pins
+// so what the student sees matches what the admin dispatched.
 function CertViewer({ cert }) {
   const SCREEN_W = Dimensions.get('window').width;
   const CANVAS_W = SCREEN_W - spacing.lg * 2;
   const pins = Array.isArray(cert.placeholder_data) ? cert.placeholder_data : [];
-  // Attempt to look up the template's canvas ratio from the first pin
-  // — since we don't have the template row on the student side, fall
-  // back to a normal 1.4:1 landscape.
-  const canvasH = CANVAS_W * 0.71;
-  // If we have a render_url we prefer it (final artifact); otherwise
-  // we render the placeholder payload onto the raw background.
+
+  // Prefer the finalised render_url (a real PNG/PDF) when the backend
+  // has one; otherwise fall back to rendering placeholders onto the
+  // raw template background. Both paths use the same canvas ratio so
+  // the student's view is stable regardless of which one wins.
+  const canvasW = Number(cert.template_canvas_width)  || 1000;
+  const canvasH = Number(cert.template_canvas_height) || 700;
+  const ratio   = canvasH / (canvasW || 1);
+  const CANVAS_H = Math.min(CANVAS_W * ratio, SCREEN_W * 1.2);
+
   const bg = cert.render_url
     ? resolveAssetUrl(cert.render_url)
-    : null;
+    : cert.template_background_url
+      ? resolveAssetUrl(cert.template_background_url)
+      : null;
 
   return (
     <View style={{
-      width: CANVAS_W, height: canvasH,
+      width: CANVAS_W, height: CANVAS_H,
       borderRadius: radius.lg, overflow: 'hidden',
       backgroundColor: '#fff',
       alignSelf: 'center',
     }}>
       {bg ? (
-        <Image source={{ uri: bg }} style={StyleSheet.absoluteFill} resizeMode="contain" />
+        <Image
+          source={{ uri: bg }}
+          style={StyleSheet.absoluteFill}
+          resizeMode={cert.render_url ? 'contain' : 'cover'}
+        />
       ) : (
-        <View style={StyleSheet.absoluteFill}>
-          <View style={[StyleSheet.absoluteFill, { backgroundColor: '#FFF8E7', padding: spacing.lg }]}>
-            <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-              <Award size={40} color="#B45309" strokeWidth={2} />
-              <Text style={{ ...type.h1, color: '#111827', marginTop: 10, textAlign: 'center' }}>
-                {cert.title}
+        <View style={[StyleSheet.absoluteFill, { backgroundColor: '#FFF8E7' }]} />
+      )}
+
+      {/* Placeholder-layer render — only when we're painting on top of
+          the raw background (not the finalised render_url which is an
+          already-baked image). Same layout math the admin preview modal
+          uses so what the student sees matches the dispatch preview. */}
+      {!cert.render_url ? pins.map((pin, i) => {
+        if (pin.active === false) return null;
+        const isImage = pin.key === 'digital_signature' || pin.key === 'seal';
+        if (isImage) {
+          const url = pin.image_url
+            || (pin.key === 'digital_signature' ? cert.template_signature_url : cert.template_seal_url);
+          if (!url) return null;
+          const w = Math.max(40, (pin.width  || 0.20) * CANVAS_W);
+          const h = Math.max(24, (pin.height || 0.10) * CANVAS_H);
+          return (
+            <Image
+              key={i}
+              source={{ uri: resolveAssetUrl(url) }}
+              style={{
+                position: 'absolute',
+                left: pin.x * CANVAS_W - w / 2,
+                top:  pin.y * CANVAS_H - h / 2,
+                width: w, height: h,
+              }}
+              resizeMode="contain"
+            />
+          );
+        }
+        const est = Math.max(60, String(pin.value || pin.label || '').length * (pin.font_size || 16) * 0.55);
+        return (
+          <View
+            key={i}
+            style={{
+              position: 'absolute',
+              left: pin.x * CANVAS_W - est / 2,
+              top:  pin.y * CANVAS_H - (pin.font_size || 16),
+              width: est,
+            }}
+          >
+            <Text style={{
+              fontSize: Math.max(9, (pin.font_size || 16) * 0.6),
+              color: pin.color || '#111827',
+              fontWeight: pin.bold ? '800' : '600',
+              fontStyle: pin.italic ? 'italic' : 'normal',
+              textAlign: pin.align || 'center',
+            }}>
+              {String(pin.value ?? '')}
+            </Text>
+          </View>
+        );
+      }) : null}
+
+      {/* Legacy fallback — no template artwork AND no render_url (the
+          admin dispatched from a very old certificate row). Show a
+          text-only summary so the student still sees something useful. */}
+      {!bg ? (
+        <View style={[StyleSheet.absoluteFill, { padding: spacing.lg }]}>
+          <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+            <Award size={40} color="#B45309" strokeWidth={2} />
+            <Text style={{ ...type.h1, color: '#111827', marginTop: 10, textAlign: 'center' }}>
+              {cert.title}
+            </Text>
+            <Text style={{ marginTop: 6, color: '#78350F', fontWeight: '700' }}>
+              Awarded on {new Date(cert.issue_date).toLocaleDateString('en-IN', {
+                day: '2-digit', month: 'long', year: 'numeric',
+              })}
+            </Text>
+            {cert.certificate_no ? (
+              <Text style={{ marginTop: 4, color: '#78350F' }}>No. {cert.certificate_no}</Text>
+            ) : null}
+            {pins.filter((p) => p.value).slice(0, 4).map((p, i) => (
+              <Text key={i} style={{ marginTop: 4, color: '#111827', fontWeight: '700' }}>
+                {p.label}: <Text style={{ fontWeight: '900' }}>{String(p.value)}</Text>
               </Text>
-              <Text style={{ marginTop: 6, color: '#78350F', fontWeight: '700' }}>
-                Awarded on {new Date(cert.issue_date).toLocaleDateString('en-IN', {
-                  day: '2-digit', month: 'long', year: 'numeric',
-                })}
-              </Text>
-              {cert.certificate_no ? (
-                <Text style={{ marginTop: 4, color: '#78350F' }}>No. {cert.certificate_no}</Text>
-              ) : null}
-              {pins.filter((p) => p.value).slice(0, 4).map((p, i) => (
-                <Text key={i} style={{ marginTop: 4, color: '#111827', fontWeight: '700' }}>
-                  {p.label}: <Text style={{ fontWeight: '900' }}>{String(p.value)}</Text>
-                </Text>
-              ))}
-            </View>
+            ))}
           </View>
         </View>
-      )}
+      ) : null}
     </View>
   );
 }

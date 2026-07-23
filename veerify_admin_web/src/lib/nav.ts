@@ -12,6 +12,7 @@ import {
   Smartphone,
   MessageSquare,
   Scale,
+  HelpCircle,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -109,6 +110,13 @@ export const navSections: NavSection[] = [
     label: 'Feedback',
     icon: MessageSquare,
     to: '/feedback',
+  },
+  // FAQs — dynamic content manager. Every question/answer here shows
+  // in the mobile app, filtered by the audience list picked per FAQ.
+  {
+    label: 'FAQs',
+    icon: HelpCircle,
+    to: '/faqs',
   },
   // Platform-wide legal / policy pages. Super-admin only. Each entry
   // routes to the same editor screen with a different `slug` param.

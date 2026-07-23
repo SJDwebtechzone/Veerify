@@ -34,6 +34,7 @@ import {
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 import { confirm } from '../../components/ConfirmDialog';
+import { useFocusEffect } from '@react-navigation/native';
 
 const BELTS = [
   { key: 'white',  label: 'White',  bg: '#FFFFFF', fg: '#111827', border: '#E5E7EB' },
@@ -41,18 +42,38 @@ const BELTS = [
   { key: 'orange', label: 'Orange', bg: '#FFEDD5', fg: '#9A3412', border: '#F97316' },
   { key: 'green',  label: 'Green',  bg: '#DCFCE7', fg: '#166534', border: '#22C55E' },
   { key: 'blue',   label: 'Blue',   bg: '#DBEAFE', fg: '#1E40AF', border: '#3B82F6' },
+  { key: 'gray',   label: 'Gray',   bg: '#F3F4F6', fg: '#374151', border: '#9CA3AF' },
   { key: 'brown',  label: 'Brown',  bg: '#FAEDD5', fg: '#7C2D12', border: '#A16207' },
   { key: 'black',  label: 'Black',  bg: '#1F2937', fg: '#FFFFFF', border: '#0F172A' },
 ];
 
-// Belt index — first attempt to derive from a real belt name (once the
-// belt journey is wired up). Falls back to null (= no belt awarded yet)
-// rather than the old id-derived random pick so the header no longer
-// lies about a belt the student hasn't actually earned.
+// Same alias table the list screen uses — British "grey" → American
+// "gray", "New student" / "None" → no belt, etc. Keeping the mapping
+// duplicated here (rather than importing) so the detail screen stays
+// self-contained; if the list needs to change spellings later, both
+// files stay in sync via a copy-paste review.
+const BELT_ALIASES = {
+  white: 'white', yellow: 'yellow', orange: 'orange', green: 'green',
+  blue:  'blue',  gray: 'gray',    grey:   'gray',    brown: 'brown',
+  black: 'black',
+  none: 'none', 'new': 'none', beginner: 'none',
+};
+
+// Resolve a belt-name string ("Grey Belt", "Blue I", "Brown III",
+// "New student", or a custom "Other" label) into an index into the
+// BELTS array. Returns null when the value maps to "no belt yet",
+// so the header renders no badge instead of lying about a belt the
+// student hasn't earned. Custom "Other" labels return null too —
+// the current display shows just the plain name via a separate
+// path where needed.
 function beltIndexFromName(name) {
   if (!name) return null;
-  const key = String(name).toLowerCase();
-  const idx = BELTS.findIndex((b) => key.includes(b.key));
+  let key = String(name).trim().toLowerCase().replace(/\s+belt$/i, '').trim();
+  const firstWord = key.split(/\s+/)[0];
+  if (!firstWord || firstWord === 'new' || firstWord === 'none') return null;
+  const canonical = BELT_ALIASES[firstWord];
+  if (!canonical || canonical === 'none') return null;
+  const idx = BELTS.findIndex((b) => b.key === canonical);
   return idx >= 0 ? idx : null;
 }
 
@@ -89,7 +110,22 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
   const params = route?.params || {};
   const studentId = params.studentId;
   const batchId = params.batchId;
-  const passedStudent = params.student || null;
+  // The list passes a snapshot on navigate — but it can drift from
+  // the DB (admin edits a profile, payment webhook fires, etc.). We
+  // keep the snapshot for the initial paint but replace it with a
+  // freshly-fetched row from the server on mount + every focus.
+  const passedStudentInitial = params.student || null;
+  const [studentRow, setStudentRow] = useState(passedStudentInitial);
+  const [enrollmentRows, setEnrollmentRows] = useState(() =>
+    passedStudentInitial ? [passedStudentInitial] : [],
+  );
+  const [attendanceSummary, setAttendanceSummary] = useState({
+    present: 0, absent: 0, late: 0, leave: 0, total_marked: 0, percentage: null,
+  });
+  // `passedStudent` still exists downstream; keep the reference so the
+  // huge existing render tree that reads `passedStudent.*` doesn't need
+  // per-line surgery. It always points at the freshest data available.
+  const passedStudent = studentRow;
 
   const [records, setRecords] = useState([]);    // attendance for this student
   const [loading, setLoading] = useState(true);
@@ -110,6 +146,96 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
   const courseId = passedStudent?.course_id || null;
   const courseName = passedStudent?.course_name || null;
 
+  // ── Fresh detail fetch ──
+  // Pulls the full detail row for THIS student from the trainer
+  // endpoint. Runs on mount AND on every focus (useFocusEffect
+  // below) so a switch back from the list — or from EditStudent, or
+  // from an admin action that changed the row — always renders the
+  // latest DB truth.
+  //
+  // The endpoint 403s if the trainer doesn't teach this student,
+  // which is the guarantee that "only students assigned to the
+  // logged-in trainer" ever land here.
+  const loadFreshDetail = useCallback(async () => {
+    if (!studentId) return;
+    try {
+      const res = await apiClient.get(`/enrollments/trainer/student/${studentId}`);
+      const data = res.data || {};
+      const s = data.student || {};
+      const enrolments = Array.isArray(data.enrollments) ? data.enrollments : [];
+      // Prefer the first enrolment as the "primary" for the header
+      // if the caller didn't pass a batch — but keep all of them for
+      // the enrolment strip below.
+      const primary = enrolments.find((e) => Number(e.batch_id) === Number(batchId))
+        || enrolments[0]
+        || null;
+
+      // Flatten into the shape the existing render tree expects
+      // (passedStudent.* reads scattered through the file).
+      const merged = {
+        // Keep the previous snapshot as a floor so a slow network
+        // doesn't blank existing UI mid-render.
+        ...(studentRow || {}),
+        student_id:              s.student_id,
+        student_name:            s.display_name || s.student_name,
+        student_email:           s.student_email,
+        student_phone:           s.student_phone,
+        student_photo_url:       s.photo_url,
+        student_gender:          s.gender,
+        student_date_of_birth:   s.date_of_birth,
+        student_address:         s.address,
+        father_name:             s.father_name,
+        mother_name:             s.mother_name,
+        contact_number:          s.contact_number,
+        emergency_contact:       s.emergency_contact,
+        blood_group:             s.blood_group,
+        belt_category:           s.belt_category,
+        health_notes:            s.health_notes,
+        // Enrolment/course/batch/institution — comes from the primary row.
+        course_id:               primary?.course_id ?? studentRow?.course_id ?? null,
+        course_name:             primary?.course_name ?? studentRow?.course_name ?? null,
+        course_category:         primary?.course_category ?? studentRow?.course_category ?? null,
+        course_billing_cycle:    primary?.course_billing_cycle ?? null,
+        course_price:            primary?.course_price ?? null,
+        batch_id:                primary?.batch_id ?? studentRow?.batch_id ?? batchId ?? null,
+        batch_name:              primary?.batch_name ?? studentRow?.batch_name ?? null,
+        days_of_week:            primary?.days_of_week ?? studentRow?.days_of_week ?? null,
+        start_time:              primary?.start_time ?? studentRow?.start_time ?? null,
+        end_time:                primary?.end_time ?? studentRow?.end_time ?? null,
+        batch_branch_name:       primary?.institution_name ?? studentRow?.batch_branch_name ?? null,
+        // Payment fields — refreshed so a webhook that just fired
+        // shows up without a full re-navigate.
+        enrollment_id:           primary?.enrollment_id ?? studentRow?.enrollment_id ?? null,
+        payment_status:          primary?.payment_status ?? studentRow?.payment_status ?? null,
+        payment_amount:          primary?.payment_amount ?? studentRow?.payment_amount ?? null,
+        payment_mode:            primary?.payment_mode ?? studentRow?.payment_mode ?? null,
+        paid_at:                 primary?.paid_at ?? studentRow?.paid_at ?? null,
+        payment_reference:       primary?.payment_reference ?? studentRow?.payment_reference ?? null,
+      };
+      setStudentRow(merged);
+      setEnrollmentRows(enrolments);
+      if (data.attendance) setAttendanceSummary(data.attendance);
+    } catch (err) {
+      // 403 → trainer doesn't teach this student. Kick back to list
+      // with a friendly note instead of silently showing stale data.
+      if (err?.response?.status === 403) {
+        confirm({
+          title:       'Not in your roster',
+          message:     'This student is not enrolled in any of your batches.',
+          variant:     'warning',
+          confirmText: 'Back',
+          hideCancel:  true,
+          onConfirm:   () => { try { navigation.goBack(); } catch (_) {} },
+        });
+      }
+      // Otherwise stay on the snapshot silently. Attendance load
+      // below still runs.
+      // eslint-disable-next-line no-console
+      console.log('[StudentDetail] fresh fetch failed:',
+        err?.response?.status, err?.response?.data?.message || err?.message);
+    }
+  }, [studentId, batchId, studentRow, navigation]);
+
   // ── Pull attendance for this batch and filter client-side ──
   const load = useCallback(async () => {
     if (!batchId || !studentId) { setLoading(false); return; }
@@ -123,7 +249,15 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
       setLoading(false);
     }
   }, [batchId, studentId]);
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); loadFreshDetail(); }, [load, loadFreshDetail]);
+  // Re-fetch on focus so a return from Edit / Payment / Attendance
+  // immediately re-renders with the latest DB truth. No stale
+  // "up-to-date info" complaints.
+  useFocusEffect(useCallback(() => {
+    load();
+    loadFreshDetail();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [studentId, batchId]));
 
   // Pull the course's curriculum + this student's existing ticks. Re-runs
   // whenever the trainer drills into a new student so saved state is in
@@ -268,7 +402,12 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
   // entirely (previously we invented a belt from the id and it was
   // misleading — the student appeared to have a Yellow Belt they hadn't
   // actually earned).
-  const beltName = passedStudent?.current_belt_name || null;
+  // Prefer the student_profiles.belt_category the admin set (via the
+  // enrolment form). Fall back to any older `current_belt_name`
+  // signal in case the row came from a different endpoint shape.
+  const beltName = passedStudent?.belt_category
+    || passedStudent?.current_belt_name
+    || null;
   const beltIdx = beltIndexFromName(beltName);
   const currentBelt = beltIdx !== null ? BELTS[beltIdx] : null;
 

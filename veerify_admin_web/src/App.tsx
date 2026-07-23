@@ -29,13 +29,20 @@ import { SubscriptionPayments } from './pages/payments/SubscriptionPayments';
 import { ReferralSettings } from './pages/settings/ReferralSettings';
 import { Profile } from './pages/Profile';
 import { Feedback } from './pages/feedback/Feedback';
+import { Faqs } from './pages/faqs/Faqs';
 import { LegalPageEditor } from './pages/legal/LegalPageEditor';
+import PrivacyPolicy         from './pages/PrivacyPolicy';
+import TermsAndConditions    from './pages/TermsAndConditions';
+import RefundCancellationPolicy from './pages/RefundCancellationPolicy';
 
 export default function App() {
   return (
     <Routes>
-      {/* Public */}
+      {/* Public routes (no auth required) */}
       <Route path="/login" element={<Login />} />
+      <Route path="/privacy-policy"             element={<PrivacyPolicy />} />
+      <Route path="/terms-and-conditions"       element={<TermsAndConditions />} />
+      <Route path="/refund-cancellation-policy" element={<RefundCancellationPolicy />} />
 
       {/* Protected app shell */}
       <Route
@@ -91,6 +98,10 @@ export default function App() {
         {/* Feedback — user feedback from every mobile role. */}
         <Route path="/feedback" element={<Feedback />} />
 
+        {/* FAQs — dynamic FAQ manager. Super-admin CRUDs entries here;
+            mobile app fetches them role-scoped via GET /api/faqs. */}
+        <Route path="/faqs" element={<Faqs />} />
+
         {/* Platform-wide Legal / policy pages — super-admin editor.
             One route serves all five policies; the :slug URL param
             selects which page the editor loads and saves. */}
@@ -109,7 +120,7 @@ export default function App() {
         {/* Fallback */}
         <Route path="*" element={<PlaceholderPage title="Page not found" description="The page you're looking for doesn't exist." />} />
 
-        
+
       </Route>
     </Routes>
   );

@@ -3,6 +3,7 @@ import { View, Text, ScrollView, TouchableOpacity, ActivityIndicator, Alert } fr
 import apiClient from '../../api/client';
 import { useAuth } from '../../context/AuthContext';
 import { colors, commonStyles } from '../../utils/styles';
+import { formatBatchTimeRange } from '../../utils/formatTime';
 
 export default function BatchDetailScreen({ route, navigation }) {
   const { batchId } = route.params;
@@ -63,7 +64,7 @@ export default function BatchDetailScreen({ route, navigation }) {
 
           <Text style={commonStyles.label}>Schedule</Text>
           <Text style={{ color: colors.text, marginBottom: 4 }}>📆 {batch.days_of_week || 'Not set'}</Text>
-          <Text style={{ color: colors.text, marginBottom: 16 }}>⏰ {batch.start_time?.slice(0,5)} - {batch.end_time?.slice(0,5)}</Text>
+          <Text style={{ color: colors.text, marginBottom: 16 }}>⏰ {formatBatchTimeRange(batch.start_time, batch.end_time) || 'Time TBD'}</Text>
 
           <Text style={commonStyles.label}>Trainer</Text>
           <Text style={{ color: colors.text, marginBottom: 16 }}>👨‍🏫 {batch.trainer_name || 'Not assigned'}</Text>

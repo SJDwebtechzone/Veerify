@@ -289,7 +289,6 @@ const DEFAULT_PINS = [
   { key: 'certificate_no',   label: 'Certificate No.',  x: 0.22, y: 0.06, font_size: 10, align: 'left',   bold: false, color: '#6B7280' },
   { key: 'instructor_name',  label: 'Instructor',       x: 0.28, y: 0.82, font_size: 14, align: 'center', bold: false, color: '#111827' },
   { key: 'digital_signature',label: 'Signature',        x: 0.72, y: 0.82, font_size: 14, align: 'center', italic: true, color: '#111827' },
-  { key: 'qr_code',          label: 'QR Code',          x: 0.9,  y: 0.9,  font_size: 10, align: 'right',  color: '#374151' },
 ];
 
 // ─── Styles ─────────────────────────────────────────────────────────

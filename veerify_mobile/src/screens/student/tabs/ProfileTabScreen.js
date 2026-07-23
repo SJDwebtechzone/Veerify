@@ -19,7 +19,7 @@ import {
 import {
   LogIn, UserPlus, Sparkles, ChevronRight, GraduationCap, ClipboardCheck,
   Award, Wallet, Gift, Settings, LifeBuoy, LogOut, ShieldCheck, Edit3,
-  Crown, Lock, Star, KeyRound, MessageSquare, FileText,
+  Crown, Lock, Star, KeyRound, MessageSquare, FileText, HelpCircle,
 } from 'lucide-react-native';
 
 import { useAuth } from '../../../context/AuthContext';
@@ -289,7 +289,12 @@ function LoggedInView({ user, subscription, selectedInstitution, onLogout, navig
           onPress={() => navigation.navigate('ChangePassword')}
         />
         <View style={styles.divider} />
-        <ListRow icon={LifeBuoy}    label="Help Center"         accent={palette.blue}  onPress={() => placeholder('Help Center')} />
+        <ListRow icon={LifeBuoy}    label="Support"             accent={palette.blue}  onPress={() => navigation.navigate('Support')} />
+        <View style={styles.divider} />
+        {/* FAQs — dynamic content published from the super-admin web
+            panel. Filtered on the student role so the answers apply
+            to enrolments, payments, attendance, certificates, etc. */}
+        <ListRow icon={HelpCircle}  label="FAQs"                accent={palette.orange} onPress={() => navigation.navigate('Faq')} />
         <View style={styles.divider} />
         <ListRow
           icon={MessageSquare}

@@ -53,6 +53,14 @@ router.get('/events/:eventId/payment-success', institutionController.eventPaymen
 router.get('/me/events/pending',       verifyToken, requireRole('admin'), institutionController.listPendingBranchEvents);
 router.patch('/events/:eventId/approve', verifyToken, requireRole('admin'), institutionController.approveBranchEvent);
 router.patch('/events/:eventId/reject',  verifyToken, requireRole('admin'), institutionController.rejectBranchEvent);
+// /me/support-email — role-agnostic. Any authenticated caller resolves
+// to their OWN institution's contact email (via institution_id on the
+// users row, walked up to the parent when the caller is enrolled at a
+// sub-branch). Powers the Support screen so students, trainers, and
+// admins can see the correct academy support email without exposing
+// any other institution's data.
+router.get('/me/support-email',    verifyToken, institutionController.getMySupportEmail);
+
 // /me/details + /me/update — admin's own institution.
 router.get('/me/details',          verifyToken, requireRole('admin'), institutionController.getMyInstitution);
 router.put('/me/update',           verifyToken, requireRole('admin'), institutionController.updateInstitution);

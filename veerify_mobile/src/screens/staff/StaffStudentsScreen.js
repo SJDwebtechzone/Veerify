@@ -50,10 +50,72 @@ const BELTS = [
   { key: 'orange', label: 'Orange', bg: '#FFEDD5', fg: '#9A3412', border: '#F97316' },
   { key: 'green',  label: 'Green',  bg: '#DCFCE7', fg: '#166534', border: '#22C55E' },
   { key: 'blue',   label: 'Blue',   bg: '#DBEAFE', fg: '#1E40AF', border: '#3B82F6' },
+  { key: 'gray',   label: 'Gray',   bg: '#F3F4F6', fg: '#374151', border: '#9CA3AF' },
   { key: 'brown',  label: 'Brown',  bg: '#FAEDD5', fg: '#7C2D12', border: '#A16207' },
   { key: 'black',  label: 'Black',  bg: '#1F2937', fg: '#FFFFFF', border: '#0F172A' },
 ];
-const beltFor = (id) => BELTS[Math.abs(Number(id) || 0) % BELTS.length];
+// "New student" / "Other" / unset fallback tile — greyed out so the
+// UI doesn't imply a belt the student hasn't actually earned.
+const BELT_NONE = {
+  key: 'none', label: 'New student',
+  bg: '#F9FAFB', fg: '#6B7280', border: '#D1D5DB',
+};
+
+// Aliases so common variations of a belt name all resolve to the
+// same tile. Handles British / American spelling ("grey" / "gray"),
+// legacy labels ("half-blue" → blue), and the "New student" opt-out.
+// Keys are lowercase, no punctuation. Every alias points at either a
+// BELT key or the string 'none' for the greyed BELT_NONE tile.
+const BELT_ALIASES = {
+  white:      'white',
+  yellow:     'yellow',
+  orange:     'orange',
+  green:      'green',
+  blue:       'blue',
+  gray:       'gray',
+  grey:       'gray',   // British spelling → American key
+  brown:      'brown',
+  black:      'black',
+  none:       'none',
+  'new':      'none',
+  beginner:   'none',
+};
+
+// Resolve the real belt from student_profiles.belt_category — a
+// value the admin picks from a curated list ("White", "Yellow",
+// "Blue I", "Brown III", "Black", "Grey", ...) or types via the
+// "Other" free-text option.
+//
+// Matcher:
+//   1. Trim + lowercase the value.
+//   2. Strip a trailing " belt" suffix so "Grey Belt" and "Grey"
+//      both resolve.
+//   3. Take the first word (so "Blue I", "Brown III", "Blue Belt"
+//      all reduce to their base colour).
+//   4. Look that word up in BELT_ALIASES.
+//   5. If no alias matches, fall back to the Black tile with the
+//      original label — for "Other" values like "Assistant
+//      Instructor" or a custom dan grade, this honestly shows the
+//      exact text the admin typed instead of guessing a colour.
+function beltFor(row) {
+  const raw = (row && row.belt_category) || null;
+  if (!raw) return BELT_NONE;
+  // Normalise: lowercase → strip trailing " belt" → take first word.
+  let key = String(raw).trim().toLowerCase();
+  key = key.replace(/\s+belt$/i, '').trim();
+  const firstWord = key.split(/\s+/)[0];
+  if (!firstWord || firstWord === 'new' || firstWord === 'none') return BELT_NONE;
+  const canonical = BELT_ALIASES[firstWord];
+  if (canonical === 'none') return BELT_NONE;
+  if (canonical) {
+    const match = BELTS.find((b) => b.key === canonical);
+    if (match) return { ...match, label: String(raw) };
+  }
+  // Custom "Other" label — surface the exact text (e.g. "Assistant
+  // Instructor") over the black tile so the badge reads honestly
+  // instead of masquerading as a lookalike colour.
+  return { ...BELTS[BELTS.length - 1], label: String(raw) };
+}
 
 // Synthesized age (12-35) and gender pattern from id so the visual feels
 // alive. Real values will replace these once the migration adds them.
@@ -290,7 +352,7 @@ export default function StaffStudentsScreen({ navigation }) {
   const visibleStudents = useMemo(() => {
     let arr = allStudents;
     if (beltFilter) {
-      arr = arr.filter((s) => beltFor(s.student_id).key === beltFilter);
+      arr = arr.filter((s) => beltFor(s).key === beltFilter);
     }
     const q = search.trim().toLowerCase();
     if (q) {
@@ -587,7 +649,7 @@ function StudentCard({ student, attendancePct, onPress }) {
     .slice(0, 2)
     .join('')
     .toUpperCase();
-  const belt = beltFor(student.student_id);
+  const belt = beltFor(student);
   const gender = student.student_gender || genderFor(student.student_id);
   const age = ageFor(student.student_id);
   // Photo — the new /trainer/my-students endpoint returns photo_url when

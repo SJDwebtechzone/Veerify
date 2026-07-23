@@ -24,7 +24,7 @@ import {
   UserCog, BookOpen, Building2, CalendarRange, Bell, Megaphone,
   MessageSquare, BarChart3, Palette, CreditCard, Settings, LifeBuoy,
   LogOut, ChevronRight, Edit3, ShieldCheck, Layers, KeyRound, MapPin,
-  Award, FileText, Trash2,
+  Award, FileText, Trash2, HelpCircle,
 } from 'lucide-react-native';
 
 import { useAuth } from '../../../context/AuthContext';
@@ -170,6 +170,10 @@ export default function MoreTabScreen({ navigation }) {
     // dashboards. Each banner picks its own audience: student-only,
     // trainer-only, or both.
     branding: 'InstitutionBranding',
+    // Support → shared SupportScreen. Admin sees only the App Support
+    // address (no institution row) — they manage their own contact
+    // email via Academy Profile, so echoing it back would be noise.
+    support:  'Support',
   };
   // Institution-scoped policy slugs are handled inline — they all
   // route to the same InstitutionLegal editor with different slugs.
@@ -368,9 +372,19 @@ export default function MoreTabScreen({ navigation }) {
         <View style={styles.divider} />
         <ListRow
           icon={LifeBuoy}
-          label="Help Center"
+          label="Support"
           accent={palette.blue}
-          onPress={() => placeholder('Help Center')}
+          onPress={() => navigation.navigate('Support')}
+        />
+        <View style={styles.divider} />
+        {/* FAQs — dynamic content managed on the super-admin web
+            panel. Filtered on the caller's role so this admin sees
+            only their bucket. */}
+        <ListRow
+          icon={HelpCircle}
+          label="FAQs"
+          accent={palette.orange}
+          onPress={() => navigation.navigate('Faq')}
         />
         <View style={styles.divider} />
         <ListRow

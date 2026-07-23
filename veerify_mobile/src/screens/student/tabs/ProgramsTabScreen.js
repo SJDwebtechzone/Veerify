@@ -55,6 +55,11 @@ export default function ProgramsTabScreen({ navigation }) {
   const [activeCategory, setActiveCategory] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  // Academies the student has enrolled in (or paid for). Each entry is
+  // { id, name, logo_url, city, programs: [] } — the programs array is
+  // hydrated with the FULL course catalogue offered by that academy so
+  // the student sees every course, not just the ones they enrolled in.
+  const [enrolledAcademies, setEnrolledAcademies] = useState([]);
 
   const isGuest = !user;
 
@@ -72,13 +77,60 @@ export default function ProgramsTabScreen({ navigation }) {
       } else {
         setPrograms([]);
       }
+
+      // ── Enrolled academies section ───────────────────────────────
+      // Guests don't have enrollments — skip the fetch and render only
+      // the browse-by-academy path below. For logged-in students, pull
+      // /enrollments/my, collapse to unique institutions, then fetch
+      // each academy's full course catalogue so we can list ALL their
+      // courses under the academy header (not just the enrolled ones).
+      if (!isGuest) {
+        try {
+          const enrRes = await apiClient.get('/enrollments/my');
+          const enrollments = enrRes.data?.enrollments || [];
+          // Collapse to unique academies. Prefer the enrolment's
+          // root_institution_id when present (sub-branch enrolments
+          // still map to the parent academy on the student's Courses
+          // screen); fall back to institution_id.
+          const byId = new Map();
+          for (const e of enrollments) {
+            const id = e.root_institution_id || e.institution_id;
+            if (!id || byId.has(id)) continue;
+            byId.set(id, {
+              id,
+              name:     e.institution_name || 'Academy',
+              logo_url: e.institution_logo_url || null,
+              city:     e.institution_city || null,
+            });
+          }
+          const uniques = Array.from(byId.values());
+          // Hydrate each academy with its full course list — one call
+          // per academy, run in parallel. Silent .catch keeps a single
+          // 404 from tanking the whole section.
+          const hydrated = await Promise.all(uniques.map(async (a) => {
+            try {
+              const r = await apiClient.get(`/institutions/${a.id}/programs?limit=50`);
+              return { ...a, programs: r.data?.programs || [] };
+            } catch {
+              return { ...a, programs: [] };
+            }
+          }));
+          setEnrolledAcademies(hydrated);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.log('[Programs] enrolled-academies fetch failed:', err?.message);
+          setEnrolledAcademies([]);
+        }
+      } else {
+        setEnrolledAcademies([]);
+      }
     } catch (err) {
       console.log('[Programs] load error:', err?.message);
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [selectedInstitution?.id]);
+  }, [selectedInstitution?.id, isGuest]);
 
   useFocusEffect(useCallback(() => { setLoading(true); load(); }, [load]));
   useEffect(() => { setLoading(true); load(); }, [selectedInstitution?.id, load]);
@@ -104,6 +156,37 @@ export default function ProgramsTabScreen({ navigation }) {
 
   const featured = visible.filter((p) => p.is_featured);
   const allRest  = visible.filter((p) => !p.is_featured);
+
+  // Apply the same category + search filter to each enrolled-academy
+  // section so the student's chip / query choice narrows every row on
+  // the screen consistently. Academies whose section ends up empty are
+  // still shown (with a soft "No courses match" note) so the student
+  // can see the academy is still there when they clear the filter.
+  const filterForAcademy = (arr) => {
+    let out = arr || [];
+    if (activeCategory) {
+      out = out.filter((p) =>
+        (p.category_id && Number(p.category_id) === Number(activeCategory.id)) ||
+        (p.category && p.category.toLowerCase() === activeCategory.name?.toLowerCase()),
+      );
+    }
+    const q = search.trim().toLowerCase();
+    if (q) {
+      out = out.filter((p) =>
+        (p.title || p.name || '').toLowerCase().includes(q) ||
+        (p.trainer_name || p.trainer || '').toLowerCase().includes(q),
+      );
+    }
+    return out;
+  };
+
+  // Institutions the student has already picked (selectedInstitution)
+  // shouldn't be duplicated in both "My Academies" AND "Featured/All
+  // courses" — hide the browse section when the currently-selected
+  // academy is one they're already enrolled in.
+  const selectedIsEnrolled = enrolledAcademies.some(
+    (a) => a.id === selectedInstitution?.id,
+  );
 
   const handleEnroll = (program) => {
     if (isGuest) {
@@ -240,8 +323,39 @@ export default function ProgramsTabScreen({ navigation }) {
           </View>
         )}
 
+        {/* ── My Academies ────────────────────────────────────────
+            One section per academy the student has enrolled in. Each
+            section shows the academy name + logo and every course
+            that academy offers (not just the enrolled ones), so the
+            student can discover what else is on the menu without
+            leaving their Courses tab. */}
+        {enrolledAcademies.length > 0 && (
+          <View style={{ marginTop: spacing.xl }}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>My Academies</Text>
+              <Text style={styles.countText}>
+                {enrolledAcademies.length} enrolled
+              </Text>
+            </View>
+
+            {enrolledAcademies.map((academy) => {
+              const filtered = filterForAcademy(academy.programs);
+              return (
+                <EnrolledAcademySection
+                  key={`enr-${academy.id}`}
+                  academy={academy}
+                  filtered={filtered}
+                  hasFilter={!!(search || activeCategory)}
+                  onOpenCourse={(cid) => navigation.navigate('CourseDetail', { courseId: cid })}
+                  onEnroll={handleEnroll}
+                />
+              );
+            })}
+          </View>
+        )}
+
         {/* Featured */}
-        {featured.length > 0 && (
+        {featured.length > 0 && !selectedIsEnrolled && (
           <View style={{ marginTop: spacing.xl }}>
             <View style={styles.sectionHeader}>
               <Text style={styles.sectionTitle}>Featured</Text>
@@ -268,11 +382,16 @@ export default function ProgramsTabScreen({ navigation }) {
           </View>
         )}
 
-        {/* All courses */}
+        {/* All courses — hidden when the currently-selected academy is
+            already listed above under "My Academies" (avoids showing
+            the same programs twice on a single screen). */}
+        {!selectedIsEnrolled && (
         <View style={{ marginTop: spacing.xl }}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>
-              {activeCategory ? `${activeCategory.name} courses` : 'All courses'}
+              {enrolledAcademies.length > 0
+                ? `Browse ${selectedInstitution?.name || 'other academies'}`
+                : (activeCategory ? `${activeCategory.name} courses` : 'All courses')}
             </Text>
             <Text style={styles.countText}>{visible.length} result{visible.length === 1 ? '' : 's'}</Text>
           </View>
@@ -300,7 +419,70 @@ export default function ProgramsTabScreen({ navigation }) {
             </View>
           )}
         </View>
+        )}
       </ScrollView>
+    </View>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// EnrolledAcademySection — one row per academy the student has
+// enrolled in. Shows the academy's name + logo (Home tab now renders
+// for a deep dive) and every course the academy offers, filtered by
+// the same search/category chips at the top of the screen.
+// ─────────────────────────────────────────────────────────────────────
+function EnrolledAcademySection({ academy, filtered, hasFilter, onOpenCourse, onEnroll }) {
+  const [logoErr, setLogoErr] = useState(false);
+  const logo = academy.logo_url && !logoErr
+    ? resolveAssetUrl(academy.logo_url)
+    : null;
+  return (
+    <View style={styles.academyBlock}>
+      <View style={styles.academyHeader}>
+        <View style={styles.academyLogo}>
+          {logo ? (
+            <Image
+              source={{ uri: logo }}
+              style={StyleSheet.absoluteFill}
+              resizeMode="cover"
+              onError={() => setLogoErr(true)}
+            />
+          ) : (
+            <Building2 size={20} color={palette.purple.vivid} strokeWidth={2.2} />
+          )}
+        </View>
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text style={styles.academyName} numberOfLines={1}>{academy.name}</Text>
+          <Text style={styles.academySub} numberOfLines={1}>
+            {academy.city
+              ? `${academy.city} · ${academy.programs?.length || 0} course${(academy.programs?.length || 0) === 1 ? '' : 's'}`
+              : `${academy.programs?.length || 0} course${(academy.programs?.length || 0) === 1 ? '' : 's'}`}
+          </Text>
+        </View>
+      </View>
+
+      {filtered.length === 0 ? (
+        <View style={styles.emptyInlineTight}>
+          <GraduationCap size={18} color={palette.textLight} strokeWidth={2} />
+          <Text style={styles.emptyInlineText}>
+            {hasFilter
+              ? 'No courses match your filters at this academy.'
+              : 'This academy has not published any courses yet.'}
+          </Text>
+        </View>
+      ) : (
+        <View style={styles.grid}>
+          {filtered.map((p, i) => (
+            <GridProgramCard
+              key={`${academy.id}-${p.id}`}
+              program={p}
+              accent={cycleAccent(i)}
+              onPress={() => onOpenCourse(p.id)}
+              onEnroll={() => onEnroll(p)}
+            />
+          ))}
+        </View>
+      )}
     </View>
   );
 }
@@ -615,4 +797,35 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: palette.borderSoft,
   },
   emptyInlineText: { ...type.body, color: palette.textMuted, flex: 1 },
+  emptyInlineTight: {
+    flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
+    marginHorizontal: spacing.xl,
+    padding: spacing.md,
+    backgroundColor: palette.surface,
+    borderRadius: radius.md,
+    borderWidth: 1, borderColor: palette.borderSoft,
+    marginBottom: spacing.sm,
+  },
+
+  // ── Enrolled academy section (per academy under "My Academies") ──
+  academyBlock: {
+    marginBottom: spacing.lg,
+  },
+  academyHeader: {
+    flexDirection: 'row', alignItems: 'center', gap: spacing.md,
+    marginHorizontal: spacing.xl,
+    marginBottom: spacing.md,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.md,
+    backgroundColor: palette.purple.soft,
+    borderRadius: radius.lg,
+  },
+  academyLogo: {
+    width: 40, height: 40, borderRadius: 20,
+    backgroundColor: '#fff',
+    overflow: 'hidden',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  academyName: { ...type.h3, color: palette.text, fontSize: 15, fontWeight: '800' },
+  academySub:  { ...type.caption, color: palette.textMuted, marginTop: 2, fontWeight: '600' },
 });

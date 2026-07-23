@@ -34,6 +34,7 @@ import { useAuth } from '../../context/AuthContext';
 // Shared resolver — strips embedded localhost / 10.0.2.2 hosts from
 // legacy DB rows so old uploads still render on any client.
 import resolveAssetUrl from '../../utils/assetUrl';
+import { formatBatchTime } from '../../utils/formatTime';
 import { useBellScrollHandler } from '../../components/bellScrollBus';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -55,10 +56,9 @@ function fmtINR(n) {
   return `₹${v.toLocaleString('en-IN')}`;
 }
 
-function fmtTime(t) {
-  if (!t) return '';
-  return String(t).slice(0, 5);
-}
+// Delegate to the shared 12-hour formatter so batch/course timings
+// read as "6:00 AM" instead of "06:00" everywhere on the student side.
+const fmtTime = formatBatchTime;
 
 function fmtDuration(seconds) {
   if (!seconds) return null;

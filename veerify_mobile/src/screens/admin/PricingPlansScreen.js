@@ -432,6 +432,14 @@ function CurrentPlanCard({ status, onAction }) {
   //   trial / grace          → Amber. Existing behaviour.
   //   locked / expired       → Red "Expired" + "Renew now" button.
   //   pending                → Slate, awaiting super-admin approval (no CTA).
+  // Free Trial flags coming from /onboarding/subscription-status:
+  //   trial_ending_soon: true when we're within the last 3 days AND
+  //     the reminder email has been sent — the moment the Pay Now
+  //     button becomes available per the Free Trial spec.
+  //   payment_ready: master flag the screen uses to gate the button.
+  const trialEndingSoon = !!status?.trial_ending_soon;
+  const paymentReady    = !!status?.payment_ready;
+
   const phaseInfo = {
     paid: {
       label:      'Paid',
@@ -442,7 +450,18 @@ function CurrentPlanCard({ status, onAction }) {
       // Any earlier and the card is purely informational.
       showAction: isRenewalDue,
     },
-    trial:   { label: 'Free trial',   color: AMBER, icon: Clock,        action: 'Pay now',   showAction: true  },
+    // Trial: label + CTA both switch when the reminder has fired.
+    //   • Active trial (payment_ready = false): shows "Free Trial"
+    //     with NO Pay Now button.
+    //   • Ending soon  (payment_ready = true):  shows "Trial Ending
+    //     Soon" with the Pay Now CTA enabled.
+    trial: {
+      label:      trialEndingSoon ? 'Trial Ending Soon' : 'Free Trial',
+      color:      trialEndingSoon ? BRAND : GREEN,
+      icon:       trialEndingSoon ? AlertTriangle : Clock,
+      action:     'Pay now',
+      showAction: paymentReady,
+    },
     grace:   { label: 'Pending',      color: AMBER, icon: AlertTriangle, action: 'Pay now',   showAction: true  },
     locked:  { label: 'Pending',      color: BRAND, icon: Lock,         action: 'Pay now',   showAction: true  },
     expired: { label: 'Expired',      color: BRAND, icon: AlertTriangle, action: 'Renew now', showAction: true  },

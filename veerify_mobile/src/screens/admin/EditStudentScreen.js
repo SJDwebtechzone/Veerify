@@ -131,12 +131,22 @@ export default function EditStudentScreen({ route, navigation }) {
   const previewUri = photoUri || (photoUrl ? resolveAssetUrl(photoUrl) : '');
 
   // ── Photo picker + upload ───────────────────────────────────────────
+  // Branded confirm dialog with a three-button layout: primary Gallery,
+  // secondary Camera (destructive slot repurposed since it's just a
+  // second choice, not a destructive action), and Cancel. Better UX
+  // than the OS Alert.alert which paints pale system-accent buttons
+  // and doesn't match the rest of the app.
   const pickPhoto = () => {
-    Alert.alert('Update photo', 'Choose how to upload the student\'s photo:', [
-      { text: 'Gallery', onPress: () => fromGallery() },
-      { text: 'Camera',  onPress: () => fromCamera() },
-      { text: 'Cancel',  style: 'cancel' },
-    ]);
+    confirm({
+      title:           'Update photo',
+      message:         "Choose how to upload the student's photo.",
+      variant:         'info',
+      confirmText:     'Gallery',
+      destructiveText: 'Camera',
+      cancelText:      'Cancel',
+      onConfirm:       () => fromGallery(),
+      onDestructive:   () => fromCamera(),
+    });
   };
   const fromGallery = () => launchImageLibrary(
     { mediaType: 'photo', quality: 0.85, maxWidth: 1200, maxHeight: 1200 },
@@ -202,11 +212,23 @@ export default function EditStudentScreen({ route, navigation }) {
 
   const handleSave = async () => {
     if (!studentId) {
-      Alert.alert('Cannot save', 'Student id is missing.');
+      confirm({
+        title:       'Cannot save',
+        message:     'Student id is missing. Please close this screen and try editing again.',
+        variant:     'warning',
+        confirmText: 'OK',
+        hideCancel:  true,
+      });
       return;
     }
     if (!name.trim()) {
-      Alert.alert('Name is required');
+      confirm({
+        title:       'Name is required',
+        message:     'Enter the student\'s full name before saving.',
+        variant:     'warning',
+        confirmText: 'OK',
+        hideCancel:  true,
+      });
       return;
     }
     setSaving(true);
@@ -252,23 +274,37 @@ export default function EditStudentScreen({ route, navigation }) {
         `/enrollments/student/${studentId}`,
         payload,
       );
-      Alert.alert('Saved', 'Student details updated.', [
-        {
-          text: 'OK',
-          onPress: () => {
-            // Bubble the merged record back so the detail screen can
-            // re-render without a network fetch.
+      // Branded success card — matches the rest of the app instead
+      // of the OS-style Alert.alert. On OK we bubble the merged
+      // record back to the detail screen so its listeners re-render
+      // with the fresh values without an extra network round trip.
+      confirm({
+        title:       'Student details updated',
+        message:     `${(name || 'The student').split(' ')[0]}'s profile has been saved.`,
+        variant:     'success',
+        confirmText: 'Done',
+        hideCancel:  true,
+        onConfirm: () => {
+          try {
             navigation.navigate({
               name: 'StudentDetail',
               params: { student: { ...student, ...(data?.student || {}) } },
               merge: true,
             });
-          },
+          } catch (_) {
+            try { navigation.goBack(); } catch (__) {}
+          }
         },
-      ]);
+      });
     } catch (err) {
       const msg = err?.response?.data?.message || err.message || 'Save failed';
-      Alert.alert('Could not save', msg);
+      confirm({
+        title:       'Could not save',
+        message:     msg,
+        variant:     'destructive',
+        confirmText: 'OK',
+        hideCancel:  true,
+      });
     } finally {
       setSaving(false);
     }

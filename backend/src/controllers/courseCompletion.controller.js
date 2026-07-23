@@ -375,6 +375,36 @@ exports.sendCertificate = async (req, res) => {
         currentBelt = bRes.rows[0]?.name || null;
       } catch { /* belt tables optional */ }
     }
+    // Fall back to the student's saved profile belt when nothing else
+    // is available — this is what the admin sees in the students list.
+    if (!currentBelt) {
+      try {
+        const spRes = await client.query(
+          `SELECT belt_category FROM student_profiles WHERE user_id = $1`,
+          [row.student_id],
+        );
+        currentBelt = spRes.rows[0]?.belt_category || null;
+      } catch { /* profile table optional */ }
+    }
+
+    // Belt-range gate — refuse to dispatch when the picked template
+    // has an active range and the student's belt sits outside it.
+    // Same helper as the /prepare endpoint so the message the admin
+    // sees in the preview matches what they'd see on Confirm.
+    try {
+      const { checkBeltRange } = require('./certificateTemplate.controller');
+      const gate = checkBeltRange(template, currentBelt);
+      if (!gate.ok) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({
+          message: gate.message,
+          code: 'BELT_RANGE_BLOCKED',
+        });
+      }
+    } catch (rangeErr) {
+      // eslint-disable-next-line no-console
+      console.warn('[sendCertificate] belt-range check skipped:', rangeErr?.message);
+    }
     const iRes = await client.query(
       `SELECT name, city FROM institutions WHERE id = $1`,
       [row.institution_id],
@@ -408,12 +438,23 @@ exports.sendCertificate = async (req, res) => {
       certificate_no:   certNo,
       instructor_name:  trainerRes.rows[0]?.name || '',
       digital_signature:'',
-      qr_code:          '',
     };
-    const mergedPlaceholders = (template?.placeholders || []).map((pin) => ({
-      ...pin,
-      value: values[pin.key] ?? '',
-    }));
+    // Drop inactive pins BEFORE storing the snapshot — this way the
+    // student's view exactly matches the layout the admin approved on
+    // the preview modal. Image-backed pins (digital_signature / seal)
+    // also carry the template's signature_url / seal_url so the
+    // student renderer never has to cross-reference the template row.
+    const mergedPlaceholders = (template?.placeholders || [])
+      .filter((pin) => pin.active !== false)
+      .map((pin) => ({
+        ...pin,
+        value: values[pin.key] ?? '',
+        image_url: pin.key === 'digital_signature'
+          ? (template?.signature_url || null)
+          : pin.key === 'seal'
+            ? (template?.seal_url || null)
+            : null,
+      }));
 
     // Insert a matching row in the shared certificates table so the
     // student sees the certificate in their history and the verify

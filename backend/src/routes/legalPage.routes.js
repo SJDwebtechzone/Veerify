@@ -9,6 +9,11 @@ const ctrl    = require('../controllers/legalPage.controller');
 const { verifyToken } = require('../middleware/auth.middleware');
 const { requireRole } = require('../middleware/role.middleware');
 
+// ── Public (no-auth) — single published platform page ───────────────
+// Used by the web app's /privacy-policy, /terms-and-conditions, and
+// /refund-cancellation-policy pages which are accessible without login.
+router.get('/public/:slug', ctrl.getPublicPage);
+
 // ── Super-admin scope — platform-wide policies ──────────────────────
 // Super-admin only. The institution admin ("admin" role) CAN'T touch
 // platform-wide legal pages even though they use the same shared table.
@@ -21,6 +26,7 @@ router.post('/platform',
 router.delete('/platform/:slug',
   verifyToken, requireRole('super_admin'),
   ctrl.deletePlatform);
+
 
 // ── Institution admin scope — own institution only ──────────────────
 // The controller scopes every query by the caller's users.institution_id,

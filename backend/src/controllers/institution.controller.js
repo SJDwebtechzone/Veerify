@@ -122,14 +122,89 @@ exports.getMyInstitution = async (req, res) => {
     );
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ 
-        message: 'You have not created an institution yet' 
+      return res.status(404).json({
+        message: 'You have not created an institution yet'
       });
     }
 
     res.json({ institution: result.rows[0] });
   } catch (err) {
     console.error('Get my institution error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// GET /api/institutions/me/support-email
+//
+// Role-agnostic. Resolves the CALLER's own institution's contact email
+// so the Support screen on the mobile app can render the correct
+// per-institution address without hardcoding anything.
+//
+// Resolution order:
+//   1. users.institution_id — the direct link (set at enrolment for
+//      students, on trainer creation for trainers, on institution
+//      setup for admins).
+//   2. Sub-branch → parent — if the caller belongs to a branch
+//      institution, we walk parent_institution_id up to the head
+//      office so a student trained at "Chennai · Anna Nagar Branch"
+//      still sees the head office's support email (the one entered
+//      during academy registration).
+//
+// Response shape:
+//   { support_email: 'academy@example.com' | null,
+//     institution_name: 'Veerify Academy' | null,
+//     institution_id:   42 | null }
+//
+// Never 404s — a caller with no institution_id gets an all-null
+// payload and the mobile renders the "Institution support email not
+// available." fallback. Never returns other institutions' data.
+exports.getMySupportEmail = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const userRes = await pool.query(
+      `SELECT institution_id FROM users WHERE id = $1`,
+      [userId],
+    );
+    let instId = userRes.rows[0]?.institution_id || null;
+    if (!instId) {
+      return res.json({
+        support_email:    null,
+        institution_name: null,
+        institution_id:   null,
+      });
+    }
+
+    // Walk up to the root (main-branch) institution. Sub-branches
+    // rarely register a separate contact email — the head office is
+    // the canonical support address, so we hop up ONE level when the
+    // caller's institution has a parent AND the parent has an email.
+    let inst = null;
+    {
+      const r = await pool.query(
+        `SELECT id, name, email, parent_institution_id
+           FROM institutions WHERE id = $1`,
+        [instId],
+      );
+      inst = r.rows[0] || null;
+    }
+    if (inst && !inst.email && inst.parent_institution_id) {
+      const p = await pool.query(
+        `SELECT id, name, email FROM institutions WHERE id = $1`,
+        [inst.parent_institution_id],
+      );
+      if (p.rows[0]?.email) {
+        inst = p.rows[0];
+      }
+    }
+
+    return res.json({
+      support_email:    inst?.email || null,
+      institution_name: inst?.name  || null,
+      institution_id:   inst?.id    || null,
+    });
+  } catch (err) {
+    console.error('Get support email error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };

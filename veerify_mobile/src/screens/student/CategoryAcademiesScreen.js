@@ -25,6 +25,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import apiClient from '../../api/client';
 import resolveAssetUrl from '../../utils/assetUrl';
+import { useInstitution } from '../../context/InstitutionContext';
 
 const BRAND      = '#E63946';
 const BRAND_SOFT = '#FFE4E6';
@@ -38,6 +39,7 @@ const BORDER     = '#E5E7EB';
 const NEARBY_ORIGIN_KEY = 'nearbyOrigin';
 
 export default function CategoryAcademiesScreen({ navigation, route }) {
+  const { selectInstitution } = useInstitution();
   const category = route?.params?.category || null;
   const categoryName = category?.name || '';
 
@@ -88,8 +90,18 @@ export default function CategoryAcademiesScreen({ navigation, route }) {
   useEffect(() => { load(); }, [load]);
 
   const openAcademy = (academy) => {
-    // InstitutionDetail is the shared academy profile screen.
-    navigation.navigate('InstitutionDetail', { institutionId: academy.id, institution: academy });
+    // InstitutionDetail was removed — its content now renders inline
+    // on the Home tab. Select the academy so Home hydrates its
+    // banner / details / courses, then jump back to Home.
+    selectInstitution({
+      id:       academy.id,
+      name:     academy.name,
+      logo_url: academy.logo_url,
+      city:     academy.city,
+    });
+    try { navigation.navigate('Main'); } catch (_) {
+      try { navigation.getParent()?.navigate('Main'); } catch (__) {}
+    }
   };
 
   const openDirections = (academy) => {

@@ -24,6 +24,7 @@ import {
 import {
   ArrowLeft, Save, Plus, Trash2, Bold, Italic, AlignLeft, AlignCenter, AlignRight,
   Type, X as XIcon, Eye, Upload, Image as ImageIcon,
+  ChevronDown, Check, Award,
 } from 'lucide-react-native';
 import { launchImageLibrary } from 'react-native-image-picker';
 
@@ -47,12 +48,30 @@ const PLACEHOLDER_META = [
   { key: 'branch_name',       label: 'Branch',            sample: 'Anna Nagar Branch' },
   { key: 'venue',             label: 'Venue',             sample: 'Chennai' },
   { key: 'duration',          label: 'Duration',          sample: '3 months' },
-  { key: 'qr_code',           label: 'QR Code',           sample: '[QR]' },
   { key: 'verification_url',  label: 'Verification URL',  sample: 'veerify.app/verify/1234' },
   { key: 'seal',              label: 'Seal',              sample: '[Seal]',            isImage: true },
   { key: 'digital_signature', label: 'Digital Signature', sample: '[Signature]',       isImage: true },
 ];
 const META_BY_KEY = Object.fromEntries(PLACEHOLDER_META.map((m) => [m.key, m]));
+
+// Belt-rank list — same curated set the Student Enrollment Form and
+// EditStudentScreen expose so From/To Belt round-trips cleanly with
+// the value stored on student_profiles.belt_category. Keep this in
+// sync with backend BELT_ORDER in certificateTemplate.controller.js.
+const BELT_OPTIONS = [
+  'New student',
+  'White',
+  'Yellow',
+  'Orange',
+  'Green',
+  'Blue I',
+  'Blue II',
+  'Gray',
+  'Brown I',
+  'Brown II',
+  'Brown III',
+  'Black',
+];
 
 // Canvas width used inside the editor. Height is derived from the
 // template's own canvas ratio.
@@ -72,6 +91,13 @@ export default function CertificateTemplateEditorScreen({ route, navigation }) {
   const [signatureUrl, setSignatureUrl] = useState('');
   const [sealUrl,      setSealUrl]      = useState('');
   const [uploadingKind, setUploadingKind] = useState(null); // 'signature' | 'seal' | null
+  // Belt-range gate — when active, the backend refuses to dispatch a
+  // certificate whose student belt sits outside [fromBelt, toBelt].
+  // Empty string = "not picked yet"; the Save handler serialises that
+  // to null so the backend clears the column.
+  const [fromBelt,        setFromBelt]        = useState('');
+  const [toBelt,          setToBelt]          = useState('');
+  const [beltRangeActive, setBeltRangeActive] = useState(false);
 
   const canvasH = useMemo(() => {
     if (!template) return CANVAS_W * 0.71;
@@ -94,6 +120,9 @@ export default function CertificateTemplateEditorScreen({ route, navigation }) {
         setName(t.name || 'Template');
         setSignatureUrl(t.signature_url || '');
         setSealUrl(t.seal_url || '');
+        setFromBelt(t.from_belt || '');
+        setToBelt(t.to_belt || '');
+        setBeltRangeActive(!!t.belt_range_active);
       }
     } catch (err) {
       // eslint-disable-next-line no-console
@@ -178,11 +207,26 @@ export default function CertificateTemplateEditorScreen({ route, navigation }) {
     try {
       // Persist signature + seal alongside pins. Sending '' clears the
       // slot on the backend (see CASE WHEN provided ... in the SQL).
+      // Guard — when the range is Active both bounds must be picked or
+      // the backend will refuse to dispatch. Fail fast on the client so
+      // the admin fixes it now instead of at Send Certificate time.
+      if (beltRangeActive && (!fromBelt || !toBelt)) {
+        setSaving(false);
+        confirm({
+          title: 'Pick both belts',
+          message: 'The belt range is set to Active but From Belt / To Belt is empty. Pick both or switch the range to Inactive.',
+          variant: 'warning', confirmText: 'OK', hideCancel: true,
+        });
+        return;
+      }
       await apiClient.put(`/certificate-templates/${templateId}`, {
         name: name || 'Untitled',
         placeholders: pins,
         signature_url: signatureUrl,
         seal_url:      sealUrl,
+        from_belt:         fromBelt || '',
+        to_belt:           toBelt   || '',
+        belt_range_active: !!beltRangeActive,
       });
       const activeCount = pins.filter((p) => p.active !== false).length;
       confirm({
@@ -291,6 +335,51 @@ export default function CertificateTemplateEditorScreen({ route, navigation }) {
           })}
         </View>
 
+        {/* ── Font size / color / alignment editor ───────────────
+            Moved directly under the canvas so tapping a pin surfaces
+            its style controls above the fold, right where the admin
+            is looking. Only renders when a pin is selected — tapping
+            any pin on the canvas opens it. */}
+        {selectedIdx >= 0 && !preview ? (
+          <StyleEditor
+            pin={pins[selectedIdx]}
+            onChange={(patch) => updatePin(selectedIdx, patch)}
+            onDelete={() => { removePin(selectedIdx); setSelectedKey(null); }}
+          />
+        ) : null}
+
+        {/* ── Digital Signature upload ────────────────────────────
+            Positioned directly below the template canvas (Template
+            Selection) per the Certificate Template UI spec so the
+            admin sees the signature right after the artwork. */}
+        {!preview ? (
+          <AssetUploader
+            title="Digital Signature"
+            hint="Upload a PNG with a transparent background. Shown at the Digital Signature pin only when the field is Active."
+            url={signatureUrl}
+            uploading={uploadingKind === 'signature'}
+            onPick={() => pickImage('signature')}
+            onClear={() => clearImage('signature')}
+          />
+        ) : null}
+
+        {/* ── Belt Range gate ─────────────────────────────────────
+            Locks the template to a From-belt → To-belt window. When
+            the range is Active the backend refuses to dispatch a
+            certificate against a student whose current belt sits
+            outside the window — useful for institutions with
+            separate templates for junior vs senior ranks. */}
+        {!preview ? (
+          <BeltRangeCard
+            fromBelt={fromBelt}
+            toBelt={toBelt}
+            active={beltRangeActive}
+            onChangeFrom={setFromBelt}
+            onChangeTo={setToBelt}
+            onToggleActive={setBeltRangeActive}
+          />
+        ) : null}
+
         {/* ── Fields visibility list ───────────────────────────────
             Full catalogue of certificate fields with an Active toggle.
             Tapping the toggle on a pinned field flips its `active` flag
@@ -355,22 +444,6 @@ export default function CertificateTemplateEditorScreen({ route, navigation }) {
           </View>
         ) : null}
 
-        {/* ── Digital Signature upload ────────────────────────────
-            Uploaded PNG (transparent background preferred) that renders
-            at the Digital Signature pin's coordinates AND only when
-            that field is Active. Replace / remove buttons match the
-            spec verbatim. */}
-        {!preview ? (
-          <AssetUploader
-            title="Digital Signature"
-            hint="Upload a PNG with a transparent background. Shown at the Digital Signature pin only when the field is Active."
-            url={signatureUrl}
-            uploading={uploadingKind === 'signature'}
-            onPick={() => pickImage('signature')}
-            onClear={() => clearImage('signature')}
-          />
-        ) : null}
-
         {/* ── Seal upload ─────────────────────────────────────────
             Same treatment for the academy seal / stamp — separate
             from the signature so the admin can toggle either
@@ -386,14 +459,125 @@ export default function CertificateTemplateEditorScreen({ route, navigation }) {
           />
         ) : null}
 
-        {selectedIdx >= 0 && !preview ? (
-          <StyleEditor
-            pin={pins[selectedIdx]}
-            onChange={(patch) => updatePin(selectedIdx, patch)}
-            onDelete={() => { removePin(selectedIdx); setSelectedKey(null); }}
-          />
-        ) : null}
       </ScrollView>
+    </View>
+  );
+}
+
+// ── BeltRangeCard ────────────────────────────────────────────────────
+// From / To belt dropdowns plus an Active/Inactive toggle. When the
+// range is Active the backend refuses to dispatch a certificate whose
+// student belt falls outside the [from, to] window — this is the
+// enforcement point for "certificates are generated only for Active
+// belt ranges" from the Certificate Template UI spec.
+function BeltRangeCard({
+  fromBelt, toBelt, active,
+  onChangeFrom, onChangeTo, onToggleActive,
+}) {
+  return (
+    <View style={styles.beltCard}>
+      <View style={styles.beltHead}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.beltTitle}>Belt Range</Text>
+          <Text style={styles.beltSub}>
+            {active
+              ? 'Certificates are dispatched ONLY for students whose belt sits inside this range.'
+              : 'Range is Inactive — this template accepts any belt.'}
+          </Text>
+        </View>
+        <View style={styles.beltActiveWrap}>
+          <Text style={[
+            styles.beltActiveLabel,
+            { color: active ? palette.green.on : palette.textMuted },
+          ]}>
+            {active ? 'Active' : 'Inactive'}
+          </Text>
+          <Switch
+            value={active}
+            onValueChange={onToggleActive}
+            thumbColor={active ? palette.purple.vivid : '#f4f4f5'}
+            trackColor={{
+              true:  palette.purple.soft,
+              false: palette.borderSoft,
+            }}
+          />
+        </View>
+      </View>
+
+      <Text style={styles.beltFieldLabel}>From Belt</Text>
+      <BeltDropdown
+        value={fromBelt}
+        onChange={onChangeFrom}
+        placeholder="Pick the lowest belt this template covers"
+      />
+
+      <Text style={[styles.beltFieldLabel, { marginTop: 12 }]}>To Belt</Text>
+      <BeltDropdown
+        value={toBelt}
+        onChange={onChangeTo}
+        placeholder="Pick the highest belt this template covers"
+      />
+    </View>
+  );
+}
+
+// ── BeltDropdown ────────────────────────────────────────────────────
+// Inline dropdown pinned to BELT_OPTIONS. Same UX + look as the
+// dropdown on EditStudentScreen so From/To Belt reads as familiar to
+// the admin who just picked a student's current belt.
+function BeltDropdown({ value, onChange, placeholder = 'Select belt' }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <View>
+      <TouchableOpacity
+        style={[styles.beltTrigger, open && styles.beltTriggerOpen]}
+        onPress={() => setOpen((o) => !o)}
+        activeOpacity={0.85}
+      >
+        <Award size={14} color={palette.purple.vivid} strokeWidth={2.4} />
+        <Text style={[styles.beltTriggerText, !value && styles.beltTriggerPlaceholder]}>
+          {value || placeholder}
+        </Text>
+        <ChevronDown
+          size={16}
+          color={palette.textMuted}
+          strokeWidth={2.2}
+          style={{ transform: [{ rotate: open ? '180deg' : '0deg' }] }}
+        />
+      </TouchableOpacity>
+
+      {open ? (
+        <View style={styles.beltPanel}>
+          <ScrollView
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+            nestedScrollEnabled
+            style={{ maxHeight: 240 }}
+          >
+            {BELT_OPTIONS.map((opt) => {
+              const selected = opt === value;
+              return (
+                <TouchableOpacity
+                  key={opt}
+                  style={[styles.beltItem, selected && styles.beltItemActive]}
+                  onPress={() => { onChange(opt); setOpen(false); }}
+                  activeOpacity={0.7}
+                >
+                  <Text style={[
+                    styles.beltItemText,
+                    selected && styles.beltItemTextActive,
+                  ]}>
+                    {opt}
+                  </Text>
+                  {selected ? (
+                    <Check size={14} color={palette.purple.vivid} strokeWidth={2.8} />
+                  ) : null}
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -879,4 +1063,64 @@ const styles = StyleSheet.create({
   colorDotActive: {
     borderWidth: 2, borderColor: palette.purple.vivid,
   },
+
+  // ── Belt Range card ───────────────────────────────────────────
+  beltCard: {
+    marginTop: spacing.md,
+    backgroundColor: palette.surface,
+    borderRadius: radius.lg,
+    padding: spacing.md,
+    ...shadows.card,
+  },
+  beltHead: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.md,
+    marginBottom: spacing.md,
+  },
+  beltTitle: { ...type.h2, color: palette.text, fontSize: 15, fontWeight: '800' },
+  beltSub:   { ...type.caption, color: palette.textMuted, marginTop: 2 },
+  beltActiveWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  beltActiveLabel: { fontSize: 11, fontWeight: '800', letterSpacing: 0.3 },
+
+  beltFieldLabel: {
+    ...type.micro, color: palette.textMuted, fontWeight: '800',
+    letterSpacing: 0.4, marginBottom: 6,
+    textTransform: 'uppercase',
+  },
+  beltTrigger: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    paddingHorizontal: 12, paddingVertical: 12,
+    borderRadius: radius.md,
+    borderWidth: 1, borderColor: palette.borderSoft,
+    backgroundColor: palette.bg,
+  },
+  beltTriggerOpen: {
+    borderColor: palette.purple.vivid,
+    backgroundColor: palette.surface,
+  },
+  beltTriggerText: {
+    flex: 1,
+    ...type.bodyBold, color: palette.text, fontSize: 13,
+  },
+  beltTriggerPlaceholder: { color: palette.textLight, fontWeight: '600' },
+  beltPanel: {
+    marginTop: 6,
+    borderRadius: radius.md,
+    borderWidth: 1, borderColor: palette.borderSoft,
+    backgroundColor: palette.surface,
+    overflow: 'hidden',
+  },
+  beltItem: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 12, paddingVertical: 10,
+    borderBottomWidth: 1, borderBottomColor: palette.borderSoft,
+  },
+  beltItemActive: { backgroundColor: palette.purple.soft },
+  beltItemText: { ...type.bodyBold, color: palette.text, fontSize: 13 },
+  beltItemTextActive: { color: palette.purple.on },
 });

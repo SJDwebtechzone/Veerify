@@ -121,10 +121,16 @@ export default function GlobalNotificationBell() {
       }
     };
 
-    fetchUnread();
+    // Delay the very first fetch so native modules (Keychain, axios
+    // interceptor) can finish initialising on a cold boot. Second
+    // launches are unaffected because the modules are already warm.
+    const firstFetch = setTimeout(() => {
+      if (!cancelled) fetchUnread();
+    }, 1200);
     timerId = setInterval(fetchUnread, UNREAD_POLL_MS);
     return () => {
       cancelled = true;
+      clearTimeout(firstFetch);
       if (timerId) clearInterval(timerId);
     };
   }, [isGuest]);

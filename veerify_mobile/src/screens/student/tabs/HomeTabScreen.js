@@ -25,6 +25,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import {
   Bell, ChevronDown, MapPin, ChevronRight, Sparkles, Building2,
   Calendar, PlayCircle, Lock, Radio, GraduationCap, Navigation2,
+  Phone, Mail, Star, Clock, Users, Globe2,
 } from 'lucide-react-native';
 
 import apiClient from '../../../api/client';
@@ -53,7 +54,7 @@ function formatEventDate(iso) {
 
 export default function HomeTabScreen({ navigation }) {
   const { user } = useAuth();
-  const { selectedInstitution, loading: instLoading } = useInstitution();
+  const { selectedInstitution, loading: instLoading, selectInstitution } = useInstitution();
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -61,6 +62,19 @@ export default function HomeTabScreen({ navigation }) {
   const [banners, setBanners] = useState([]);
   const [categories, setCategories] = useState([]);
   const [featuredPrograms, setFeaturedPrograms] = useState([]);
+  // Full active-course catalogue for the currently-selected academy. The
+  // dedicated InstitutionDetail screen used to own this list; we now
+  // render it inline on Home so tapping a nearby academy swaps the
+  // content in place instead of pushing a new screen.
+  const [allPrograms, setAllPrograms] = useState([]);
+  // Details for the currently-selected academy — description, contact,
+  // rating. Powers the "Academy Details" card that renders under the
+  // banner when an academy is picked.
+  const [instDetails, setInstDetails] = useState(null);
+  // When the user taps a nearby academy row we scroll back to the top
+  // so the newly-loaded branding banner is what they see first. Ref
+  // to the outer ScrollView.
+  const scrollRef = useRef(null);
   const [events, setEvents] = useState([]);
   const [nearbyAcademies, setNearbyAcademies] = useState([]);
   // Origin the student picked (GPS coords or pincode-resolved coords).
@@ -170,20 +184,38 @@ export default function HomeTabScreen({ navigation }) {
 
       // ── Institution-scoped (only when one is picked) ──
       if (selectedInstitution?.id) {
-        const progRes = await apiClient
-          .get(`/institutions/${selectedInstitution.id}/programs?featured=true&limit=10`)
-          .catch(() => ({ data: { programs: [] } }));
-        let featured = progRes.data.programs || [];
-        // Fallback so the Featured section doesn't render empty on a fresh academy.
-        if (featured.length === 0) {
-          const all = await apiClient
-            .get(`/institutions/${selectedInstitution.id}/programs?limit=6`)
-            .catch(() => ({ data: { programs: [] } }));
-          featured = all.data.programs || [];
-        }
+        // Three parallel calls for the selected academy:
+        //   1. featured programs (top of Home)
+        //   2. full active course list (renders inline below featured
+        //      — replaces the old InstitutionDetail screen)
+        //   3. fresh academy details (description, phone, email, city,
+        //      rating) so the "Academy Details" card stays in sync
+        //      when the user switches academies inline.
+        const [featuredRes, allRes, detailRes] = await Promise.all([
+          apiClient
+            .get(`/institutions/${selectedInstitution.id}/programs?featured=true&limit=10`)
+            .catch(() => ({ data: { programs: [] } })),
+          apiClient
+            .get(`/institutions/${selectedInstitution.id}/programs?limit=50`)
+            .catch(() => ({ data: { programs: [] } })),
+          apiClient
+            .get(`/institutions/${selectedInstitution.id}`)
+            .catch(() => ({ data: { institution: null } })),
+        ]);
+        let featured = featuredRes.data.programs || [];
+        const allProgs = (allRes.data.programs || []).filter(
+          (c) => !c.status || String(c.status).toLowerCase() === 'active',
+        );
+        // Fallback so the Featured strip doesn't render empty on a
+        // fresh academy — pull the first few from the full list.
+        if (featured.length === 0) featured = allProgs.slice(0, 6);
         setFeaturedPrograms(featured);
+        setAllPrograms(allProgs);
+        setInstDetails(detailRes.data?.institution || null);
       } else {
         setFeaturedPrograms([]);
+        setAllPrograms([]);
+        setInstDetails(null);
       }
     } catch (err) {
       console.log('[Home] load error:', err?.message);
@@ -226,6 +258,7 @@ export default function HomeTabScreen({ navigation }) {
   return (
     <View style={styles.screen}>
       <ScrollView
+        ref={scrollRef}
         showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl
@@ -278,6 +311,19 @@ export default function HomeTabScreen({ navigation }) {
           }]}
         />
 
+        {/* ── Academy Details (inline, replaces the old
+            InstitutionDetail screen) ────────────────────────────
+            Renders directly under the branding banner whenever an
+            academy is selected. Shows the academy's logo, name, city,
+            description, and contact info so tapping a nearby row on
+            Home yields the same context the old detail screen used
+            to. Hidden for the "no academy picked yet" state. */}
+        {selectedInstitution?.id ? (
+          <AcademyDetailsCard
+            institution={instDetails || selectedInstitution}
+          />
+        ) : null}
+
         {/* ── Categories ──────────────────────────────────────── */}
         {/* Horizontal card carousel matching the design reference.
             Extra vertical padding (paddingVertical: 8) ensures the
@@ -285,6 +331,10 @@ export default function HomeTabScreen({ navigation }) {
             on either platform. gap: spacing.md keeps consistent
             breathing room between cards regardless of screen size. */}
         {categories.length > 0 && (
+          // Extra top spacer nudges the whole "Browse by Category"
+          // block downward so it doesn't crowd the banner / academy
+          // details card above it.
+          <View style={{ marginTop: spacing.xl }}>
           <Section title="Browse by Category">
             <ScrollView
               horizontal
@@ -307,6 +357,7 @@ export default function HomeTabScreen({ navigation }) {
               ))}
             </ScrollView>
           </Section>
+          </View>
         )}
 
         {/* ── Pick-an-academy soft prompt (only when none selected) ── */}
@@ -367,6 +418,28 @@ export default function HomeTabScreen({ navigation }) {
         </Section>
         ) : null}
 
+        {/* ── All Courses at this Academy ─────────────────────────
+            Full active-course list for the currently-selected
+            academy. Renders inline so tapping a nearby-academy row
+            surfaces the same "Courses Offered" list the removed
+            InstitutionDetail screen used to render. */}
+        {selectedInstitution?.id && allPrograms.length > 0 ? (
+          <Section
+            title="All Courses"
+            subtitle={selectedInstitution?.name}
+          >
+            <View style={{ paddingHorizontal: spacing.xl, gap: spacing.md }}>
+              {allPrograms.map((p) => (
+                <AcademyCourseCard
+                  key={`ac-${p.id}`}
+                  course={p}
+                  onPress={() => navigation.navigate('CourseDetail', { courseId: p.id })}
+                />
+              ))}
+            </View>
+          </Section>
+        ) : null}
+
         {/* ── Upcoming Live Classes ───────────────────────────── */}
         {/* Hidden for guest users — they have no enrolled batches yet,
             so the section would render permanently empty and create
@@ -395,7 +468,30 @@ export default function HomeTabScreen({ navigation }) {
                   key={`${a.kind || 'inst'}-${a.id}`}
                   academy={a}
                   accent={cycleAccent(i)}
-                  onPress={() => navigation.navigate('SelectInstitution')}
+                  onPress={() => {
+                    // Inline academy switch — no new screen. Branch
+                    // pins select their PARENT institution so branding
+                    // banners and courses still resolve; the picked
+                    // sub-branch context (batches, etc.) can layer on
+                    // later. Home reacts to the context change via the
+                    // useEffect on selectedInstitution.id and re-loads
+                    // banner + course + details for the new academy.
+                    const targetId = a.kind === 'branch'
+                      ? (a.institution_id || a.id)
+                      : a.id;
+                    const targetName = a.kind === 'branch' && a.institution_name
+                      ? a.institution_name
+                      : a.name;
+                    selectInstitution({
+                      id:        targetId,
+                      name:      targetName,
+                      logo_url:  a.logo_url,
+                      city:      a.city,
+                    });
+                    // Snap back to the top so the new academy's banner
+                    // is the first thing the user sees.
+                    try { scrollRef.current?.scrollTo({ y: 0, animated: true }); } catch (_) {}
+                  }}
                 />
               ))}
             </View>
@@ -840,6 +936,152 @@ function EmptyInline({ icon: Icon, text }) {
 const ACCENTS = [palette.purple, palette.blue, palette.green, palette.orange, palette.pink, palette.teal];
 function cycleAccent(i) { return ACCENTS[i % ACCENTS.length]; }
 
+// ─────────────────────────────────────────────────────────────────────
+// AcademyDetailsCard — renders under the branding banner whenever an
+// academy is selected. Same info the old InstitutionDetail screen led
+// with: logo, name, city, description, phone, email, rating pill.
+// ─────────────────────────────────────────────────────────────────────
+function AcademyDetailsCard({ institution }) {
+  if (!institution) return null;
+  const logo = institution.logo_url ? resolveAssetUrl(institution.logo_url) : null;
+  const rating = institution.rating || institution.avg_rating;
+  return (
+    <View style={styles.acadCard}>
+      <View style={styles.acadHead}>
+        {logo ? (
+          <Image source={{ uri: logo }} style={styles.acadLogo} />
+        ) : (
+          <View style={[styles.acadLogo, styles.acadLogoPlaceholder]}>
+            <Building2 size={24} color={palette.purple.vivid} strokeWidth={2.2} />
+          </View>
+        )}
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text style={styles.acadName} numberOfLines={2}>{institution.name}</Text>
+          <View style={styles.acadMetaRow}>
+            {institution.city ? (
+              <View style={styles.acadMetaItem}>
+                <MapPin size={11} color={palette.textMuted} strokeWidth={2.2} />
+                <Text style={styles.acadMetaText}>{institution.city}</Text>
+              </View>
+            ) : null}
+            {rating ? (
+              <View style={styles.acadRatingPill}>
+                <Star size={11} color="#B45309" strokeWidth={2.4} fill="#F59E0B" />
+                <Text style={styles.acadRatingText}>{Number(rating).toFixed(1)}</Text>
+              </View>
+            ) : null}
+          </View>
+        </View>
+      </View>
+
+      {institution.description ? (
+        <Text style={styles.acadDesc} numberOfLines={4}>
+          {institution.description}
+        </Text>
+      ) : null}
+
+      {(institution.phone || institution.email) ? (
+        <View style={styles.acadContactRow}>
+          {institution.phone ? (
+            <View style={styles.acadContact}>
+              <Phone size={12} color={palette.purple.vivid} strokeWidth={2.4} />
+              <Text style={styles.acadContactText} numberOfLines={1}>{institution.phone}</Text>
+            </View>
+          ) : null}
+          {institution.email ? (
+            <View style={styles.acadContact}>
+              <Mail size={12} color={palette.purple.vivid} strokeWidth={2.4} />
+              <Text style={styles.acadContactText} numberOfLines={1}>{institution.email}</Text>
+            </View>
+          ) : null}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// AcademyCourseCard — one row per course under "All Courses" on Home.
+// Trimmed-down twin of the old InstitutionDetailScreen course card:
+// cover image, title, price, mode, level, duration. Tap → CourseDetail
+// (existing enrolment flow).
+// ─────────────────────────────────────────────────────────────────────
+function AcademyCourseCard({ course, onPress }) {
+  const mode = (course.mode || 'offline').toLowerCase();
+  const modeAccent = mode === 'online' ? palette.blue
+    : mode === 'hybrid' ? palette.teal
+      : palette.purple;
+  const fee = course.price
+    ? `₹${Number(course.price).toLocaleString('en-IN')}`
+    : 'Free';
+  const img = course.image_url ? resolveAssetUrl(course.image_url) : null;
+
+  return (
+    <TouchableOpacity onPress={onPress} activeOpacity={0.9} style={styles.acadCourseCard}>
+      {img ? (
+        <Image source={{ uri: img }} style={styles.acadCourseImage} />
+      ) : (
+        <View style={[styles.acadCourseImage, styles.acadCourseImageEmpty]}>
+          <GraduationCap size={30} color={palette.purple.vivid} strokeWidth={1.8} />
+        </View>
+      )}
+      <View style={styles.acadCourseBody}>
+        <View style={styles.acadCourseTitleRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.acadCourseTitle} numberOfLines={2}>
+              {course.title || course.name}
+            </Text>
+            {course.category ? (
+              <Text style={styles.acadCourseCat} numberOfLines={1}>{course.category}</Text>
+            ) : null}
+          </View>
+          <View style={{ alignItems: 'flex-end' }}>
+            <Text style={styles.acadCoursePrice}>{fee}</Text>
+            {course.price ? <Text style={styles.acadCoursePricePer}>/month</Text> : null}
+          </View>
+        </View>
+
+        {course.short_description || course.description ? (
+          <Text style={styles.acadCourseDesc} numberOfLines={2}>
+            {course.short_description || course.description}
+          </Text>
+        ) : null}
+
+        <View style={styles.acadCoursePills}>
+          <View style={[styles.acadPill, { backgroundColor: modeAccent.soft }]}>
+            <Globe2 size={10} color={modeAccent.on} strokeWidth={2.4} />
+            <Text style={[styles.acadPillText, { color: modeAccent.on }]}>
+              {mode.charAt(0).toUpperCase() + mode.slice(1)}
+            </Text>
+          </View>
+          {course.level ? (
+            <View style={[styles.acadPill, { backgroundColor: palette.purple.soft }]}>
+              <Star size={10} color={palette.purple.on} strokeWidth={2.4} />
+              <Text style={[styles.acadPillText, { color: palette.purple.on }]}>
+                {course.level}
+              </Text>
+            </View>
+          ) : null}
+          {course.age_group ? (
+            <View style={styles.acadMeta}>
+              <Users size={11} color={palette.textMuted} strokeWidth={2.2} />
+              <Text style={styles.acadMetaTextSmall}>{course.age_group}</Text>
+            </View>
+          ) : null}
+          {course.duration_months ? (
+            <View style={styles.acadMeta}>
+              <Clock size={11} color={palette.textMuted} strokeWidth={2.2} />
+              <Text style={styles.acadMetaTextSmall}>
+                {course.duration_months} {course.duration_months === 1 ? 'Month' : 'Months'}
+              </Text>
+            </View>
+          ) : null}
+        </View>
+      </View>
+    </TouchableOpacity>
+  );
+}
+
 // ─── Styles ──────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: palette.bg },
@@ -1082,4 +1324,66 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: palette.borderSoft,
   },
   emptyInlineText: { ...type.body, color: palette.textMuted, flex: 1 },
+
+  // ── AcademyDetailsCard ──────────────────────────────────────────
+  acadCard: {
+    marginHorizontal: spacing.xl,
+    marginTop: spacing.lg,
+    backgroundColor: palette.surface,
+    borderRadius: radius.lg,
+    padding: spacing.lg,
+    ...shadows.card,
+  },
+  acadHead: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginBottom: spacing.sm },
+  acadLogo: {
+    width: 56, height: 56, borderRadius: 28,
+    backgroundColor: palette.borderSoft,
+  },
+  acadLogoPlaceholder: { alignItems: 'center', justifyContent: 'center' },
+  acadName: { ...type.h2, color: palette.text, fontWeight: '800', fontSize: 17 },
+  acadMetaRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginTop: 4, flexWrap: 'wrap' },
+  acadMetaItem: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  acadMetaText: { ...type.caption, color: palette.textMuted },
+  acadRatingPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 3,
+    paddingHorizontal: 8, paddingVertical: 2,
+    borderRadius: radius.pill,
+    backgroundColor: '#FEF3C7',
+  },
+  acadRatingText: { fontSize: 11, fontWeight: '800', color: '#B45309' },
+  acadDesc: { ...type.body, color: palette.text, lineHeight: 20, marginTop: spacing.sm },
+  acadContactRow: {
+    flexDirection: 'row', gap: spacing.md, marginTop: spacing.md, flexWrap: 'wrap',
+  },
+  acadContact: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  acadContactText: { ...type.caption, color: palette.textMuted, maxWidth: 180 },
+
+  // ── AcademyCourseCard ───────────────────────────────────────────
+  acadCourseCard: {
+    backgroundColor: palette.surface,
+    borderRadius: radius.lg,
+    overflow: 'hidden',
+    ...shadows.card,
+  },
+  acadCourseImage: { width: '100%', height: 130, backgroundColor: palette.borderSoft },
+  acadCourseImageEmpty: { alignItems: 'center', justifyContent: 'center' },
+  acadCourseBody: { padding: spacing.md },
+  acadCourseTitleRow: { flexDirection: 'row', alignItems: 'flex-start', gap: spacing.sm },
+  acadCourseTitle: { ...type.bodyBold, color: palette.text, fontSize: 15, fontWeight: '800' },
+  acadCourseCat: { ...type.caption, color: palette.purple.vivid, marginTop: 2, fontWeight: '700' },
+  acadCoursePrice: { ...type.h3, color: palette.text, fontWeight: '800', fontSize: 15 },
+  acadCoursePricePer: { ...type.micro, color: palette.textMuted, marginTop: -2 },
+  acadCourseDesc: { ...type.caption, color: palette.textMuted, marginTop: 6, lineHeight: 18 },
+  acadCoursePills: {
+    flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: spacing.sm,
+    alignItems: 'center',
+  },
+  acadPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 3,
+    paddingHorizontal: 8, paddingVertical: 3,
+    borderRadius: radius.pill,
+  },
+  acadPillText: { fontSize: 10, fontWeight: '800' },
+  acadMeta: { flexDirection: 'row', alignItems: 'center', gap: 3 },
+  acadMetaTextSmall: { ...type.micro, color: palette.textMuted, fontWeight: '700' },
 });
