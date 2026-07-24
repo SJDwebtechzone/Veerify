@@ -55,6 +55,11 @@ export default function BatchesListScreen({ navigation }) {
   const [batches, setBatches] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  // Read-only gate for sub-branch admins per spec: Branch Admins can
+  // VIEW their branch's batches but cannot Create / Edit / Delete /
+  // Add Student. We flip this by reading /institutions/me/details and
+  // checking parent_institution_id — same signal MoreTab uses.
+  const [isBranchAdmin, setIsBranchAdmin] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -65,6 +70,22 @@ export default function BatchesListScreen({ navigation }) {
   }, []);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  // One-shot fetch on mount — no dependency on batches list, so it
+  // doesn't refire on every list refresh.
+  useCallback(() => {}, []);
+  React.useEffect(() => {
+    let cancelled = false;
+    apiClient
+      .get('/institutions/me/details')
+      .then((r) => {
+        if (cancelled) return;
+        const inst = r.data?.institution || r.data || {};
+        setIsBranchAdmin(!!inst.parent_institution_id);
+      })
+      .catch(() => { /* fall back to main-admin behaviour */ });
+    return () => { cancelled = true; };
+  }, []);
 
   const onDelete = (batch) => {
     // Branded destructive confirm — pink shield hero + glow'd Delete
@@ -191,14 +212,18 @@ export default function BatchesListScreen({ navigation }) {
             <Text style={{ fontSize: 12, marginTop: 8, color: colors.textLight }}>👨‍🏫 {item.trainer_name || 'No trainer assigned'}</Text>
             <Text style={{ fontSize: 12, marginTop: 2, color: colors.textLight }}>👥 Capacity: {item.capacity} | Mode: {item.mode}</Text>
 
+            {/* Row-level actions — Edit and Delete are HIDDEN for
+                sub-branch admins per spec (batches are read-only from
+                the branch side). Add Student stays visible because
+                student enrolment is a branch-admin capability. */}
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 10 }}>
-              {/* Add Student — opens the enrollment form pre-bound to this
-                  batch. Lets the institution admin register a student
-                  directly into the picked batch in one tap. */}
+              {/* Add Student — opens the enrollment form pre-bound
+                  to this batch in ADMIN mode. */}
               <TouchableOpacity
                 onPress={(e) => {
                   e.stopPropagation?.();
                   navigation.navigate('EnrollmentForm', {
+                    adminMode: true,
                     batchId: item.id,
                     batch: item,
                     course: { id: item.course_id, name: item.course_name },
@@ -218,29 +243,37 @@ export default function BatchesListScreen({ navigation }) {
                 <Text style={{ color: '#fff', fontWeight: '700', fontSize: 12 }}>+ Add Student</Text>
               </TouchableOpacity>
 
-              {/* Edit — reuses CreateBatch screen in edit mode. The screen
-                  reads `route.params.batch` and pre-fills every field,
-                  then submits via PUT /batches/:id instead of POST. */}
-              <TouchableOpacity
-                onPress={(e) => {
-                  e.stopPropagation?.();
-                  navigation.navigate('CreateBatch', { batch: item });
-                }}
-              >
-                <Text style={{ color: colors.primary, fontWeight: '700' }}>Edit</Text>
-              </TouchableOpacity>
+              {/* Edit + Delete — main-institution admin only. Branch
+                  admins get a read-only card. */}
+              {!isBranchAdmin ? (
+                <>
+                  <TouchableOpacity
+                    onPress={(e) => {
+                      e.stopPropagation?.();
+                      navigation.navigate('CreateBatch', { batch: item });
+                    }}
+                  >
+                    <Text style={{ color: colors.primary, fontWeight: '700' }}>Edit</Text>
+                  </TouchableOpacity>
 
-              <TouchableOpacity onPress={(e) => { e.stopPropagation?.(); onDelete(item); }}>
-                <Text style={{ color: colors.danger, fontWeight: '600' }}>Delete</Text>
-              </TouchableOpacity>
+                  <TouchableOpacity onPress={(e) => { e.stopPropagation?.(); onDelete(item); }}>
+                    <Text style={{ color: colors.danger, fontWeight: '600' }}>Delete</Text>
+                  </TouchableOpacity>
+                </>
+              ) : null}
             </View>
           </TouchableOpacity>
         )}
       />
 
-      <TouchableOpacity style={commonStyles.fab} onPress={() => navigation.navigate('CreateBatch')}>
-        <Text style={commonStyles.fabText}>+</Text>
-      </TouchableOpacity>
+      {/* + Create Batch FAB — hidden for sub-branch admins per spec.
+          Only main-institution admins can create batches; branch
+          admins operate on batches provisioned by the parent. */}
+      {!isBranchAdmin ? (
+        <TouchableOpacity style={commonStyles.fab} onPress={() => navigation.navigate('CreateBatch')}>
+          <Text style={commonStyles.fabText}>+</Text>
+        </TouchableOpacity>
+      ) : null}
     </View>
   );
 }

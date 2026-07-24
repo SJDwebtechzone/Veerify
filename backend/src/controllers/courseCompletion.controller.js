@@ -428,10 +428,38 @@ exports.sendCertificate = async (req, res) => {
       if (Number.isNaN(d.getTime())) return now.toISOString().slice(0, 10);
       return d.toISOString().slice(0, 10);
     };
+    // Belt PROGRESSION — resolve the student's most recent belt_
+    // promotions row so the belt_from / belt_to placeholder pins can
+    // render "White Belt → Yellow Belt" on the certificate. If no
+    // promotion exists (e.g. certificate not tied to a grading
+    // event), both fields resolve to '' and the pins render blank
+    // per spec ("If a certificate is not associated with a belt
+    // promotion, the fields should remain blank or be hidden").
+    let beltFrom = '';
+    let beltTo   = '';
+    try {
+      const bp = await client.query(
+        `SELECT previous_belt, new_belt
+           FROM belt_promotions
+          WHERE student_id = $1
+          ORDER BY promoted_at DESC
+          LIMIT 1`,
+        [row.student_id],
+      );
+      if (bp.rows.length > 0) {
+        beltFrom = bp.rows[0].previous_belt || '';
+        beltTo   = bp.rows[0].new_belt      || '';
+      }
+    } catch (_) {
+      // Table missing / older schema — leave blank.
+    }
+
     const values = {
       student_name:     row.student_name,
       course_name:      row.course_name,
       belt_name:        currentBelt || 'White Belt',
+      belt_from:        beltFrom,
+      belt_to:          beltTo,
       institution_name: iRes.rows[0]?.name || '',
       venue:            iRes.rows[0]?.city || '',
       completion_date:  toISODate(row.belt_test_completed_at || row.course_completed_at),

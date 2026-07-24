@@ -20,6 +20,15 @@ router.put('/me/profile', verifyToken, authController.updateMyProfile);
 
 // Change own password
 router.post('/change-password', verifyToken, authController.changePassword);
+
+// Change own email — three-step OTP flow (request → verify, with
+// resend). All three require a valid JWT.
+router.post('/change-email/request', verifyToken, authController.requestEmailChange);
+router.post('/change-email/resend',  verifyToken, authController.resendEmailChangeOtp);
+router.post('/change-email/verify',  verifyToken, authController.verifyEmailChange);
+
+// Account activity audit for the caller.
+router.get('/account-activity', verifyToken, authController.listAccountActivity);
 // Self-service account deletion. Requires a valid JWT + the caller's
 // password in the body to guard against session-hijack deletions.
 // Anonymises the users row + student_profiles + trainer profile;

@@ -50,6 +50,11 @@ import CertificateTemplatesScreen from '../screens/admin/CertificateTemplatesScr
 import CertificateTemplateEditorScreen from '../screens/admin/CertificateTemplateEditorScreen';
 import AdminSalaryScreen from '../screens/admin/AdminSalaryScreen';
 import AdminAttendanceSummaryScreen from '../screens/admin/AdminAttendanceSummaryScreen';
+// Institution Login → Home → Attendance tile lands on the Overview
+// (batch-wise summary); tapping a batch drills into the per-student
+// detail for the picked date.
+import AdminAttendanceOverviewScreen from '../screens/admin/AdminAttendanceOverviewScreen';
+import AdminAttendanceDetailScreen from '../screens/admin/AdminAttendanceDetailScreen';
 import InstitutionLegalScreen from '../screens/admin/InstitutionLegalScreen';
 import LegalScreen from '../screens/shared/LegalScreen';
 import SupportScreen from '../screens/shared/SupportScreen';
@@ -88,6 +93,10 @@ import EnrolledCourseScreen from '../screens/student/EnrolledCourseScreen';
 import StaffTabNavigator from './StaffTabNavigator';
 import StaffNotificationsScreen from '../screens/staff/StaffNotificationsScreen';
 import StaffAttendanceHistoryScreen from '../screens/staff/StaffAttendanceHistoryScreen';
+// Both trainer and branch admin share the same attendance screen —
+// route.params.mode swaps the batches endpoint + downstream route
+// names. See StaffAttendanceScreen for the mode contract.
+import StaffAttendanceScreen from '../screens/staff/StaffAttendanceScreen';
 import StaffStudentDetailScreen from '../screens/staff/StaffStudentDetailScreen';
 import StaffLeaveRequestsScreen from '../screens/staff/StaffLeaveRequestsScreen';
 import StaffCompletedStudentsScreen from '../screens/staff/StaffCompletedStudentsScreen';
@@ -433,6 +442,35 @@ export default function AppNavigator() {
           <Stack.Screen
             name="AdminAttendanceSummary"
             component={AdminAttendanceSummaryScreen}
+            options={{ headerShown: false }}
+          />
+          {/* Institution admin's batch-wise Attendance Overview +
+              per-batch student detail. Reached from the Home tile. */}
+          <Stack.Screen
+            name="AdminAttendanceOverview"
+            component={AdminAttendanceOverviewScreen}
+            options={{ headerShown: false }}
+          />
+          <Stack.Screen
+            name="AdminAttendanceDetail"
+            component={AdminAttendanceDetailScreen}
+            options={{ headerShown: false }}
+          />
+          {/* Branch Login — Attendance module. Reuses the trainer's
+              StaffAttendance screens with route.params.mode='branch'.
+              Backend /batches auto-scopes to the caller's branch for
+              sub-branch admins, so the batch list is already trimmed
+              to that branch's batches server-side. */}
+          <Stack.Screen
+            name="BranchAttendance"
+            component={StaffAttendanceScreen}
+            initialParams={{ mode: 'branch' }}
+            options={{ headerShown: false }}
+          />
+          <Stack.Screen
+            name="BranchAttendanceHistory"
+            component={StaffAttendanceHistoryScreen}
+            initialParams={{ mode: 'branch' }}
             options={{ headerShown: false }}
           />
           {/* Institution-scoped policy editor — one screen, four tiles.
@@ -796,7 +834,7 @@ export default function AppNavigator() {
 // splash reads as an extension of the brand identity, not a one-off
 // colour. Letter-spacing + weight = 900 + a small case give the
 // tagline a premium wordmark feel without needing a custom font.
-const BRAND_RED = '#E63946';
+const BRAND_RED = '#5462bb';
 const splashStyles = StyleSheet.create({
   screen: {
     flex: 1,

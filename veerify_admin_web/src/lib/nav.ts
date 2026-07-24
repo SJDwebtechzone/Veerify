@@ -13,6 +13,8 @@ import {
   MessageSquare,
   Scale,
   HelpCircle,
+  Award,
+  ShieldCheck,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -118,6 +120,14 @@ export const navSections: NavSection[] = [
     icon: HelpCircle,
     to: '/faqs',
   },
+  // Sample certificate templates — global samples published from
+  // here appear in every institution's Certificate Templates screen
+  // under the read-only "Sample Certificates" section.
+  {
+    label: 'Certificate Templates',
+    icon: Award,
+    to: '/certificate-templates',
+  },
   // Platform-wide legal / policy pages. Super-admin only. Each entry
   // routes to the same editor screen with a different `slug` param.
   {
@@ -141,4 +151,8 @@ export const navSections: NavSection[] = [
       { label: 'General Settings', to: '/settings' },
     ],
   },
+  // Account Settings — reachable from the top-right avatar dropdown
+  // (My profile / Account settings / Sign out) instead of the sidebar
+  // so the sidebar stays product-focused. See components/layout
+  // AppHeader.tsx for the dropdown wiring.
 ];

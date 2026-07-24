@@ -250,11 +250,16 @@ export default function AdminDashboardScreen({ navigation }) {
           : `${todayAtt.present} / ${todayAtt.marked} marked today`,
       accent: palette.teal,
       icon: ClipboardCheck,
-      // Attendance is recorded per batch — open the batch list so the
-      // admin can pick a batch and drill into its attendance summary.
-      onPress: () => navigation.navigate('BatchesList'),
+      // Main-institution admin: open the read-only batch-wise
+      // Attendance Overview (batch summary → tap → student roster
+      // for the picked date).
+      // Sub-branch admin: open BranchAttendance so they can MARK
+      // attendance for their own branch's batches.
+      onPress: () => navigation.navigate(
+        data.is_sub_branch ? 'BranchAttendance' : 'AdminAttendanceOverview',
+      ),
     },
-  ]), [counts, navigation, todayAtt]);
+  ]), [counts, navigation, todayAtt, data.is_sub_branch]);
 
   // Revenue chart from the rolling 6-month series. The chart kit needs at
   // least one non-zero datum or it draws a flat line; if every month is 0
@@ -411,7 +416,14 @@ export default function AdminDashboardScreen({ navigation }) {
               { icon: CalendarPlus, label: 'Create Batch',     accent: palette.blue,   mainOnly: true, onPress: () => navigation.navigate('CreateBatch') },
               { icon: BellPlus,     label: 'Add Event',        accent: palette.green,  onPress: () => navigation.navigate('CreateEvent') },
               { icon: Megaphone,    label: 'Send Notice',      accent: palette.orange, onPress: () => navigation.navigate('SendAnnouncement') },
-              { icon: CalendarOff,  label: 'Trainer Leaves',   accent: palette.rose,   onPress: () => navigation.navigate('AdminTrainerLeaves') },
+              // Trainer Leaves — main-institution only. Leave
+              // approval / rejection is a parent-academy
+              // responsibility, so the tile is hidden for
+              // sub-branch admins (the existing mainOnly filter
+              // below drops the row entirely, and the grid
+              // reflows automatically because it's built by
+              // chunking the surviving actions into rows of 3).
+              { icon: CalendarOff,  label: 'Trainer Leaves',   accent: palette.rose,   mainOnly: true, onPress: () => navigation.navigate('AdminTrainerLeaves') },
               { icon: Megaphone,    label: 'Trainer Approvals', accent: palette.purple, mainOnly: true, onPress: () => navigation.navigate('PendingAnnouncements') },
               { icon: Gift,         label: 'Refer & Earn',     accent: palette.green,  mainOnly: true, onPress: () => navigation.navigate('AdminReferEarn') },
             ].filter((qa) => !(qa.mainOnly && data.is_sub_branch))

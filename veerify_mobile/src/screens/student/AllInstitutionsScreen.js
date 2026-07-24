@@ -55,12 +55,19 @@ export default function AllInstitutionsScreen({ navigation }) {
     // InstitutionDetail screen has been removed — its content now
     // renders inline on the Home tab. Select the tapped academy so
     // Home re-hydrates with its banner + details + courses, then
-    // jump back to Home.
+    // pop back to the tab navigator root. GuestHome (guest stack)
+    // and StudentTabs (student stack) both host StudentTabNavigator,
+    // so popToTop works in either case; the try/catch chain is a
+    // defensive fallback for older nav trees.
     const picked = institutions.find((i) => i.id === id);
     if (picked) selectInstitution(picked);
-    try { navigation.navigate('Main'); } catch (_) {
-      try { navigation.getParent()?.navigate('Main'); } catch (__) {}
-    }
+    // See CategoryAcademiesScreen for the "don't use popToTop" note —
+    // on the guest stack, popToTop lands on Welcome (index 0), not
+    // the tab navigator. `navigate` by name is the safe hop.
+    try { navigation.navigate('GuestHome'); return; } catch (_) { /* try next */ }
+    try { navigation.navigate('StudentTabs'); return; } catch (_) { /* try next */ }
+    try { navigation.getParent()?.navigate('GuestHome'); return; } catch (_) { /* noop */ }
+    try { navigation.getParent()?.navigate('StudentTabs'); } catch (_) { /* noop */ }
   };
 
   if (loading) {

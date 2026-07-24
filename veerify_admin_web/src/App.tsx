@@ -28,8 +28,10 @@ import { InstitutionPayouts } from './pages/payments/InstitutionPayouts';
 import { SubscriptionPayments } from './pages/payments/SubscriptionPayments';
 import { ReferralSettings } from './pages/settings/ReferralSettings';
 import { Profile } from './pages/Profile';
+import { AccountSettings } from './pages/AccountSettings';
 import { Feedback } from './pages/feedback/Feedback';
 import { Faqs } from './pages/faqs/Faqs';
+import { SampleCertificates } from './pages/certificates/SampleCertificates';
 import { LegalPageEditor } from './pages/legal/LegalPageEditor';
 import PrivacyPolicy         from './pages/PrivacyPolicy';
 import TermsAndConditions    from './pages/TermsAndConditions';
@@ -102,6 +104,10 @@ export default function App() {
             mobile app fetches them role-scoped via GET /api/faqs. */}
         <Route path="/faqs" element={<Faqs />} />
 
+        {/* Sample Certificate Templates — super-admin manages the
+            global samples every institution can preview + copy. */}
+        <Route path="/certificate-templates" element={<SampleCertificates />} />
+
         {/* Platform-wide Legal / policy pages — super-admin editor.
             One route serves all five policies; the :slug URL param
             selects which page the editor loads and saves. */}
@@ -116,6 +122,10 @@ export default function App() {
         {/* My Profile — super-admin's own card. Reachable from the navbar
             avatar menu. Persists edits to /api/auth/me/profile. */}
         <Route path="/profile" element={<Profile />} />
+
+        {/* Account Settings — change email (with OTP), change password,
+            and view recent account activity. */}
+        <Route path="/account/settings" element={<AccountSettings />} />
 
         {/* Fallback */}
         <Route path="*" element={<PlaceholderPage title="Page not found" description="The page you're looking for doesn't exist." />} />

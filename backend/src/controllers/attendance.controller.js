@@ -581,6 +581,133 @@ exports.getInstitutionTodayAttendance = async (req, res) => {
   }
 };
 
+// GET /api/attendance/institution/by-batch?date=YYYY-MM-DD
+//
+// Institution-wide batch-wise attendance summary for a specific date.
+// Powers the Home Dashboard → Attendance drill-in on the mobile app.
+// Sub-branch admins see only their own branch's batches; main admins
+// see every batch under the root institution tree.
+//
+// Response shape:
+//   { date: '2026-07-24',
+//     batches: [
+//       { batch_id, name, course_id, course_name,
+//         trainer_id, trainer_name,
+//         total_students,  -- enrolments in this batch
+//         marked,          -- attendance rows for the date
+//         present, absent, late, leave,
+//         percentage       -- Math.round(present / marked * 100)
+//       }, ...
+//     ]
+//   }
+//
+// Batches with no attendance recorded for the date still appear so
+// the admin can see who hasn't marked yet (marked=0, percentage=0).
+exports.getInstitutionByBatch = async (req, res) => {
+  try {
+    // Resolve institution + branch scope (same pattern as
+    // getInstitutionTodayAttendance).
+    const u = await pool.query(
+      `SELECT institution_id FROM users WHERE id = $1`, [req.user.id],
+    );
+    const instId = u.rows[0]?.institution_id;
+    if (!instId) {
+      return res.status(403).json({ message: 'No institution linked' });
+    }
+    const scope = await getBranchScope(req.user.id);
+
+    // Date param — defaults to CURRENT_DATE so the Home tile → drill
+    // opens on today. Client can pass ?date=YYYY-MM-DD for any day.
+    const dateParam = req.query.date && /^\d{4}-\d{2}-\d{2}$/.test(req.query.date)
+      ? req.query.date
+      : null;
+
+    const params = [instId, dateParam];
+    let batchWhere = '';
+    if (scope?.type === 'sub_branch') {
+      params.push(instId);
+      batchWhere = `AND b.branch_id = $${params.length}`;
+    }
+
+    const rows = await pool.query(
+      `WITH scoped_batches AS (
+         SELECT b.id, b.name, b.course_id, b.trainer_id, b.institution_id
+           FROM batches b
+           JOIN institutions i ON i.id = b.institution_id
+          WHERE (i.id = $1 OR i.parent_institution_id = $1)
+            ${batchWhere}
+       ),
+       enrolments AS (
+         SELECT batch_id, COUNT(*)::int AS total_students
+           FROM enrollments
+          WHERE batch_id IN (SELECT id FROM scoped_batches)
+          GROUP BY batch_id
+       ),
+       day_att AS (
+         SELECT batch_id,
+                COUNT(*)::int AS marked,
+                COUNT(*) FILTER (WHERE status = 'present')::int AS present,
+                COUNT(*) FILTER (WHERE status = 'absent')::int  AS absent,
+                COUNT(*) FILTER (WHERE status = 'late')::int    AS late,
+                COUNT(*) FILTER (WHERE status = 'leave')::int   AS leave_count
+           FROM attendance
+          WHERE date = COALESCE($2::date, CURRENT_DATE)
+            AND batch_id IN (SELECT id FROM scoped_batches)
+          GROUP BY batch_id
+       )
+       SELECT sb.id                                 AS batch_id,
+              sb.name                               AS name,
+              c.id                                  AS course_id,
+              c.name                                AS course_name,
+              t.id                                  AS trainer_id,
+              tu.name                               AS trainer_name,
+              COALESCE(e.total_students, 0)         AS total_students,
+              COALESCE(da.marked,   0)              AS marked,
+              COALESCE(da.present,  0)              AS present,
+              COALESCE(da.absent,   0)              AS absent,
+              COALESCE(da.late,     0)              AS late,
+              COALESCE(da.leave_count, 0)           AS leave
+         FROM scoped_batches sb
+         JOIN courses  c    ON c.id = sb.course_id
+         LEFT JOIN trainers t ON t.id = sb.trainer_id
+         LEFT JOIN users    tu ON tu.id = t.user_id
+         LEFT JOIN enrolments e ON e.batch_id = sb.id
+         LEFT JOIN day_att    da ON da.batch_id = sb.id
+        ORDER BY sb.name ASC`,
+      params,
+    );
+
+    const batches = rows.rows.map((r) => {
+      const marked = Number(r.marked) || 0;
+      const present = Number(r.present) || 0;
+      const percentage = marked > 0 ? Math.round((present / marked) * 100) : 0;
+      return {
+        batch_id:       r.batch_id,
+        name:           r.name,
+        course_id:      r.course_id,
+        course_name:    r.course_name,
+        trainer_id:     r.trainer_id,
+        trainer_name:   r.trainer_name || null,
+        total_students: Number(r.total_students) || 0,
+        marked,
+        present,
+        absent:  Number(r.absent) || 0,
+        late:    Number(r.late) || 0,
+        leave:   Number(r.leave) || 0,
+        percentage,
+      };
+    });
+
+    res.json({
+      date: dateParam || new Date().toISOString().slice(0, 10),
+      batches,
+    });
+  } catch (err) {
+    console.error('Get institution by-batch attendance error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
 // GET my attendance (student)
 exports.getMyAttendance = async (req, res) => {
   try {

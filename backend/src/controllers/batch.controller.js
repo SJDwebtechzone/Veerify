@@ -52,6 +52,16 @@ exports.createBatch = async (req, res) => {
     if (!group?.callerInstId) {
       return res.status(400).json({ message: 'You must create an institution first' });
     }
+    // Sub-branch admin — read-only batches per spec. Provisioning /
+    // assigning trainers happens at the parent (main-institution)
+    // level; branch admins can only view + mark attendance + enrol
+    // students into batches the parent set up.
+    if (group.isSubBranchAdmin) {
+      return res.status(403).json({
+        message: 'Branch admins cannot create batches. Ask the main-institution admin to add a batch for this branch.',
+        code:    'BRANCH_ADMIN_READ_ONLY',
+      });
+    }
     const institutionId = group.callerInstId;
 
     // Verify the course belongs to this institution
@@ -312,6 +322,13 @@ exports.updateBatch = async (req, res) => {
     if (!group?.rootId) {
       return res.status(403).json({ message: 'No institution linked' });
     }
+    // Sub-branch admin — read-only batches per spec.
+    if (group.isSubBranchAdmin) {
+      return res.status(403).json({
+        message: 'Branch admins cannot edit batches. Ask the main-institution admin to update this batch.',
+        code:    'BRANCH_ADMIN_READ_ONLY',
+      });
+    }
 
     const check = await pool.query(
       'SELECT institution_id, branch_id FROM batches WHERE id = $1',
@@ -371,6 +388,13 @@ exports.deleteBatch = async (req, res) => {
     const group = await getAcademyGroup(req.user.id);
     if (!group?.rootId) {
       return res.status(403).json({ message: 'No institution linked' });
+    }
+    // Sub-branch admin — read-only batches per spec.
+    if (group.isSubBranchAdmin) {
+      return res.status(403).json({
+        message: 'Branch admins cannot delete batches. Ask the main-institution admin to remove this batch.',
+        code:    'BRANCH_ADMIN_READ_ONLY',
+      });
     }
 
     const check = await pool.query(

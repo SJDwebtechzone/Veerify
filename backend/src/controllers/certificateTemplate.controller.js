@@ -31,6 +31,13 @@ const pool = require('../config/db');
 // present AND the pin is active. Everything else is text.
 const PLACEHOLDER_KEYS = [
   'student_name', 'course_name', 'belt_name',
+  // belt_from / belt_to — draggable pins that render the student's
+  // belt PROGRESSION (previous belt → current belt) as read from
+  // their most recent belt_promotion row. They complement the
+  // existing `belt_name` pin (which is the current belt only) so
+  // an institution can show either "Blue Belt" or the full
+  // "White Belt → Yellow Belt" transition anywhere on the artwork.
+  'belt_from', 'belt_to',
   'certificate_no', 'issue_date', 'completion_date',
   'instructor_name', 'institution_name', 'branch_name',
   'venue', 'duration',
@@ -170,15 +177,298 @@ exports.list = async (req, res) => {
   try {
     const institutionId = await getMyInstitutionId(req.user.id);
     if (!institutionId) return res.status(403).json({ message: 'No institution linked' });
+    // My Certificates only — sample rows live in a separate list
+    // (see exports.listSamples) so the mobile UI can render them in
+    // their own section without accidentally letting the institution
+    // edit / delete a shared platform sample.
     const r = await pool.query(
       `SELECT * FROM certificate_templates
         WHERE institution_id = $1
+          AND is_sample = FALSE
         ORDER BY is_default DESC, created_at DESC`,
       [institutionId],
     );
     res.json({ count: r.rows.length, templates: r.rows });
   } catch (err) {
     console.error('list templates error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// GET /api/certificate-templates/samples
+//
+// Global sample certificate templates published by the super-admin
+// web panel. Any authenticated institution admin (or super admin)
+// can read this list. Rows are read-only from the mobile side; the
+// only mutating action available is "Use as Template" (a copy into
+// the caller's own institution templates — see exports.copySample).
+exports.listSamples = async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT * FROM certificate_templates
+        WHERE is_sample = TRUE
+        ORDER BY is_default DESC, created_at DESC`,
+    );
+    res.json({ count: r.rows.length, templates: r.rows });
+  } catch (err) {
+    console.error('list samples error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// POST /api/certificate-templates/samples
+// Super-admin only. Creates a sample row that lives platform-wide.
+exports.createSample = async (req, res) => {
+  try {
+    if (req.user?.role !== 'super_admin') {
+      return res.status(403).json({ message: 'Super admin only' });
+    }
+    const b = req.body || {};
+    if (!b.name || !b.background_url) {
+      return res.status(400).json({ message: 'name and background_url are required' });
+    }
+    // A sample can also be marked default — enforced platform-wide by
+    // the partial unique index from migration 071.
+    const wantDefault = !!b.is_default;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      if (wantDefault) {
+        await client.query(
+          `UPDATE certificate_templates SET is_default = FALSE
+            WHERE is_sample = TRUE AND is_default = TRUE`,
+        );
+      }
+      const r = await client.query(
+        `INSERT INTO certificate_templates
+           (institution_id, name, background_url, background_kind,
+            canvas_width, canvas_height, placeholders,
+            signature_url, seal_url,
+            from_belt, to_belt, belt_range_active,
+            is_default, is_sample, created_by)
+         VALUES (NULL, $1, $2, $3, $4, $5, $6::jsonb, $7, $8,
+                 $9, $10, $11, $12, TRUE, $13)
+         RETURNING *`,
+        [
+          String(b.name).slice(0, 120),
+          String(b.background_url).slice(0, 500),
+          b.background_kind === 'pdf' ? 'pdf' : 'image',
+          Number.isFinite(b.canvas_width)  ? b.canvas_width  : 1000,
+          Number.isFinite(b.canvas_height) ? b.canvas_height : 700,
+          JSON.stringify(sanitisePlaceholders(b.placeholders)),
+          b.signature_url ? String(b.signature_url).slice(0, 500) : null,
+          b.seal_url      ? String(b.seal_url).slice(0, 500)      : null,
+          b.from_belt ? String(b.from_belt).slice(0, 40) : null,
+          b.to_belt   ? String(b.to_belt).slice(0, 40)   : null,
+          !!b.belt_range_active,
+          wantDefault,
+          req.user.id,
+        ],
+      );
+      await client.query('COMMIT');
+      res.status(201).json({ template: r.rows[0] });
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    console.error('create sample error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// PUT /api/certificate-templates/samples/:id
+// Super-admin only. Updates a sample row.
+exports.updateSample = async (req, res) => {
+  try {
+    if (req.user?.role !== 'super_admin') {
+      return res.status(403).json({ message: 'Super admin only' });
+    }
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) return res.status(400).json({ message: 'Invalid id' });
+
+    const check = await pool.query(
+      `SELECT is_sample FROM certificate_templates WHERE id = $1`, [id],
+    );
+    if (check.rows.length === 0) return res.status(404).json({ message: 'Not found' });
+    if (!check.rows[0].is_sample) {
+      return res.status(400).json({ message: 'Row is an institution template, not a sample' });
+    }
+
+    const b = req.body || {};
+    const sigProvided  = Object.prototype.hasOwnProperty.call(b, 'signature_url');
+    const sealProvided = Object.prototype.hasOwnProperty.call(b, 'seal_url');
+    const sigValue     = sigProvided  ? (b.signature_url ? String(b.signature_url).slice(0, 500) : null) : undefined;
+    const sealValue    = sealProvided ? (b.seal_url      ? String(b.seal_url).slice(0, 500)      : null) : undefined;
+
+    const fromProvided  = Object.prototype.hasOwnProperty.call(b, 'from_belt');
+    const toProvided    = Object.prototype.hasOwnProperty.call(b, 'to_belt');
+    const activeProvided = Object.prototype.hasOwnProperty.call(b, 'belt_range_active');
+    const fromValue     = fromProvided ? (b.from_belt ? String(b.from_belt).slice(0, 40) : null) : undefined;
+    const toValue       = toProvided   ? (b.to_belt   ? String(b.to_belt).slice(0, 40)   : null) : undefined;
+    const activeValue   = activeProvided ? !!b.belt_range_active : null;
+
+    const r = await pool.query(
+      `UPDATE certificate_templates SET
+         name              = COALESCE($2, name),
+         background_url    = COALESCE(NULLIF($3, ''), background_url),
+         background_kind   = COALESCE($4, background_kind),
+         canvas_width      = COALESCE($5, canvas_width),
+         canvas_height     = COALESCE($6, canvas_height),
+         placeholders      = COALESCE($7::jsonb, placeholders),
+         signature_url     = CASE WHEN $9::boolean  THEN $8  ELSE signature_url     END,
+         seal_url          = CASE WHEN $11::boolean THEN $10 ELSE seal_url          END,
+         from_belt         = CASE WHEN $13::boolean THEN $12 ELSE from_belt         END,
+         to_belt           = CASE WHEN $15::boolean THEN $14 ELSE to_belt           END,
+         belt_range_active = CASE WHEN $17::boolean THEN $16 ELSE belt_range_active END,
+         updated_at        = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [
+        id,
+        b.name != null ? String(b.name).slice(0, 120) : null,
+        b.background_url != null ? String(b.background_url).slice(0, 500) : '',
+        b.background_kind === 'pdf' ? 'pdf' :
+          b.background_kind === 'image' ? 'image' : null,
+        Number.isFinite(b.canvas_width)  ? b.canvas_width  : null,
+        Number.isFinite(b.canvas_height) ? b.canvas_height : null,
+        Array.isArray(b.placeholders)
+          ? JSON.stringify(sanitisePlaceholders(b.placeholders)) : null,
+        sigValue  ?? null, sigProvided,
+        sealValue ?? null, sealProvided,
+        fromValue ?? null, fromProvided,
+        toValue   ?? null, toProvided,
+        activeValue, activeProvided,
+      ],
+    );
+    res.json({ template: r.rows[0] });
+  } catch (err) {
+    console.error('update sample error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// DELETE /api/certificate-templates/samples/:id — super-admin only.
+exports.removeSample = async (req, res) => {
+  try {
+    if (req.user?.role !== 'super_admin') {
+      return res.status(403).json({ message: 'Super admin only' });
+    }
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) return res.status(400).json({ message: 'Invalid id' });
+    const r = await pool.query(
+      `DELETE FROM certificate_templates
+        WHERE id = $1 AND is_sample = TRUE
+        RETURNING id`,
+      [id],
+    );
+    if (r.rowCount === 0) return res.status(404).json({ message: 'Not found or not a sample' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('remove sample error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// PATCH /api/certificate-templates/samples/:id/default — super-admin.
+exports.setSampleDefault = async (req, res) => {
+  try {
+    if (req.user?.role !== 'super_admin') {
+      return res.status(403).json({ message: 'Super admin only' });
+    }
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) return res.status(400).json({ message: 'Invalid id' });
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const check = await client.query(
+        `SELECT id FROM certificate_templates
+          WHERE id = $1 AND is_sample = TRUE FOR UPDATE`,
+        [id],
+      );
+      if (check.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ message: 'Not found' });
+      }
+      await client.query(
+        `UPDATE certificate_templates SET is_default = FALSE
+          WHERE is_sample = TRUE AND is_default = TRUE`,
+      );
+      const r = await client.query(
+        `UPDATE certificate_templates SET is_default = TRUE, updated_at = NOW()
+          WHERE id = $1
+          RETURNING *`,
+        [id],
+      );
+      await client.query('COMMIT');
+      res.json({ template: r.rows[0] });
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    console.error('set sample default error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// POST /api/certificate-templates/samples/:id/copy
+// Institution admin "Use as Template" — deep-copies a sample row
+// into the caller's own institution templates. The clone starts
+// with is_sample = FALSE, institution_id = caller's institution,
+// is_default = FALSE, and sample_id = the source sample so the UI
+// can badge "Based on sample X" and the source stays untouched.
+exports.copySample = async (req, res) => {
+  try {
+    const institutionId = await getMyInstitutionId(req.user.id);
+    if (!institutionId) return res.status(403).json({ message: 'No institution linked' });
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) return res.status(400).json({ message: 'Invalid id' });
+
+    const src = await pool.query(
+      `SELECT * FROM certificate_templates
+        WHERE id = $1 AND is_sample = TRUE`,
+      [id],
+    );
+    if (src.rows.length === 0) {
+      return res.status(404).json({ message: 'Sample not found' });
+    }
+    const s = src.rows[0];
+
+    const r = await pool.query(
+      `INSERT INTO certificate_templates
+         (institution_id, name, background_url, background_kind,
+          canvas_width, canvas_height, placeholders,
+          signature_url, seal_url,
+          from_belt, to_belt, belt_range_active,
+          is_default, is_sample, sample_id, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9,
+               $10, $11, $12, FALSE, FALSE, $13, $14)
+       RETURNING *`,
+      [
+        institutionId,
+        `${s.name} (Copy)`.slice(0, 120),
+        s.background_url,
+        s.background_kind,
+        s.canvas_width,
+        s.canvas_height,
+        JSON.stringify(s.placeholders || []),
+        s.signature_url,
+        s.seal_url,
+        s.from_belt,
+        s.to_belt,
+        !!s.belt_range_active,
+        s.id,
+        req.user.id,
+      ],
+    );
+    res.status(201).json({ template: r.rows[0] });
+  } catch (err) {
+    console.error('copy sample error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
@@ -437,7 +727,7 @@ exports.prepare = async (req, res) => {
       // real values to merge against.
       const dRes = await pool.query(
         `SELECT
-           cc.id, cc.certificate_sent_at, cc.course_completed_at,
+           cc.id, cc.student_id, cc.certificate_sent_at, cc.course_completed_at,
            cc.belt_test_completed_at, cc.test_remarks,
            u.name  AS student_name,
            sp.belt_category AS student_belt,
@@ -460,6 +750,32 @@ exports.prepare = async (req, res) => {
       );
       data = dRes.rows[0] || null;
       candidateBelt = req.body?.belt_name || data?.student_belt || null;
+
+      // Belt PROGRESSION (belt_from → belt_to) for the new
+      // draggable pins. Reads the student's most recent
+      // belt_promotions row. If no promotion exists (e.g. the
+      // certificate isn't tied to a grading event) both fields
+      // resolve to empty strings and the pins render blank —
+      // matching the spec: "If a certificate is not associated
+      // with a belt promotion, the fields should remain blank
+      // or be hidden."
+      try {
+        const bp = await pool.query(
+          `SELECT previous_belt, new_belt
+             FROM belt_promotions
+            WHERE student_id = $1
+            ORDER BY promoted_at DESC
+            LIMIT 1`,
+          [dRes.rows[0]?.student_id || 0],
+        );
+        if (bp.rows.length > 0) {
+          data.belt_from = bp.rows[0].previous_belt || '';
+          data.belt_to   = bp.rows[0].new_belt      || '';
+        }
+      } catch (_) {
+        // belt_promotions table optional / older schema — leave the
+        // fields empty so the pins render blank per spec.
+      }
 
       // Belt-range gate — reject preview when the student's belt sits
       // outside the template's active range. The admin sees the
@@ -496,6 +812,12 @@ exports.prepare = async (req, res) => {
       student_name:     data?.student_name     || 'Sample Student',
       course_name:      data?.course_name      || 'Sample Course',
       belt_name:        candidateBelt          || req.body?.belt_name || 'White Belt',
+      // Belt progression — resolved from belt_promotions.previous_belt
+      // → belt_promotions.new_belt above. Empty strings when no
+      // promotion exists so the pin renders blank on the certificate
+      // per spec.
+      belt_from:        data?.belt_from || '',
+      belt_to:          data?.belt_to   || '',
       certificate_no:   generateCertificateNo(institutionId),
       issue_date:       formatDate(new Date()),                    // NEW — today
       completion_date:  formatDate(data?.belt_test_completed_at || data?.course_completed_at),

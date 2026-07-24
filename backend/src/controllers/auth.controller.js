@@ -2,7 +2,12 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const pool = require('../config/db');
-const { sendPasswordResetEmail } = require('../utils/mailer');
+const {
+  sendPasswordResetEmail,
+  sendEmailChangeOtp,
+  sendEmailChangedNotice,
+  sendPasswordChangedNotice,
+} = require('../utils/mailer');
 const { dispatchWelcomeSms } = require('../utils/smsService');
 const {
   validateEmailFormat, validatePhoneFormat,
@@ -283,30 +288,82 @@ const result = await pool.query(
   }
 };
 
-// POST /api/auth/change-password — verify current password, hash new one.
+// ─── Account Settings helpers ────────────────────────────────────────
+// Password policy from the spec: min 8, at least one uppercase, one
+// lowercase, one digit, one special character. Returns the first
+// failure message or null on success so callers can respond 400
+// with a specific hint instead of a generic "invalid password".
+function validatePasswordPolicy(pw) {
+  if (typeof pw !== 'string' || pw.length < 8) {
+    return 'Password must be at least 8 characters long.';
+  }
+  if (!/[A-Z]/.test(pw)) return 'Password must include an uppercase letter.';
+  if (!/[a-z]/.test(pw)) return 'Password must include a lowercase letter.';
+  if (!/[0-9]/.test(pw)) return 'Password must include a number.';
+  if (!/[^A-Za-z0-9]/.test(pw)) return 'Password must include a special character.';
+  return null;
+}
+
+// Best-effort caller-context capture for the audit log. Trusts the
+// standard reverse-proxy header (X-Forwarded-For) but falls back to
+// the raw socket address in dev.
+function reqContext(req) {
+  const ipHeader = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return {
+    ip:         ipHeader || req.ip || req.socket?.remoteAddress || null,
+    user_agent: String(req.headers['user-agent'] || '').slice(0, 500) || null,
+  };
+}
+
+async function logActivity(userId, action, ctx, metadata = {}) {
+  try {
+    await pool.query(
+      `INSERT INTO account_activity_log (user_id, action, ip, user_agent, metadata)
+       VALUES ($1, $2, $3, $4, $5::jsonb)`,
+      [userId, action, ctx.ip, ctx.user_agent, JSON.stringify(metadata || {})],
+    );
+  } catch (err) {
+    // Audit failure should never block the caller — log and move on.
+    console.warn('[audit] logActivity failed:', err?.message);
+  }
+}
+
+// POST /api/auth/change-password — verify current password, enforce
+// the password policy, hash the new one, send a confirmation email,
+// and drop an audit row.
 exports.changePassword = async (req, res) => {
   try {
-    const { current_password, new_password } = req.body || {};
+    const { current_password, new_password, confirm_password } = req.body || {};
     if (!current_password || !new_password) {
       return res.status(400).json({ message: 'current_password and new_password are required' });
     }
-    if (new_password.length < 6) {
-      return res.status(400).json({ message: 'New password must be at least 6 characters' });
+    if (confirm_password != null && confirm_password !== new_password) {
+      return res.status(400).json({ message: 'New password and confirmation do not match.' });
+    }
+    const policyErr = validatePasswordPolicy(new_password);
+    if (policyErr) {
+      return res.status(400).json({ message: policyErr, code: 'WEAK_PASSWORD' });
     }
 
     const userId = req.user.id;
-    const r = await pool.query('SELECT password FROM users WHERE id = $1', [userId]);
+    const r = await pool.query(
+      'SELECT id, name, email, password FROM users WHERE id = $1', [userId],
+    );
     if (r.rows.length === 0) {
       return res.status(404).json({ message: 'User not found' });
     }
-    const valid = await bcrypt.compare(current_password, r.rows[0].password);
+    const user = r.rows[0];
+    const valid = await bcrypt.compare(current_password, user.password);
     if (!valid) {
       return res.status(401).json({ message: 'Current password is incorrect' });
     }
+    // Reject reusing the current password — a common footgun.
+    const sameAsOld = await bcrypt.compare(new_password, user.password);
+    if (sameAsOld) {
+      return res.status(400).json({ message: 'New password must be different from your current password.' });
+    }
 
     const hashed = await bcrypt.hash(new_password, 10);
-    // Clear must_change_password — the user now has a password they
-    // chose themselves, so the first-login dialog won't pop again.
     await pool.query(
       `UPDATE users
           SET password = $1,
@@ -316,9 +373,289 @@ exports.changePassword = async (req, res) => {
       [hashed, userId],
     );
 
+    // Fire-and-forget notification. Doesn't block the response.
+    const ctx = reqContext(req);
+    const when = new Date().toLocaleString('en-IN', {
+      day: '2-digit', month: 'short', year: 'numeric',
+      hour: '2-digit', minute: '2-digit',
+    });
+    sendPasswordChangedNotice({ to: user.email, name: user.name, when })
+      .catch(() => { /* logged inside mailer */ });
+    logActivity(userId, 'password_changed', ctx);
+
     res.json({ message: 'Password updated successfully' });
   } catch (err) {
     console.error('Change password error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────
+// Change Email — three-step OTP flow.
+// ─────────────────────────────────────────────────────────────────────
+
+// Rate-limit constants matching the spec's "limit OTP resend + verify
+// attempts" requirement.
+const EMAIL_OTP_TTL_MINUTES  = 10;
+const EMAIL_OTP_MAX_ATTEMPTS = 5;
+const EMAIL_OTP_MAX_RESENDS  = 3;
+const EMAIL_OTP_RESEND_COOLDOWN_SECONDS = 60;
+
+// POST /api/auth/change-email/request  { new_email }
+// Validates uniqueness, mints an OTP, emails the new address. The
+// row on email_change_otps is a UNIQUE(user_id) — starting a fresh
+// request overwrites any pending one so a user can't accumulate
+// hanging OTPs by hammering the endpoint.
+exports.requestEmailChange = async (req, res) => {
+  try {
+    const { new_email: rawEmail } = req.body || {};
+    const newEmail = normaliseEmail(rawEmail);
+    if (!validateEmailFormat(newEmail)) {
+      return res.status(400).json({ message: 'Please enter a valid email address.' });
+    }
+    const userId = req.user.id;
+
+    const meRes = await pool.query(
+      `SELECT id, name, email FROM users WHERE id = $1`, [userId],
+    );
+    if (meRes.rows.length === 0) return res.status(404).json({ message: 'User not found' });
+    const me = meRes.rows[0];
+
+    if (newEmail.toLowerCase() === String(me.email || '').toLowerCase()) {
+      return res.status(400).json({ message: 'That is already your current email.' });
+    }
+    // Uniqueness — reject if any other live user owns this email.
+    const dupe = await pool.query(
+      `SELECT 1 FROM users WHERE LOWER(email) = LOWER($1) AND id <> $2 AND (is_deleted IS NULL OR is_deleted = FALSE) LIMIT 1`,
+      [newEmail, userId],
+    );
+    if (dupe.rows.length > 0) {
+      return res.status(409).json({
+        message: 'That email is already in use on another account.',
+        code:    'EMAIL_TAKEN',
+      });
+    }
+
+    const otp = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
+    const otpHash = await bcrypt.hash(otp, 10);
+    const expiresAt = new Date(Date.now() + EMAIL_OTP_TTL_MINUTES * 60_000);
+
+    await pool.query(
+      `INSERT INTO email_change_otps
+         (user_id, new_email, otp_hash, expires_at, attempts, resend_count, last_sent_at)
+       VALUES ($1, $2, $3, $4, 0, 0, NOW())
+       ON CONFLICT (user_id) DO UPDATE SET
+         new_email    = EXCLUDED.new_email,
+         otp_hash     = EXCLUDED.otp_hash,
+         expires_at   = EXCLUDED.expires_at,
+         attempts     = 0,
+         resend_count = 0,
+         last_sent_at = NOW(),
+         verified_at  = NULL`,
+      [userId, newEmail, otpHash, expiresAt],
+    );
+
+    const ctx = reqContext(req);
+    logActivity(userId, 'email_change_requested', ctx, {
+      new_email: newEmail,
+    });
+
+    await sendEmailChangeOtp({
+      to:             newEmail,
+      name:           me.name,
+      otp,
+      expiresMinutes: EMAIL_OTP_TTL_MINUTES,
+    }).catch(() => { /* logged in mailer */ });
+
+    // Never echo the OTP back — it lives only in the email + hash.
+    res.json({
+      message:         'Verification code sent to your new email.',
+      expires_in_minutes: EMAIL_OTP_TTL_MINUTES,
+      new_email:       newEmail,
+    });
+  } catch (err) {
+    console.error('requestEmailChange error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// POST /api/auth/change-email/resend
+exports.resendEmailChangeOtp = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const row = await pool.query(
+      `SELECT o.*, u.name
+         FROM email_change_otps o
+         JOIN users u ON u.id = o.user_id
+        WHERE o.user_id = $1`,
+      [userId],
+    );
+    if (row.rows.length === 0) {
+      return res.status(404).json({ message: 'No pending email change. Start over.' });
+    }
+    const rec = row.rows[0];
+    if (rec.verified_at) {
+      return res.status(400).json({ message: 'That email has already been verified.' });
+    }
+    if (rec.resend_count >= EMAIL_OTP_MAX_RESENDS) {
+      return res.status(429).json({
+        message: 'Too many resends. Start the email change over.',
+        code:    'RESEND_LIMIT',
+      });
+    }
+    const sinceLast = (Date.now() - new Date(rec.last_sent_at).getTime()) / 1000;
+    if (sinceLast < EMAIL_OTP_RESEND_COOLDOWN_SECONDS) {
+      return res.status(429).json({
+        message: `Please wait ${Math.ceil(EMAIL_OTP_RESEND_COOLDOWN_SECONDS - sinceLast)}s before requesting another code.`,
+        code:    'RESEND_COOLDOWN',
+      });
+    }
+
+    const otp = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
+    const otpHash = await bcrypt.hash(otp, 10);
+    const expiresAt = new Date(Date.now() + EMAIL_OTP_TTL_MINUTES * 60_000);
+    await pool.query(
+      `UPDATE email_change_otps SET
+         otp_hash     = $1,
+         expires_at   = $2,
+         attempts     = 0,
+         resend_count = resend_count + 1,
+         last_sent_at = NOW()
+       WHERE user_id  = $3`,
+      [otpHash, expiresAt, userId],
+    );
+
+    await sendEmailChangeOtp({
+      to:             rec.new_email,
+      name:           rec.name,
+      otp,
+      expiresMinutes: EMAIL_OTP_TTL_MINUTES,
+    }).catch(() => { /* logged */ });
+
+    res.json({ message: 'A fresh verification code was sent.' });
+  } catch (err) {
+    console.error('resendEmailChangeOtp error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// POST /api/auth/change-email/verify  { otp }
+// Verifies the OTP, updates users.email, sends confirmation notices
+// to BOTH the old and new addresses, and logs the change.
+exports.verifyEmailChange = async (req, res) => {
+  try {
+    const otp = String(req.body?.otp || '').trim();
+    if (!/^\d{6}$/.test(otp)) {
+      return res.status(400).json({ message: 'Enter the 6-digit code from your email.' });
+    }
+    const userId = req.user.id;
+
+    const row = await pool.query(
+      `SELECT o.*, u.name AS user_name, u.email AS old_email
+         FROM email_change_otps o
+         JOIN users u ON u.id = o.user_id
+        WHERE o.user_id = $1`,
+      [userId],
+    );
+    if (row.rows.length === 0) {
+      return res.status(404).json({ message: 'No pending email change. Start over.' });
+    }
+    const rec = row.rows[0];
+    if (rec.verified_at) {
+      return res.status(400).json({ message: 'That email was already verified.' });
+    }
+    if (new Date(rec.expires_at).getTime() < Date.now()) {
+      return res.status(400).json({
+        message: 'Verification code expired. Request a fresh one.',
+        code:    'OTP_EXPIRED',
+      });
+    }
+    if (rec.attempts >= EMAIL_OTP_MAX_ATTEMPTS) {
+      return res.status(429).json({
+        message: 'Too many wrong attempts. Request a fresh code.',
+        code:    'OTP_LOCKED',
+      });
+    }
+    const ok = await bcrypt.compare(otp, rec.otp_hash);
+    if (!ok) {
+      await pool.query(
+        `UPDATE email_change_otps SET attempts = attempts + 1 WHERE user_id = $1`,
+        [userId],
+      );
+      const left = Math.max(0, EMAIL_OTP_MAX_ATTEMPTS - (rec.attempts + 1));
+      return res.status(400).json({
+        message: `Incorrect code. ${left} attempt${left === 1 ? '' : 's'} left.`,
+        code:    'OTP_WRONG',
+      });
+    }
+
+    // Re-verify uniqueness at commit time (another user might have
+    // claimed the address during the OTP window).
+    const dupe = await pool.query(
+      `SELECT 1 FROM users WHERE LOWER(email) = LOWER($1) AND id <> $2 AND (is_deleted IS NULL OR is_deleted = FALSE) LIMIT 1`,
+      [rec.new_email, userId],
+    );
+    if (dupe.rows.length > 0) {
+      return res.status(409).json({
+        message: 'That email was just claimed by another account. Try a different one.',
+        code:    'EMAIL_TAKEN',
+      });
+    }
+
+    // Commit the change.
+    await pool.query(
+      `UPDATE users SET email = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+      [rec.new_email, userId],
+    );
+    await pool.query(
+      `UPDATE email_change_otps SET verified_at = NOW() WHERE user_id = $1`,
+      [userId],
+    );
+
+    const ctx = reqContext(req);
+    logActivity(userId, 'email_changed', ctx, {
+      old_email: rec.old_email,
+      new_email: rec.new_email,
+    });
+
+    const when = new Date().toLocaleString('en-IN', {
+      day: '2-digit', month: 'short', year: 'numeric',
+      hour: '2-digit', minute: '2-digit',
+    });
+    // Notify BOTH addresses per spec.
+    sendEmailChangedNotice({
+      to: rec.old_email, name: rec.user_name,
+      oldEmail: rec.old_email, newEmail: rec.new_email, when,
+    }).catch(() => {});
+    sendEmailChangedNotice({
+      to: rec.new_email, name: rec.user_name,
+      oldEmail: rec.old_email, newEmail: rec.new_email, when,
+    }).catch(() => {});
+
+    res.json({
+      message:   'Email updated. Use your new email on the next sign-in.',
+      new_email: rec.new_email,
+    });
+  } catch (err) {
+    console.error('verifyEmailChange error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// GET /api/auth/account-activity — recent audit rows for the caller.
+exports.listAccountActivity = async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT id, action, ip, user_agent, metadata, created_at
+         FROM account_activity_log
+        WHERE user_id = $1
+        ORDER BY created_at DESC
+        LIMIT 50`,
+      [req.user.id],
+    );
+    res.json({ count: r.rows.length, activity: r.rows });
+  } catch (err) {
+    console.error('listAccountActivity error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };

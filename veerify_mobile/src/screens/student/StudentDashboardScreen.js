@@ -108,11 +108,17 @@ export default function StudentDashboardScreen({ navigation }) {
             onPress={() => {
               // InstitutionDetail was removed — select the academy so
               // the Home tab hydrates with its banner / details /
-              // courses inline, then jump to Home.
+              // courses inline, then pop back to the tab navigator
+              // root. GuestHome / StudentTabs both host the tab
+              // navigator so popToTop covers both auth states; the
+              // try/catch chain is a defensive fallback.
               selectInstitution(item);
-              try { navigation.navigate('Main'); } catch (_) {
-                try { navigation.getParent()?.navigate('Main'); } catch (__) {}
-              }
+              // See CategoryAcademiesScreen for the "don't popToTop"
+              // note — guests land on Welcome otherwise.
+              try { navigation.navigate('GuestHome'); return; } catch (_) { /* try next */ }
+              try { navigation.navigate('StudentTabs'); return; } catch (_) { /* try next */ }
+              try { navigation.getParent()?.navigate('GuestHome'); return; } catch (_) { /* noop */ }
+              try { navigation.getParent()?.navigate('StudentTabs'); } catch (_) { /* noop */ }
             }}
           >
             <Text style={commonStyles.cardTitle}>🥋 {item.name}</Text>

@@ -36,6 +36,15 @@ router.get('/institution/today',
   verifyToken, requireRole('admin'),
   attendanceController.getInstitutionTodayAttendance);
 
+// Institution-wide BATCH-WISE summary for a date. Powers the Home
+// Dashboard → Attendance drill-in: one row per scoped batch with
+// present / absent / late / leave counts + percentage for the given
+// day (defaults to today when ?date is omitted). Same branch
+// scoping as /institution/today.
+router.get('/institution/by-batch',
+  verifyToken, requireRole('admin'),
+  attendanceController.getInstitutionByBatch);
+
 // Student route
 router.get('/my', verifyToken, requireRole('student'), attendanceController.getMyAttendance);
 

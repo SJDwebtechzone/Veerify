@@ -40,6 +40,13 @@ const PLACEHOLDER_META = [
   { key: 'student_name',      label: 'Student Name',      sample: 'Rohan Kumar' },
   { key: 'course_name',       label: 'Course',            sample: 'Karate — Blue Belt' },
   { key: 'belt_name',         label: 'Belt / Grade',      sample: 'Blue Belt' },
+  // Belt progression — drag either pin independently so the
+  // certificate can print "White Belt → Yellow Belt" wherever the
+  // artwork calls for it. Auto-populates from the student's most
+  // recent belt promotion; blank when the certificate isn't tied
+  // to a grading event.
+  { key: 'belt_from',         label: 'Belt From',         sample: 'White Belt' },
+  { key: 'belt_to',           label: 'Belt To',           sample: 'Yellow Belt' },
   { key: 'certificate_no',    label: 'Certificate No.',   sample: 'VRF-2026-45678' },
   { key: 'issue_date',        label: 'Issue Date',        sample: '13 Jul 2026' },
   { key: 'completion_date',   label: 'Completion Date',   sample: '05 Jul 2026' },
@@ -79,7 +86,7 @@ const SCREEN_W = Dimensions.get('window').width;
 const CANVAS_W = SCREEN_W - spacing.lg * 2;
 
 export default function CertificateTemplateEditorScreen({ route, navigation }) {
-  const { templateId, preview } = route.params || {};
+  const { templateId, preview, sample } = route.params || {};
   const [template, setTemplate] = useState(null);
   const [pins, setPins] = useState([]);
   const [selectedKey, setSelectedKey] = useState(null);
@@ -107,7 +114,13 @@ export default function CertificateTemplateEditorScreen({ route, navigation }) {
 
   const load = useCallback(async () => {
     try {
-      const r = await apiClient.get('/certificate-templates');
+      // Preview-only opens for GLOBAL samples pull from the sample
+      // endpoint (institution rows list won't contain them). Editable
+      // opens continue to hit the institution endpoint.
+      const url = sample
+        ? '/certificate-templates/samples'
+        : '/certificate-templates';
+      const r = await apiClient.get(url);
       const t = (r.data?.templates || []).find((x) => x.id === templateId);
       if (t) {
         setTemplate(t);
@@ -128,7 +141,7 @@ export default function CertificateTemplateEditorScreen({ route, navigation }) {
       // eslint-disable-next-line no-console
       console.log('[TemplateEditor] load error:', err?.response?.data);
     }
-  }, [templateId]);
+  }, [templateId, sample]);
   React.useEffect(() => { load(); }, [load]);
 
   // ── Signature / Seal upload ──────────────────────────────────────

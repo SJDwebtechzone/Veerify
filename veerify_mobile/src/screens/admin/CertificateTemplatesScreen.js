@@ -36,10 +36,21 @@ export default function CertificateTemplatesScreen({ navigation }) {
   const [refreshing, setRefreshing] = useState(false);
   const [uploading, setUploading] = useState(false);
 
+  // Global Sample Certificates published by the super-admin. Read-only
+  // for the institution — Preview + "Use as Template" are the only
+  // actions. Cloned via POST /certificate-templates/samples/:id/copy
+  // which creates an editable copy in the caller's own templates
+  // without touching the source.
+  const [samples, setSamples] = useState([]);
   const load = useCallback(async () => {
     try {
-      const r = await apiClient.get('/certificate-templates');
-      setTemplates(r.data?.templates || []);
+      const [mine, sam] = await Promise.all([
+        apiClient.get('/certificate-templates'),
+        apiClient.get('/certificate-templates/samples')
+          .catch(() => ({ data: { templates: [] } })),
+      ]);
+      setTemplates(mine.data?.templates || []);
+      setSamples(sam.data?.templates || []);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.log('[CertificateTemplates] load error:', err?.response?.data);
@@ -49,6 +60,24 @@ export default function CertificateTemplatesScreen({ navigation }) {
     }
   }, []);
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  const useAsTemplate = async (sample) => {
+    try {
+      const r = await apiClient.post(`/certificate-templates/samples/${sample.id}/copy`);
+      const created = r.data?.template;
+      if (created) {
+        // Land directly in the editor for the fresh copy so the admin
+        // can tweak positions before saving.
+        navigation.navigate('CertificateTemplateEditor', { templateId: created.id });
+      }
+    } catch (err) {
+      confirm({
+        title:   'Could not copy sample',
+        message: err?.response?.data?.message || 'Try again.',
+        variant: 'warning', confirmText: 'OK', hideCancel: true,
+      });
+    }
+  };
 
   const pickAndUpload = () => {
     // `quality: 0.6` + max width 1600 keeps template backgrounds under
@@ -179,14 +208,6 @@ export default function CertificateTemplatesScreen({ navigation }) {
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={palette.purple.vivid} />
         </View>
-      ) : templates.length === 0 ? (
-        <View style={styles.emptyCard}>
-          <Award size={40} color={palette.textLight} strokeWidth={1.4} />
-          <Text style={styles.emptyTitle}>No templates yet</Text>
-          <Text style={styles.emptySub}>
-            Tap the + button to upload a background and start placing pins.
-          </Text>
-        </View>
       ) : (
         <ScrollView
           contentContainerStyle={{ padding: spacing.lg, paddingBottom: 120 }}
@@ -198,18 +219,61 @@ export default function CertificateTemplatesScreen({ navigation }) {
             />
           }
         >
-          {templates.map((t) => (
-            <TemplateRow
-              key={t.id}
-              template={t}
-              onEdit={() => navigation.navigate('CertificateTemplateEditor', { templateId: t.id })}
-              onPreview={() => navigation.navigate('CertificateTemplateEditor', {
-                templateId: t.id, preview: true,
-              })}
-              onDelete={() => handleDelete(t)}
-              onSetDefault={() => handleSetDefault(t)}
-            />
-          ))}
+          {/* ── Sample Certificates ─────────────────────────────────
+              Global samples published by the super-admin. Read-only
+              on the institution side — Preview + "Use as Template"
+              are the only actions. Cloning creates a fully editable
+              copy under My Certificates without modifying the
+              original sample. */}
+          {samples.length > 0 ? (
+            <>
+              <View style={styles.sectionHead}>
+                <Text style={styles.sectionTitle}>Sample Certificates</Text>
+                <Text style={styles.sectionCount}>{samples.length}</Text>
+              </View>
+              {samples.map((t) => (
+                <SampleRow
+                  key={`sample-${t.id}`}
+                  template={t}
+                  onPreview={() => navigation.navigate('CertificateTemplateEditor', {
+                    templateId: t.id, preview: true, sample: true,
+                  })}
+                  onUse={() => useAsTemplate(t)}
+                />
+              ))}
+            </>
+          ) : null}
+
+          {/* ── My Certificates ─────────────────────────────────────
+              Templates owned by this institution. Full CRUD via the
+              existing Edit / Preview / Delete / Default actions. */}
+          <View style={[styles.sectionHead, { marginTop: samples.length > 0 ? spacing.xl : 0 }]}>
+            <Text style={styles.sectionTitle}>My Certificates</Text>
+            <Text style={styles.sectionCount}>{templates.length}</Text>
+          </View>
+          {templates.length === 0 ? (
+            <View style={styles.emptyCard}>
+              <Award size={40} color={palette.textLight} strokeWidth={1.4} />
+              <Text style={styles.emptyTitle}>No templates yet</Text>
+              <Text style={styles.emptySub}>
+                Tap the + button to upload a background and start placing
+                pins, or "Use as Template" on a sample above.
+              </Text>
+            </View>
+          ) : (
+            templates.map((t) => (
+              <TemplateRow
+                key={t.id}
+                template={t}
+                onEdit={() => navigation.navigate('CertificateTemplateEditor', { templateId: t.id })}
+                onPreview={() => navigation.navigate('CertificateTemplateEditor', {
+                  templateId: t.id, preview: true,
+                })}
+                onDelete={() => handleDelete(t)}
+                onSetDefault={() => handleSetDefault(t)}
+              />
+            ))
+          )}
         </ScrollView>
       )}
 
@@ -222,6 +286,45 @@ export default function CertificateTemplatesScreen({ navigation }) {
       >
         {uploading ? <ActivityIndicator color="#fff" /> : <Plus size={22} color="#fff" strokeWidth={2.6} />}
       </TouchableOpacity>
+    </View>
+  );
+}
+
+// ─── Sample Row ─────────────────────────────────────────────────────
+// Read-only variant used for global sample certificates. The
+// institution admin can Preview the layout and tap "Use as Template"
+// to clone it — no Edit / Delete / Set Default (those live only on
+// the super-admin web panel that owns the sample).
+function SampleRow({ template, onPreview, onUse }) {
+  const bg = resolveAssetUrl(template.background_url);
+  const pinCount = Array.isArray(template.placeholders) ? template.placeholders.length : 0;
+  return (
+    <View style={[styles.card, styles.sampleCard]}>
+      <View style={styles.cardHead}>
+        {bg ? (
+          <Image source={{ uri: bg }} style={styles.thumb} resizeMode="cover" />
+        ) : (
+          <View style={[styles.thumb, styles.thumbFallback]}>
+            <ImageIcon size={22} color={palette.textLight} strokeWidth={2} />
+          </View>
+        )}
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <View style={styles.nameRow}>
+            <Text style={styles.name} numberOfLines={1}>{template.name}</Text>
+            <View style={styles.sampleBadge}>
+              <Star size={9} color="#fff" strokeWidth={2.6} fill="#fff" />
+              <Text style={styles.sampleBadgeText}>SAMPLE</Text>
+            </View>
+          </View>
+          <Text style={styles.meta}>
+            {pinCount} placeholder{pinCount === 1 ? '' : 's'} · Published by Veerify
+          </Text>
+        </View>
+      </View>
+      <View style={styles.actions}>
+        <ActionBtn icon={Eye}     label="Preview"          onPress={onPreview} accent={palette.blue} />
+        <ActionBtn icon={Plus}    label="Use as Template"  onPress={onUse}     accent={palette.purple} />
+      </View>
     </View>
   );
 }
@@ -351,6 +454,30 @@ const styles = StyleSheet.create({
   },
   defaultBadgeText: {
     fontSize: 9, color: '#fff', fontWeight: '900', letterSpacing: 0.6,
+  },
+  // Sample badge — distinct from the amber Default badge so a sample
+  // that's also the platform default doesn't confuse the two.
+  sampleBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 3,
+    paddingHorizontal: 6, paddingVertical: 3,
+    borderRadius: 999, backgroundColor: palette.purple.vivid,
+  },
+  sampleBadgeText: {
+    fontSize: 9, color: '#fff', fontWeight: '900', letterSpacing: 0.6,
+  },
+  // Section heading for the two-section layout.
+  sectionHead: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    marginBottom: spacing.sm,
+  },
+  sectionTitle: { ...type.h2, color: palette.text, fontSize: 15, fontWeight: '800' },
+  sectionCount: {
+    ...type.micro, color: palette.textMuted, fontWeight: '800', letterSpacing: 0.4,
+  },
+  // Sample card carries a subtle purple tint so it visually reads as
+  // "platform-provided" instead of "one of mine".
+  sampleCard: {
+    borderWidth: 1, borderColor: palette.purple.soft,
   },
 
   actions: { flexDirection: 'row', gap: 6, flexWrap: 'wrap' },

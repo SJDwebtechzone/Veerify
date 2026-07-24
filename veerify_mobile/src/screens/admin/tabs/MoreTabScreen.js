@@ -24,7 +24,7 @@ import {
   UserCog, BookOpen, Building2, CalendarRange, Bell, Megaphone,
   MessageSquare, BarChart3, Palette, CreditCard, Settings, LifeBuoy,
   LogOut, ChevronRight, Edit3, ShieldCheck, Layers, KeyRound, MapPin,
-  Award, FileText, Trash2, HelpCircle,
+  Award, FileText, Trash2, HelpCircle, ClipboardCheck,
 } from 'lucide-react-native';
 
 import { useAuth } from '../../../context/AuthContext';
@@ -42,6 +42,10 @@ const MENU = [
   // root navigator.
   { key: 'batches',       label: 'Batches',          icon: Layers,         accent: palette.teal   },
   { key: 'branches',      label: 'Branches',         icon: Building2,      accent: palette.green  },
+  // Attendance — Branch Admin flow. Same UI + workflow as the
+  // trainer's Attendance module, scoped to the caller's branch
+  // batches server-side via the /batches endpoint.
+  { key: 'attendance',    label: 'Attendance',       icon: ClipboardCheck, accent: palette.teal   },
   { key: 'events',        label: 'Events',           icon: CalendarRange,  accent: palette.orange },
   { key: 'certificates',  label: 'Certificates',     icon: Award,          accent: palette.rose   },
   // Salary — monthly payroll for the institution's trainers. Admin
@@ -174,6 +178,10 @@ export default function MoreTabScreen({ navigation }) {
     // address (no institution row) — they manage their own contact
     // email via Academy Profile, so echoing it back would be noise.
     support:  'Support',
+    // Attendance → Branch Login attendance module. Routes to the
+    // shared StaffAttendance screen with mode='branch' baked in via
+    // initialParams so batch scoping + downstream nav names swap.
+    attendance: 'BranchAttendance',
   };
   // Institution-scoped policy slugs are handled inline — they all
   // route to the same InstitutionLegal editor with different slugs.
@@ -291,13 +299,17 @@ export default function MoreTabScreen({ navigation }) {
       {/* ───── Grid menu ─────
           Sub-branch admins get a trimmed menu — tiles that belong to
           the main institution (Trainers roster, Branches list,
-          Branding banners, Pricing & Plans) are hidden. Their branch
-          only manages day-to-day (Courses handled, Batches, Events,
-          Settings, Support). Main admins still see the full grid. */}
+          Branding banners, Pricing & Plans, Salary payroll) are
+          hidden. Their branch only manages day-to-day (Courses,
+          Batches, Events, Attendance, Settings, Support). Main
+          admins still see the full grid.
+          Salary is main-institution-only because payroll is
+          administered by the parent academy — branch admins can
+          view trainer profiles but not run payroll. */}
       <View style={styles.grid}>
         {MENU
           .filter((item) => !(
-            isSubBranch && ['trainers', 'branches', 'branding', 'pricing'].includes(item.key)
+            isSubBranch && ['trainers', 'branches', 'branding', 'pricing', 'salary'].includes(item.key)
           ))
           .map((item) => (
             <MenuTile
@@ -318,17 +330,26 @@ export default function MoreTabScreen({ navigation }) {
           deliverable configuration. */}
       <Text style={styles.sectionLabel}>ACADEMY</Text>
       <View style={styles.listCard}>
-        {ACADEMY_ITEMS.map((item, i) => (
-          <React.Fragment key={item.key}>
-            {i > 0 ? <View style={styles.divider} /> : null}
-            <ListRow
-              icon={FileText}
-              label={item.label}
-              accent={item.accent}
-              onPress={() => handleTile(item.key, item.label)}
-            />
-          </React.Fragment>
-        ))}
+        {ACADEMY_ITEMS
+          // Certificate Templates is main-institution-only —
+          // certificate branding + placeholder layout is a
+          // parent-academy responsibility. Branch admins issue
+          // certificates using the templates the main admin set
+          // up, but don't design the templates themselves.
+          .filter((item) => !(
+            isSubBranch && item.key === 'certificate_templates'
+          ))
+          .map((item, i) => (
+            <React.Fragment key={item.key}>
+              {i > 0 ? <View style={styles.divider} /> : null}
+              <ListRow
+                icon={FileText}
+                label={item.label}
+                accent={item.accent}
+                onPress={() => handleTile(item.key, item.label)}
+              />
+            </React.Fragment>
+          ))}
       </View>
 
       {/* ───── Account shortcuts ─────

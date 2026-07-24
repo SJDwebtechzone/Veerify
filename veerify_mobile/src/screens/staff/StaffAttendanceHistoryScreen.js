@@ -39,7 +39,14 @@ const STATUS_META = {
 
 const MONTH_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
-function isoDate(d) { return d.toISOString().split('T')[0]; }
+// Local-calendar YYYY-MM-DD — see StaffAttendanceScreen.isoDate for
+// why UTC-based .toISOString() drops the day on IST devices.
+function isoDate(d) {
+  const y  = d.getFullYear();
+  const mo = String(d.getMonth() + 1).padStart(2, '0');
+  const da = String(d.getDate()).padStart(2, '0');
+  return `${y}-${mo}-${da}`;
+}
 function parseISO(s) {
   // Postgres can return either '2026-05-23' or '2026-05-23T00:00:00.000Z' - both work with new Date.
   return new Date(s);
@@ -47,6 +54,16 @@ function parseISO(s) {
 
 export default function StaffAttendanceHistoryScreen({ navigation, route }) {
   const preselectBatchId = route?.params?.batchId ?? null;
+
+  // Mode swap — same screen powers trainer + branch admin. See
+  // StaffAttendanceScreen for the full contract. Endpoints for
+  // reading attendance records are role-agnostic (backend scopes
+  // by trainer or by branch on the same URL), so only the batches
+  // list endpoint and the target route for the edit hop change.
+  const mode = route?.params?.mode === 'branch' ? 'branch' : 'trainer';
+  const batchesEndpoint = mode === 'branch' ? '/batches' : '/batches/trainer/my';
+  const attendanceRoute = mode === 'branch' ? 'BranchAttendance' : 'StaffAttendance';
+  const tabsRoute       = mode === 'branch' ? 'AdminDashboard' : 'StaffTabs';
 
   const [batches, setBatches] = useState([]);
   const [selectedBatchId, setSelectedBatchId] = useState(preselectBatchId);
@@ -61,7 +78,7 @@ export default function StaffAttendanceHistoryScreen({ navigation, route }) {
     let cancelled = false;
     (async () => {
       try {
-        const res = await apiClient.get('/batches/trainer/my').catch(() => ({ data: { batches: [] } }));
+        const res = await apiClient.get(batchesEndpoint).catch(() => ({ data: { batches: [] } }));
         const list = res.data?.batches || [];
         if (!cancelled) {
           setBatches(list);
@@ -290,10 +307,30 @@ export default function StaffAttendanceHistoryScreen({ navigation, route }) {
               <SessionCard
                 key={s.dateIso}
                 session={s}
-                onEdit={() => navigation.navigate('StaffAttendance', {
-                  batchId: selectedBatchId,
-                  date: s.dateIso,
-                })}
+                onEdit={() => {
+                  const editParams = {
+                    batchId: selectedBatchId,
+                    date:    s.dateIso,
+                    mode,
+                  };
+                  if (mode === 'branch') {
+                    // Branch admin: BranchAttendance is a sibling stack
+                    // screen, not a tab — direct navigate is fine.
+                    try { navigation.navigate(attendanceRoute, editParams); return; } catch (_) {}
+                    try { navigation.getParent()?.navigate(attendanceRoute, editParams); } catch (__) {}
+                    return;
+                  }
+                  // Trainer: StaffAttendance lives INSIDE the StaffTabs
+                  // bottom tab navigator, not the stack this History
+                  // screen sits in. Jump via the parent tab navigator
+                  // and pass route params through nested `params`.
+                  const target = {
+                    screen: attendanceRoute,
+                    params: editParams,
+                  };
+                  try { navigation.navigate(tabsRoute, target); return; } catch (_) {}
+                  try { navigation.getParent()?.navigate(tabsRoute, target); } catch (__) {}
+                }}
               />
             ))}
           </View>

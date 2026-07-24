@@ -1115,6 +1115,135 @@ async function sendMail({ to, subject, text, html, attachments, cc, bcc }) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Account Settings — email-change OTP + confirmation templates.
+// ─────────────────────────────────────────────────────────────────────
+async function sendEmailChangeOtp({ to, name, otp, expiresMinutes }) {
+  const t = getTransporter();
+  if (!t) return { ok: false, error: 'SMTP not configured' };
+  try {
+    const html = `
+    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+                max-width:520px;margin:0 auto;padding:24px;color:#0f172a;background:#f8fafc;">
+      <div style="background:#fff;border-radius:14px;padding:28px;border:1px solid #e2e8f0;">
+        <h1 style="font-size:20px;margin:0 0 12px;">Confirm your new email</h1>
+        <p style="font-size:14px;line-height:1.6;color:#334155;margin:0 0 16px;">
+          Hi ${name || 'there'}, use the verification code below to confirm
+          that you own this email address. This code will replace the login
+          email on your Veerify account.
+        </p>
+        <p style="font-size:26px;font-weight:900;color:#111827;letter-spacing:6px;
+                  margin:20px 0;font-family:Consolas,'SF Mono',Monaco,monospace;">
+          ${otp}
+        </p>
+        <p style="font-size:13px;color:#64748b;margin:0 0 8px;">
+          This code expires in ${expiresMinutes} minutes. If you didn't
+          request this change, you can safely ignore this email — your
+          current login email won't change.
+        </p>
+      </div>
+    </div>`;
+    const info = await t.sendMail({
+      from: `"${FROM_NAME}" <${SMTP_USER}>`,
+      to,
+      subject: 'Confirm your new Veerify email — verification code',
+      replyTo: SUPPORT_EMAIL,
+      html,
+      text: toPlainText(html),
+      headers: transactionalHeaders(),
+    });
+    return { ok: true, messageId: info.messageId };
+  } catch (err) {
+    console.error('[mailer] sendEmailChangeOtp failed:', err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
+async function sendEmailChangedNotice({ to, name, oldEmail, newEmail, when }) {
+  const t = getTransporter();
+  if (!t) return { ok: false, error: 'SMTP not configured' };
+  try {
+    const html = `
+    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+                max-width:520px;margin:0 auto;padding:24px;color:#0f172a;background:#f8fafc;">
+      <div style="background:#fff;border-radius:14px;padding:28px;border:1px solid #e2e8f0;">
+        <h1 style="font-size:20px;margin:0 0 12px;">Your Veerify login email changed</h1>
+        <p style="font-size:14px;line-height:1.6;color:#334155;margin:0 0 16px;">
+          Hi ${name || 'there'}, the login email on your Veerify account was
+          just changed on <b>${when}</b>.
+        </p>
+        <table style="width:100%;font-size:13px;color:#334155;line-height:1.7;margin:12px 0;">
+          <tr>
+            <td style="padding:4px 0;color:#64748b;">Previous email</td>
+            <td style="padding:4px 0;text-align:right;font-weight:700;">${oldEmail}</td>
+          </tr>
+          <tr>
+            <td style="padding:4px 0;color:#64748b;">New email</td>
+            <td style="padding:4px 0;text-align:right;font-weight:700;">${newEmail}</td>
+          </tr>
+        </table>
+        <p style="font-size:13px;color:#78350f;background:#fef3c7;border:1px solid #fde68a;
+                  border-radius:8px;padding:12px;margin:16px 0;">
+          If you didn't make this change, contact
+          <a href="mailto:${SUPPORT_EMAIL}" style="color:#78350f;font-weight:700;">${SUPPORT_EMAIL}</a>
+          immediately.
+        </p>
+      </div>
+    </div>`;
+    const info = await t.sendMail({
+      from: `"${FROM_NAME}" <${SMTP_USER}>`,
+      to,
+      subject: 'Your Veerify login email was changed',
+      replyTo: SUPPORT_EMAIL,
+      html,
+      text: toPlainText(html),
+      headers: transactionalHeaders(),
+    });
+    return { ok: true, messageId: info.messageId };
+  } catch (err) {
+    console.error('[mailer] sendEmailChangedNotice failed:', err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
+async function sendPasswordChangedNotice({ to, name, when }) {
+  const t = getTransporter();
+  if (!t) return { ok: false, error: 'SMTP not configured' };
+  try {
+    const html = `
+    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+                max-width:520px;margin:0 auto;padding:24px;color:#0f172a;background:#f8fafc;">
+      <div style="background:#fff;border-radius:14px;padding:28px;border:1px solid #e2e8f0;">
+        <h1 style="font-size:20px;margin:0 0 12px;">Your Veerify password was changed</h1>
+        <p style="font-size:14px;line-height:1.6;color:#334155;margin:0 0 16px;">
+          Hi ${name || 'there'}, the password on your Veerify account was
+          successfully changed on <b>${when}</b>. Use the new password on
+          your next sign-in.
+        </p>
+        <p style="font-size:13px;color:#78350f;background:#fef3c7;border:1px solid #fde68a;
+                  border-radius:8px;padding:12px;margin:16px 0;">
+          If you didn't make this change, contact
+          <a href="mailto:${SUPPORT_EMAIL}" style="color:#78350f;font-weight:700;">${SUPPORT_EMAIL}</a>
+          immediately.
+        </p>
+      </div>
+    </div>`;
+    const info = await t.sendMail({
+      from: `"${FROM_NAME}" <${SMTP_USER}>`,
+      to,
+      subject: 'Your Veerify password was changed',
+      replyTo: SUPPORT_EMAIL,
+      html,
+      text: toPlainText(html),
+      headers: transactionalHeaders(),
+    });
+    return { ok: true, messageId: info.messageId };
+  } catch (err) {
+    console.error('[mailer] sendPasswordChangedNotice failed:', err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
 module.exports = {
   sendApprovalEmail,
   sendTrialWelcomeEmail,
@@ -1124,6 +1253,9 @@ module.exports = {
   sendTrainerCredentialsEmail,
   sendStudentCredentialsEmail,
   sendBranchSetupEmail,
+  sendEmailChangeOtp,
+  sendEmailChangedNotice,
+  sendPasswordChangedNotice,
   sendMail,
   verifyTransporter,
 };

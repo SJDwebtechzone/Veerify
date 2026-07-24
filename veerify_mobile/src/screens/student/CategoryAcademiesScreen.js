@@ -92,16 +92,35 @@ export default function CategoryAcademiesScreen({ navigation, route }) {
   const openAcademy = (academy) => {
     // InstitutionDetail was removed — its content now renders inline
     // on the Home tab. Select the academy so Home hydrates its
-    // banner / details / courses, then jump back to Home.
+    // banner / details / courses, then pop back to the tab
+    // navigator root (which is what mounts the Home tab).
+    //
+    // Route naming: guests land inside "GuestHome" (defined on the
+    // guest stack in AppNavigator), signed-in students land inside
+    // "StudentTabs". Both host the same StudentTabNavigator, so once
+    // we're at the tab navigator root the Home tab picks up the
+    // context change from useInstitution() and re-fetches banner /
+    // details / courses for the new academy. popToTop covers both
+    // stacks without needing to guess the route name; the try/catch
+    // fallbacks are a safety net for older nav trees.
     selectInstitution({
       id:       academy.id,
       name:     academy.name,
       logo_url: academy.logo_url,
       city:     academy.city,
     });
-    try { navigation.navigate('Main'); } catch (_) {
-      try { navigation.getParent()?.navigate('Main'); } catch (__) {}
-    }
+    // Route to the tab-navigator root explicitly by name — DO NOT use
+    // popToTop() here. The guest stack registers Welcome at index 0,
+    // Login/Register/ForgotPassword next, then GuestHome. If a guest
+    // arrives via Welcome → GuestHome, popToTop() walks all the way
+    // back to Welcome, which is the bug this branch fixes. `navigate`
+    // with a specific name lands on GuestHome / StudentTabs whether
+    // it's already in the stack (React Navigation pops back to it) or
+    // not (it's pushed on top).
+    try { navigation.navigate('GuestHome'); return; } catch (_) { /* try next */ }
+    try { navigation.navigate('StudentTabs'); return; } catch (_) { /* try next */ }
+    try { navigation.getParent()?.navigate('GuestHome'); return; } catch (_) { /* noop */ }
+    try { navigation.getParent()?.navigate('StudentTabs'); } catch (_) { /* noop */ }
   };
 
   const openDirections = (academy) => {

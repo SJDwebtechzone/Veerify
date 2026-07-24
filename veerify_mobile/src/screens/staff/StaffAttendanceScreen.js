@@ -28,7 +28,7 @@ import {
 } from 'react-native';
 import {
   ArrowLeft, Search, Check, X as XIcon, Clock, Plane, History,
-  CalendarDays, Users, ChevronDown,
+  CalendarDays, Users, ChevronDown, ChevronLeft, ChevronRight,
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
@@ -81,8 +81,18 @@ function scheduledDaysInWindow(daysOfWeek, windowDays = 28) {
   }
   return out;
 }
+// Format a Date as YYYY-MM-DD using the LOCAL calendar, not UTC.
+// The naive `.toISOString().split('T')[0]` route drops back a day
+// whenever the device's timezone is east of UTC (IST is UTC+5:30):
+// midnight local on Jul 20 is 18:30 UTC on Jul 19, so the backend
+// received the wrong day and rejected the write as NOT_A_CLASS_DAY.
+// Formatting from local getters keeps the ISO string aligned with
+// what the trainer sees on the calendar and the save bar.
 function isoDate(d) {
-  return d.toISOString().split('T')[0];
+  const y  = d.getFullYear();
+  const mo = String(d.getMonth() + 1).padStart(2, '0');
+  const da = String(d.getDate()).padStart(2, '0');
+  return `${y}-${mo}-${da}`;
 }
 function sameDate(a, b) {
   return isoDate(a) === isoDate(b);
@@ -91,11 +101,58 @@ function fmtDate(d) {
   return d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
 }
 
+// Build the 6×7 (or 5×7) matrix of calendar cells for the given month.
+// The returned array is FLAT: 42 cells starting from the Sunday on or
+// before the first of the month. Cells outside the current month have
+// `inMonth: false` so the renderer greys them out.
+const MONTH_NAMES = [
+  'January','February','March','April','May','June',
+  'July','August','September','October','November','December',
+];
+function buildMonthGrid(year, monthIndex) {
+  const firstOfMonth = new Date(year, monthIndex, 1);
+  const firstWeekday = firstOfMonth.getDay(); // 0..6, Sun-first
+  const gridStart = new Date(year, monthIndex, 1 - firstWeekday);
+  const cells = [];
+  // 6 rows × 7 cols covers every possible month layout (28..31 days
+  // starting anywhere from Sun to Sat).
+  for (let i = 0; i < 42; i++) {
+    const d = new Date(gridStart);
+    d.setDate(gridStart.getDate() + i);
+    cells.push({
+      date:    d,
+      inMonth: d.getMonth() === monthIndex,
+      iso:     isoDate(d),
+    });
+  }
+  // Trim trailing all-out-of-month rows so the grid is 5 rows when
+  // the month fits (looks tighter than a fixed 6-row block).
+  while (cells.length >= 7 && cells.slice(-7).every((c) => !c.inMonth)) {
+    cells.splice(-7);
+  }
+  return cells;
+}
+
 export default function StaffAttendanceScreen({ navigation, route }) {
   // Optional preselect via route param when arriving from the dashboard
   // or from Attendance History (which passes batchId + date for edit-flow).
   const preselectBatchId = route?.params?.batchId ?? null;
   const preselectDate    = route?.params?.date ? new Date(route.params.date) : new Date();
+
+  // ── Mode swap (trainer / branch admin) ───────────────────────────
+  // Same screen powers two roles:
+  //   • trainer      → GET /batches/trainer/my (only own batches),
+  //                    History nav name StaffAttendanceHistory.
+  //   • branch admin → GET /batches (admin endpoint auto-scopes to
+  //                    the caller's branch server-side for sub-branch
+  //                    logins), History nav name BranchAttendanceHistory.
+  // Backend attendance/bulk already accepts both roles and enforces
+  // ownership; we just point the mobile at the right list endpoint
+  // and route names.
+  const mode = route?.params?.mode === 'branch' ? 'branch' : 'trainer';
+  const batchesEndpoint = mode === 'branch' ? '/batches' : '/batches/trainer/my';
+  const historyRoute    = mode === 'branch' ? 'BranchAttendanceHistory' : 'StaffAttendanceHistory';
+  const headerTitle     = mode === 'branch' ? 'Branch Attendance' : 'Mark Attendance';
 
   const [batches, setBatches] = useState([]);
   const [selectedBatchId, setSelectedBatchId] = useState(preselectBatchId);
@@ -123,34 +180,61 @@ export default function StaffAttendanceScreen({ navigation, route }) {
   const [loadingStudents, setLoadingStudents] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  // Date strip is derived from the SELECTED batch's schedule. Days
-  // the batch doesn't meet are never shown. Recomputes whenever the
-  // trainer switches batches so the strip always reflects the
-  // current course's meeting days.
+  // Calendar view — trainer picks a class day from a MONTHLY grid
+  // where non-scheduled days are visibly disabled. The visibleMonth
+  // state drives which month the grid is showing; prev / next arrows
+  // step it by one month. Selecting a scheduled cell updates `date`.
   const selectedBatchForStrip = batches.find((b) => b.id === selectedBatchId);
-  const dates = useMemo(
-    () => scheduledDaysInWindow(selectedBatchForStrip?.days_of_week),
+  const [visibleMonth, setVisibleMonth] = useState(() => {
+    const d = preselectDate || new Date();
+    return { year: d.getFullYear(), month: d.getMonth() };
+  });
+  // Scheduled-days set for the current batch. null = no schedule set
+  // (legacy row) — the calendar treats every day as tappable in that
+  // case so attendance still works.
+  const scheduledSet = useMemo(
+    () => parseScheduleDays(selectedBatchForStrip?.days_of_week),
     [selectedBatchForStrip?.days_of_week],
   );
+  const monthGrid = useMemo(
+    () => buildMonthGrid(visibleMonth.year, visibleMonth.month),
+    [visibleMonth],
+  );
+  const isDayScheduled = useCallback(
+    (d) => !scheduledSet || scheduledSet.has(DAY_ABBR[d.getDay()]),
+    [scheduledSet],
+  );
 
-  // If the strip changes and the currently-picked `date` isn't in it
-  // any more (e.g. trainer switched from a MWF batch to a TTh batch),
-  // snap the picker back to the latest scheduled day so the header +
-  // student list stay in sync.
+  // When the trainer switches batches, if the currently-picked date
+  // isn't a class day for the NEW batch, snap the picker to the
+  // most recent scheduled day so the header + student list stay in
+  // sync. Also flip visibleMonth to the new date so the calendar
+  // grid follows the selection.
   useEffect(() => {
-    if (dates.length === 0) return;
-    const currentIso = isoDate(date);
-    if (!dates.some((d) => isoDate(d) === currentIso)) {
-      setDate(dates[dates.length - 1]);
+    if (!selectedBatchForStrip) return;
+    if (!isDayScheduled(date)) {
+      const recent = scheduledDaysInWindow(selectedBatchForStrip.days_of_week);
+      if (recent.length > 0) {
+        const next = recent[recent.length - 1];
+        setDate(next);
+        setVisibleMonth({ year: next.getFullYear(), month: next.getMonth() });
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dates]);
+  }, [selectedBatchId, selectedBatchForStrip?.days_of_week]);
+
+  const shiftMonth = (delta) => {
+    setVisibleMonth((prev) => {
+      const d = new Date(prev.year, prev.month + delta, 1);
+      return { year: d.getFullYear(), month: d.getMonth() };
+    });
+  };
 
   // ── Fetch my batches once ──
   const loadBatches = useCallback(async () => {
     setLoadingBatches(true);
     try {
-      const res = await apiClient.get('/batches/trainer/my').catch(() => ({ data: { batches: [] } }));
+      const res = await apiClient.get(batchesEndpoint).catch(() => ({ data: { batches: [] } }));
       const list = res.data?.batches || [];
       setBatches(list);
       // Auto-select the first batch if nothing preselected.
@@ -161,7 +245,7 @@ export default function StaffAttendanceScreen({ navigation, route }) {
       setLoadingBatches(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [batchesEndpoint]);
   useEffect(() => { loadBatches(); }, [loadBatches]);
 
   // ── Fetch students + any existing attendance for the selected date ──
@@ -317,10 +401,20 @@ export default function StaffAttendanceScreen({ navigation, route }) {
         confirmText: 'View history',
         cancelText:  'Done',
         onConfirm: () => {
+          // Trainer: History lives on the OUTER trainer stack; this
+          // Attendance screen is inside StaffTabs, so hop via the
+          // parent stack. Branch admin: History is a sibling stack
+          // screen, so a direct navigate works.
+          const params = { mode };
+          if (mode === 'branch') {
+            try { navigation.navigate(historyRoute, params); return; } catch (_) {}
+            try { navigation.getParent()?.navigate(historyRoute, params); } catch (__) {}
+            return;
+          }
           try {
-            navigation.replace('StaffAttendanceHistory');
+            navigation.getParent()?.navigate(historyRoute, params);
           } catch (_) {
-            try { navigation.navigate('StaffAttendanceHistory'); } catch (__) {}
+            try { navigation.navigate(historyRoute, params); } catch (__) {}
           }
         },
         onCancel:  () => { try { navigation.goBack(); } catch (_) {} },
@@ -389,7 +483,7 @@ export default function StaffAttendanceScreen({ navigation, route }) {
           <ArrowLeft size={20} color={palette.text} strokeWidth={2.2} />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
-          <Text style={styles.headerTitle}>Mark Attendance</Text>
+          <Text style={styles.headerTitle}>{headerTitle}</Text>
           {selectedBatch ? (
             <Text style={styles.headerSub} numberOfLines={1}>
               {selectedBatch.name}
@@ -398,7 +492,21 @@ export default function StaffAttendanceScreen({ navigation, route }) {
           ) : null}
         </View>
         <TouchableOpacity
-          onPress={() => navigation.navigate('StaffAttendanceHistory', { batchId: selectedBatchId })}
+          onPress={() => {
+            // Trainer History sits on the outer stack (parent hop);
+            // Branch History is a sibling stack screen (direct hop).
+            const params = { batchId: selectedBatchId, mode };
+            if (mode === 'branch') {
+              try { navigation.navigate(historyRoute, params); return; } catch (_) {}
+              try { navigation.getParent()?.navigate(historyRoute, params); } catch (__) {}
+              return;
+            }
+            try {
+              navigation.getParent()?.navigate(historyRoute, params);
+            } catch (_) {
+              try { navigation.navigate(historyRoute, params); } catch (__) {}
+            }
+          }}
           style={styles.historyBtn}
         >
           <History size={16} color={palette.purple.vivid} strokeWidth={2.4} />
@@ -451,11 +559,10 @@ export default function StaffAttendanceScreen({ navigation, route }) {
           </ScrollView>
         )}
 
-        {/* Date strip — only shows days the selected batch meets.
-            Non-class days are never rendered here, so the trainer
-            can't accidentally mark attendance for a Sunday on a
-            Mon/Wed/Fri batch. The tiny schedule chip on the right
-            shows exactly which days the batch runs on. */}
+        {/* Class Days — monthly calendar view. Scheduled batch days
+            are the ONLY tappable cells; non-scheduled days render
+            greyed out and are inert. The header shows the batch's
+            configured meeting days as a hint. */}
         <View style={[styles.sectionLabel, { marginTop: spacing.lg }]}>
           <CalendarDays size={12} color={palette.textMuted} strokeWidth={2.2} />
           <Text style={styles.sectionLabelText}>CLASS DAYS</Text>
@@ -467,41 +574,29 @@ export default function StaffAttendanceScreen({ navigation, route }) {
             </Text>
           ) : null}
         </View>
-        {dates.length === 0 ? (
-          <View style={{ paddingHorizontal: spacing.xl, paddingVertical: spacing.md }}>
+
+        <CalendarMonth
+          year={visibleMonth.year}
+          monthIndex={visibleMonth.month}
+          grid={monthGrid}
+          selectedIso={isoDate(date)}
+          isDayScheduled={isDayScheduled}
+          onPrev={() => shiftMonth(-1)}
+          onNext={() => shiftMonth(1)}
+          onPick={(d) => setDate(new Date(d))}
+        />
+
+        {!selectedBatchForStrip?.days_of_week ? (
+          <View style={{ paddingHorizontal: spacing.xl, paddingVertical: spacing.sm }}>
             <Text style={{
               fontSize: 12, color: palette.textMuted, fontStyle: 'italic',
             }}>
-              No scheduled class days in the last month. Set{' '}
+              Class days aren't configured for this batch. Set{' '}
               <Text style={{ fontWeight: '800' }}>Days of Week</Text> on the
-              batch to enable attendance marking.
+              batch to lock the calendar to scheduled days only.
             </Text>
           </View>
-        ) : (
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={{ paddingHorizontal: spacing.xl, gap: spacing.sm }}
-          >
-            {dates.map((d) => {
-              const active = sameDate(d, date);
-              return (
-                <TouchableOpacity
-                  key={isoDate(d)}
-                  style={[styles.dateCard, active && styles.dateCardActive]}
-                  onPress={() => setDate(new Date(d))}
-                  activeOpacity={0.85}
-                >
-                  <Text style={[styles.dateDay, active && styles.dateDayActive]}>{DAYS_SHORT[d.getDay()]}</Text>
-                  <Text style={[styles.dateNum, active && styles.dateNumActive]}>{d.getDate()}</Text>
-                  {sameDate(d, new Date()) ? (
-                    <View style={[styles.todayDot, active && { backgroundColor: '#fff' }]} />
-                  ) : null}
-                </TouchableOpacity>
-              );
-            })}
-          </ScrollView>
-        )}
+        ) : null}
 
         {/* Live counters */}
         {students.length > 0 && (
@@ -568,18 +663,18 @@ export default function StaffAttendanceScreen({ navigation, route }) {
       </ScrollView>
 
       {/* Sticky save bar — ALWAYS rendered so the button is visible
-          even before a batch is picked. Only the button label /
-          background changes with state. The disabled state uses a
-          solid grey background (not 50% opacity) so the button is
-          unmistakably present even when it can't be tapped.
+          even before a batch is picked. Per the Attendance Enhancement
+          spec, Submit is enabled and highlighted BY DEFAULT whenever
+          attendance can be submitted — dropping the earlier
+          "must-tap-something-first" rule. Every student already has
+          a default status ('present') at load, so the trainer can
+          submit immediately if that's what they want.
           Button state contract:
             • disabled while the network write is in flight (saving)
             • disabled after a successful save (submitted) — prevents
               duplicate submissions on double-taps or re-renders
-            • disabled when nothing has been changed since load
-              (dirty === false) — spec: "becomes enabled after
-              attendance is marked for the batch"
-            • disabled when there are no students to mark */}
+            • disabled when there are no students to mark
+            • otherwise ENABLED (highlighted brand color) */}
       <View style={[styles.saveBar, { bottom: saveBarBottom }]}>
         <View style={{ flex: 1 }}>
           <Text style={styles.saveBarLabel} numberOfLines={1}>{fmtDate(date)}</Text>
@@ -587,20 +682,18 @@ export default function StaffAttendanceScreen({ navigation, route }) {
             {students.length === 0
               ? 'No students to mark'
               : `${Object.keys(attendance).length} students${
-                  dirty ? ' · unsaved changes' : (submitted ? ' · saved ✓' : '')
+                  dirty ? ' · unsaved changes' : (submitted ? ' · saved ✓' : ' · ready to submit')
                 }`}
           </Text>
         </View>
         <TouchableOpacity
           style={[
             styles.saveBtn,
-            // Grey (not 50% opacity) when the button can't be tapped
-            // — makes "disabled" visually obvious instead of "missing".
-            (saving || submitted || !dirty || students.length === 0) && styles.saveBtnDisabled,
+            (saving || submitted || students.length === 0) && styles.saveBtnDisabled,
             submitted && styles.saveBtnDone,
           ]}
           onPress={submit}
-          disabled={saving || submitted || !dirty || students.length === 0}
+          disabled={saving || submitted || students.length === 0}
           activeOpacity={0.9}
         >
           {saving ? (
@@ -611,6 +704,100 @@ export default function StaffAttendanceScreen({ navigation, route }) {
             <Text style={styles.saveBtnText}>Submit attendance</Text>
           )}
         </TouchableOpacity>
+      </View>
+    </View>
+  );
+}
+
+// ─── Monthly calendar ─────────────────────────────────────────────────────
+// Renders a 7-column grid for the given month. Scheduled batch days
+// are the only tappable cells; non-scheduled days display greyed out
+// and are inert. Today's date carries a small dot; the selected date
+// gets a filled purple pill so it stays visible even after the trainer
+// scrolls through the student list.
+function CalendarMonth({
+  year, monthIndex, grid, selectedIso, isDayScheduled,
+  onPrev, onNext, onPick,
+}) {
+  const todayIso = isoDate(new Date());
+  return (
+    <View style={styles.calendarWrap}>
+      {/* Month header with prev/next arrows */}
+      <View style={styles.calendarHead}>
+        <TouchableOpacity onPress={onPrev} style={styles.calendarNav} activeOpacity={0.85} hitSlop={8}>
+          <ChevronLeft size={18} color={palette.text} strokeWidth={2.4} />
+        </TouchableOpacity>
+        <Text style={styles.calendarTitle}>
+          {MONTH_NAMES[monthIndex]} {year}
+        </Text>
+        <TouchableOpacity onPress={onNext} style={styles.calendarNav} activeOpacity={0.85} hitSlop={8}>
+          <ChevronRight size={18} color={palette.text} strokeWidth={2.4} />
+        </TouchableOpacity>
+      </View>
+
+      {/* Weekday header */}
+      <View style={styles.calendarDaysRow}>
+        {DAYS_SHORT.map((d) => (
+          <Text key={d} style={styles.calendarDayLabel}>{d}</Text>
+        ))}
+      </View>
+
+      {/* 7-col grid, chunked into rows */}
+      {Array.from({ length: Math.ceil(grid.length / 7) }).map((_, rowIdx) => {
+        const row = grid.slice(rowIdx * 7, rowIdx * 7 + 7);
+        return (
+          <View key={rowIdx} style={styles.calendarRow}>
+            {row.map((cell) => {
+              const inMonth  = cell.inMonth;
+              const scheduled = inMonth && isDayScheduled(cell.date);
+              const selected  = cell.iso === selectedIso;
+              const isToday   = cell.iso === todayIso;
+              const tappable  = scheduled && inMonth;
+              return (
+                <TouchableOpacity
+                  key={cell.iso}
+                  disabled={!tappable}
+                  activeOpacity={0.75}
+                  onPress={() => tappable && onPick(cell.date)}
+                  style={[
+                    styles.calendarCell,
+                    !inMonth && styles.calendarCellOutside,
+                    selected && styles.calendarCellSelected,
+                    tappable && !selected && styles.calendarCellTappable,
+                  ]}
+                >
+                  <Text style={[
+                    styles.calendarCellText,
+                    !inMonth && styles.calendarCellTextOutside,
+                    !scheduled && inMonth && styles.calendarCellTextDisabled,
+                    selected && styles.calendarCellTextSelected,
+                  ]}>
+                    {cell.date.getDate()}
+                  </Text>
+                  {isToday && !selected ? (
+                    <View style={styles.calendarTodayDot} />
+                  ) : null}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        );
+      })}
+
+      {/* Legend */}
+      <View style={styles.calendarLegend}>
+        <View style={styles.legendItem}>
+          <View style={[styles.legendSwatch, { backgroundColor: palette.purple.vivid }]} />
+          <Text style={styles.legendText}>Selected</Text>
+        </View>
+        <View style={styles.legendItem}>
+          <View style={[styles.legendSwatch, { backgroundColor: palette.purple.soft, borderWidth: 1, borderColor: palette.purple.soft }]} />
+          <Text style={styles.legendText}>Class day</Text>
+        </View>
+        <View style={styles.legendItem}>
+          <View style={[styles.legendSwatch, { backgroundColor: palette.borderSoft }]} />
+          <Text style={styles.legendText}>Disabled</Text>
+        </View>
       </View>
     </View>
   );
@@ -884,4 +1071,95 @@ const styles = StyleSheet.create({
     backgroundColor: palette.green.vivid,
   },
   saveBtnText: { ...type.bodyBold, color: '#fff', fontWeight: '700' },
+
+  // ── Monthly calendar ─────────────────────────────────────────
+  calendarWrap: {
+    marginHorizontal: spacing.xl,
+    backgroundColor: palette.surface,
+    borderRadius: radius.lg,
+    padding: spacing.md,
+    ...shadows.card,
+  },
+  calendarHead: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    marginBottom: spacing.sm,
+  },
+  calendarNav: {
+    width: 32, height: 32, borderRadius: 16,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: palette.borderSoft,
+  },
+  calendarTitle: { ...type.bodyBold, color: palette.text, fontSize: 15, fontWeight: '800' },
+
+  calendarDaysRow: {
+    flexDirection: 'row',
+    marginBottom: 4,
+  },
+  calendarDayLabel: {
+    flex: 1,
+    textAlign: 'center',
+    fontSize: 10,
+    fontWeight: '800',
+    color: palette.textMuted,
+    letterSpacing: 0.5,
+    paddingVertical: 4,
+  },
+
+  calendarRow: {
+    flexDirection: 'row',
+    marginBottom: 2,
+  },
+  calendarCell: {
+    flex: 1,
+    aspectRatio: 1,
+    borderRadius: 999,
+    alignItems: 'center',
+    justifyContent: 'center',
+    margin: 2,
+    backgroundColor: 'transparent',
+  },
+  calendarCellOutside: {
+    opacity: 0.4,
+  },
+  calendarCellTappable: {
+    backgroundColor: palette.purple.soft,
+  },
+  calendarCellSelected: {
+    backgroundColor: palette.purple.vivid,
+  },
+  calendarCellText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: palette.text,
+  },
+  calendarCellTextDisabled: {
+    color: palette.textLight,
+    fontWeight: '600',
+  },
+  calendarCellTextOutside: {
+    color: palette.textLight,
+  },
+  calendarCellTextSelected: {
+    color: '#fff',
+    fontWeight: '800',
+  },
+  calendarTodayDot: {
+    position: 'absolute',
+    bottom: 4,
+    width: 4, height: 4, borderRadius: 2,
+    backgroundColor: palette.purple.vivid,
+  },
+  calendarLegend: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    marginTop: spacing.sm,
+    paddingTop: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: palette.borderSoft,
+  },
+  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  legendSwatch: {
+    width: 10, height: 10, borderRadius: 5,
+  },
+  legendText: { fontSize: 10, color: palette.textMuted, fontWeight: '700' },
 });

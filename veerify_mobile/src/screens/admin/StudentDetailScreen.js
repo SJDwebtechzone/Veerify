@@ -189,38 +189,43 @@ export default function StudentDetailScreen({ navigation, route }) {
           starts BELOW the top bar so the title doesn't sit on the pink. */}
       <View style={[styles.headerBand, { backgroundColor: accent.soft }]} />
 
-      {/* Status pill — pinned to the bottom-right of the pink header band.
-          Lives outside the ScrollView so its absolute position is relative
-          to the screen, not the scrolling content. */}
-      <View
-        pointerEvents="none"
-        style={[
-          styles.statusPillFloating,
-          {
-            backgroundColor: student.active ? palette.green.soft : palette.borderSoft,
-          },
-        ]}
-      >
-        <View
-          style={[
-            styles.statusDot,
-            { backgroundColor: student.active ? palette.green.vivid : palette.textLight },
-          ]}
-        />
-        <Text
-          style={[
-            styles.statusPillText,
-            { color: student.active ? palette.green.on : palette.textMuted },
-          ]}
-        >
-          {student.active ? 'Active' : 'Inactive'}
-        </Text>
-      </View>
-
       <ScrollView
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
+        {/* Status pill — sits at the top-right of the scrollable
+            content so it visually lives in the header/profile area
+            but scrolls away with the rest of the content. The old
+            implementation used position:'absolute' on the SCREEN
+            (outside the ScrollView + zIndex:3), which pinned the
+            pill over every section as the user scrolled and looked
+            like a sticky badge floating over the profile. */}
+        <View style={styles.statusPillRow}>
+          <View
+            style={[
+              styles.statusPillInline,
+              {
+                backgroundColor: student.active ? palette.green.soft : palette.borderSoft,
+              },
+            ]}
+          >
+            <View
+              style={[
+                styles.statusDot,
+                { backgroundColor: student.active ? palette.green.vivid : palette.textLight },
+              ]}
+            />
+            <Text
+              style={[
+                styles.statusPillText,
+                { color: student.active ? palette.green.on : palette.textMuted },
+              ]}
+            >
+              {student.active ? 'Active' : 'Inactive'}
+            </Text>
+          </View>
+        </View>
+
         {/* ───── Profile section ───── */}
         <View style={styles.profileSection}>
           <View style={styles.avatarWrap}>
@@ -602,11 +607,22 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 0, right: 0,
     top: (StatusBar.currentHeight || 24) + 60,
-    height: 180,
+    // 220 (was 180) — the pill row that now sits inside the scroll
+    // content pushes the avatar + name + course-name block down a
+    // touch. Extending the band ensures those three land INSIDE the
+    // pink area at their original visual weight instead of spilling
+    // onto the white background.
+    height: 220,
   },
 
   scrollContent: {
-    paddingTop: spacing.lg,
+    // paddingTop trimmed to 0 — the status pill row below now carries
+    // its own top spacing, so the avatar + name land at the same
+    // vertical position they did before the pill moved inside the
+    // ScrollView. Without this trim the whole profile block shifted
+    // ~40pt down and the name/course text crossed the pink band
+    // boundary into the white area.
+    paddingTop: 0,
     paddingHorizontal: spacing.xl,
   },
   roundBtn: {
@@ -644,20 +660,26 @@ const styles = StyleSheet.create({
   },
   name: { ...type.h1, color: palette.text },
   studentId: { ...type.caption, color: palette.textMuted, marginTop: 2 },
-  // Floating variant — pinned to the bottom-right of the pink header band.
-  statusPillFloating: {
-    position: 'absolute',
-    right: spacing.xl,
-    // top = (StatusBar height + topBar inner height + band height) - pill height/2
-    // approx: matches the `headerBand.top` + `headerBand.height` minus a bit
-    top: (StatusBar.currentHeight || 24) + 60 + 180 - 28,
+  // Inline variant — sits inside the ScrollView at the top so the
+  // Active/Inactive badge scrolls away with the header/profile
+  // section instead of floating over every card below it.
+  statusPillRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    // Enough top space to keep the pill visually inside the pink
+    // header band; no bottom margin so the avatar block underneath
+    // sits exactly where it did before the pill moved into the
+    // scroll content.
+    paddingTop: spacing.sm,
+    marginBottom: 0,
+  },
+  statusPillInline: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
     paddingHorizontal: spacing.md,
     paddingVertical: 6,
     borderRadius: radius.pill,
-    zIndex: 3,
     ...shadows.card,
   },
   statusPill: {

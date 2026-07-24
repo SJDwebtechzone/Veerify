@@ -131,7 +131,7 @@ export function Navbar({ onMenuClick }: NavbarProps) {
                   <MenuItem
                     icon={Settings}
                     label="Account settings"
-                    onClick={() => { setMenuOpen(false); navigate('/settings'); }}
+                    onClick={() => { setMenuOpen(false); navigate('/account/settings'); }}
                   />
                 </div>
                 <div className="py-1 border-t border-slate-200 dark:border-slate-800">
