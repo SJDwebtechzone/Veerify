@@ -49,6 +49,9 @@ const DEFAULT_ORIGINS = [
   'http://localhost:5175',
   'http://localhost:3000',
   'http://localhost:4173',
+
+  'https://veerifyapp.com',
+  'https://www.veerifyapp.com',
 ];
 const extraOrigins = (process.env.CORS_ORIGINS || '')
   .split(',')
