@@ -45,7 +45,12 @@ function resolvePhoto(url) {
   return base + url;
 }
 
-export default function StudentsTabScreen({ navigation }) {
+export default function StudentsTabScreen({ navigation, route }) {
+  // Institution Home → Branch View passes { branchId, branchName } so
+  // this tab renders only that branch's students. Falls back to the
+  // whole-academy roster when the params are absent.
+  const branchIdParam  = route?.params?.branchId ?? null;
+  const branchNameParam = route?.params?.branchName ?? null;
   const [search,     setSearch]     = useState('');
   const [tab,        setTab]        = useState('All');
   const [loading,    setLoading]    = useState(true);
@@ -74,7 +79,13 @@ export default function StudentsTabScreen({ navigation }) {
 
   const load = useCallback(async () => {
     try {
-      const res = await apiClient.get('/enrollments/institution/me');
+      // Forward the branch filter when it was passed in. `null` → the
+      // default (main / sub-branch-only) scope; a positive int locks
+      // to that branch; `0` maps to "Main institution".
+      const qs = branchIdParam != null
+        ? `?branch_id=${encodeURIComponent(branchIdParam)}`
+        : '';
+      const res = await apiClient.get(`/enrollments/institution/me${qs}`);
       const rows = res.data?.enrollments || [];
 
       // Collapse multiple enrolments into one student row each. We keep the
@@ -108,7 +119,7 @@ export default function StudentsTabScreen({ navigation }) {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [branchIdParam]);
 
   useFocusEffect(useCallback(() => {
     load();
@@ -159,19 +170,28 @@ export default function StudentsTabScreen({ navigation }) {
 
   // ── Delete student (institution + branch login) ──
   //
-  // Opens the branded destructive confirm. On Remove, fires DELETE
-  // /enrollments/student/:userId which soft-deletes the user (same
-  // pattern as the trainer delete). We drop the row from local state
-  // immediately for instant feedback, then show a success dialog.
-  // Any confirm() opened from within another confirm's onConfirm is
-  // delayed by ~260ms so Android's Modal animation doesn't swallow it.
+  // Opens the branded destructive confirm. On confirm, fires
+  // DELETE /enrollments/student/:userId, which now PERMANENTLY removes
+  // the student and every row linked to them (profile, enrolments,
+  // attendance, payments, certificates, etc.) inside a transaction.
+  // The confirmation copy is deliberately blunt so no admin
+  // triggers the wipe accidentally.
+  //
+  // We drop the row from local state immediately for instant feedback
+  // and show a success dialog. Any confirm() opened from within
+  // another confirm's onConfirm is delayed by ~260ms so Android's
+  // Modal animation doesn't swallow it.
   const handleDeleteStudent = (student) => {
     confirm({
-      title: 'Remove student?',
-      message: `${student.name} will lose access to your academy. Their enrolment history stays intact, and their email/phone become free for reuse.`,
+      title: 'Permanently delete student?',
+      message:
+        `This will PERMANENTLY delete ${student.name} and every record ` +
+        `linked to them — profile, enrolments, attendance, payments, ` +
+        `certificates, and progress. This cannot be undone. ` +
+        `Their email and phone become free for reuse afterwards.`,
       variant: 'destructive',
-      confirmText: 'Remove',
-      cancelText: 'Keep student',
+      confirmText: 'Delete permanently',
+      cancelText: 'Cancel',
       onConfirm: () => {
         (async () => {
           try {
@@ -181,8 +201,8 @@ export default function StudentsTabScreen({ navigation }) {
             refreshUsage();
             setTimeout(() => {
               confirm({
-                title: 'Student removed',
-                message: `${student.name} no longer has access to your academy.`,
+                title: 'Student deleted',
+                message: `${student.name} and all their data have been permanently removed.`,
                 variant: 'success',
                 confirmText: 'Done',
                 hideCancel: true,
@@ -194,11 +214,11 @@ export default function StudentsTabScreen({ navigation }) {
               err?.response?.status, err?.response?.data);
             setTimeout(() => {
               confirm({
-                title: 'Could not remove',
+                title: 'Could not delete',
                 message:
                   err?.response?.data?.message ||
                   err?.message ||
-                  'Something went wrong. Try again.',
+                  'Something went wrong. Nothing was changed — please try again.',
                 variant: 'warning',
                 confirmText: 'OK',
                 hideCancel: true,
@@ -218,8 +238,24 @@ export default function StudentsTabScreen({ navigation }) {
       <View style={styles.header}>
         <View style={{ flex: 1 }}>
           <Text style={styles.title}>Students</Text>
-          <Text style={styles.subtitle}>{counts.All} total • {counts.Active} active</Text>
+          <Text style={styles.subtitle}>
+            {branchNameParam
+              ? `${counts.All} total • ${branchNameParam}`
+              : `${counts.All} total • ${counts.Active} active`}
+          </Text>
         </View>
+        {/* Branch filter reset — appears only when we've been passed a
+            branchId. Tapping clears the params so the tab reloads with
+            the full academy roster. */}
+        {branchIdParam != null ? (
+          <TouchableOpacity
+            onPress={() => navigation.setParams({ branchId: null, branchName: null })}
+            style={{ paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999, backgroundColor: '#F1F5F9' }}
+            activeOpacity={0.7}
+          >
+            <Text style={{ fontSize: 11, color: '#334155', fontWeight: '800' }}>Clear branch</Text>
+          </TouchableOpacity>
+        ) : null}
         {/* Filter icon hidden — it just fired a placeholder alert and
             confused admins. Bring it back once the filter panel
             (by batch / payment status / etc.) is built.

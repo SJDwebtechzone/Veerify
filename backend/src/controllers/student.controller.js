@@ -27,8 +27,31 @@ exports.getAllStudents = async (req, res) => {
     const params = [];
 
     if (gender) {
-      params.push(gender);
-      where.push(`sp.gender = $${params.length}`);
+      // Case-insensitive filter on student_profiles.gender. The
+      // frontend passes 'Male' / 'Female' / 'Not preferred', but real
+      // rows sometimes hold 'male', 'FEMALE', or single-letter 'M'/'F'
+      // — we lower-case both sides so all of those match cleanly.
+      // 'Not preferred' is the catch-all bucket: rows whose gender is
+      // NULL, blank, or anything other than male/female.
+      const norm = String(gender).trim().toLowerCase();
+      if (norm === 'male' || norm === 'm') {
+        where.push(`LOWER(TRIM(sp.gender)) IN ('male', 'm')`);
+      } else if (norm === 'female' || norm === 'f') {
+        where.push(`LOWER(TRIM(sp.gender)) IN ('female', 'f')`);
+      } else if (norm === 'not preferred' || norm === 'other' || norm === 'unspecified') {
+        where.push(
+          `(sp.gender IS NULL
+             OR TRIM(sp.gender) = ''
+             OR LOWER(TRIM(sp.gender)) NOT IN ('male', 'm', 'female', 'f'))`
+        );
+      } else {
+        // Unknown bucket — fall back to a plain case-insensitive
+        // match so the caller can still ask for e.g. 'Non-binary'
+        // without us hard-coding it. Empty result on no match, which
+        // is the correct behaviour.
+        params.push(norm);
+        where.push(`LOWER(TRIM(sp.gender)) = $${params.length}`);
+      }
     }
     if (status) {
       params.push(status);

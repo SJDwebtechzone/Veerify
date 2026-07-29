@@ -175,4 +175,14 @@ app.listen(PORT, () => {
   } catch (err) {
     console.warn('[startup] trialReminder scheduler not started:', err?.message);
   }
+
+  // Post-expiry lifecycle: active → expired → inactive with a
+  // 3-day grace window. Runs hourly. See services/
+  // subscriptionExpiry.service.js for the state machine.
+  try {
+    const subscriptionExpiry = require('./src/services/subscriptionExpiry.service');
+    subscriptionExpiry.start();
+  } catch (err) {
+    console.warn('[startup] subscriptionExpiry scheduler not started:', err?.message);
+  }
 });

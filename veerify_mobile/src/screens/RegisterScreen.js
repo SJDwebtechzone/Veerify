@@ -30,6 +30,36 @@ export default function RegisterScreen({ navigation }) {
   const [showPassword, setShowPassword] = useState(false);
   const { register } = useAuth();
 
+  // Try a registration. When Resume Registration is possible, prompt
+  // the user with the friendly "Continue where you left off?" copy and
+  // re-submit with `resume: true` if they accept. Otherwise fall back
+  // to the standard error notice.
+  const submitRegister = async ({ resume: resumeFlag = false } = {}) => {
+    setLoading(true);
+    const result = await register({ name, email, phone, password, role, resume: resumeFlag });
+    setLoading(false);
+
+    if (result.success) return;
+
+    if (result.resumable && result.resume) {
+      // Resume Registration prompt (spec: "An incomplete registration
+      // was found for this email/mobile number. Would you like to
+      // continue where you left off?").
+      confirm({
+        title:       'Continue previous registration?',
+        message:     result.message
+          || 'An incomplete registration was found for this email/mobile number. Would you like to continue where you left off?',
+        variant:     'info',
+        confirmText: 'Yes, continue',
+        cancelText:  'Start fresh',
+        onConfirm:   () => submitRegister({ resume: true }),
+      });
+      return;
+    }
+
+    notice('Registration failed', result.message || 'Please try again in a moment.');
+  };
+
   const handleRegister = async () => {
     if (!name || !email || !password) {
       notice('Missing fields', 'Name, email, and password are required.');
@@ -39,14 +69,7 @@ export default function RegisterScreen({ navigation }) {
       notice('Weak password', 'Password must be at least 6 characters.');
       return;
     }
-
-    setLoading(true);
-    const result = await register({ name, email, phone, password, role });
-    setLoading(false);
-
-    if (!result.success) {
-      notice('Registration failed', result.message);
-    }
+    await submitRegister();
   };
 
   return (

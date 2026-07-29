@@ -39,6 +39,13 @@ async function getCurrentPhase(institutionId) {
   // subscription_end (set by approveInstitution / mock-pay) or paid_at +
   // billing cycle. Whichever is later wins so renewals don't get
   // false-positive expired flags when one column was missed.
+  //
+  // Post-renewal we layer a 3-day grace window (migration 075) —
+  // premium features are blocked immediately (spec: "disable all
+  // premium features") but the account can still LOG IN so the user
+  // sees the banner and can renew. `paid_grace` is treated identically
+  // to `expired` by the guard for the feature block; the split just
+  // gives observability + a distinct client-side banner state.
   if (r.paid_at) {
     const paidAt = new Date(r.paid_at);
     const cycle  = String(r.plan_billing_cycle || 'monthly').toLowerCase();
@@ -50,7 +57,11 @@ async function getCurrentPhase(institutionId) {
     }
     const fromSubEnd = r.subscription_end ? new Date(r.subscription_end) : null;
     const renewalDue = fromSubEnd && fromSubEnd > fromPaidAt ? fromSubEnd : fromPaidAt;
-    return now <= renewalDue ? 'paid' : 'expired';
+    if (now <= renewalDue) return 'paid';
+    // Past renewal — check grace window.
+    const graceEnd = new Date(renewalDue);
+    graceEnd.setDate(graceEnd.getDate() + 3);
+    return now <= graceEnd ? 'paid_grace' : 'expired';
   }
 
   // ── Trial / grace path ────────────────────────────────────────────────
@@ -100,16 +111,23 @@ async function requireActiveSubscription(req, res, next) {
 
     const phase = await getCurrentPhase(institutionId);
 
-    if (phase === 'expired' || phase === 'locked' || phase === 'pending') {
-      const isExpired = phase === 'expired';
+    if (phase === 'expired' || phase === 'paid_grace' || phase === 'locked' || phase === 'pending') {
+      // Both paid_grace and expired reject premium features. The
+      // client-side banner reads phase from /onboarding/subscription-
+      // status and shows the countdown for paid_grace (3 → 2 → 1)
+      // or the hard "renew to regain access" copy for expired.
+      const message =
+        phase === 'paid_grace'
+          ? 'Your subscription has expired. Renew within 3 days to continue using Veerify.'
+        : phase === 'expired'
+          ? 'Your subscription has expired. Please renew your plan to regain access.'
+        : phase === 'locked'
+          ? 'Your trial period has ended. Renew your plan to keep adding students, staff, courses and batches.'
+        : 'Your institution is not yet approved.';
       return res.status(402).json({
-        code: 'PLAN_EXPIRED',
+        code: phase === 'paid_grace' ? 'PLAN_IN_GRACE' : 'PLAN_EXPIRED',
         phase,
-        message: isExpired
-          ? 'Your subscription has expired. Renew your plan to continue managing your academy.'
-          : phase === 'locked'
-            ? 'Your trial period has ended. Renew your plan to keep adding students, staff, courses and batches.'
-            : 'Your institution is not yet approved.',
+        message,
       });
     }
 

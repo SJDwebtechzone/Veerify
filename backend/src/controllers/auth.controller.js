@@ -9,11 +9,24 @@ const {
   sendPasswordChangedNotice,
 } = require('../utils/mailer');
 const { dispatchWelcomeSms } = require('../utils/smsService');
+// WhatsApp welcome — plan-scoped + one-time. See migration 073 for
+// the plan toggle and 074 for the users.welcome_wa_sent_at stamp
+// that guarantees "send only once per account creation".
+const { sendWelcomeMessage: sendWelcomeWhatsApp } = require('../services/whatsapp.service');
 const {
   validateEmailFormat, validatePhoneFormat,
   ensureEmailUnique, ensurePhoneUnique,
   normaliseEmail, normalisePhone,
 } = require('../utils/contactValidation');
+// Resume Registration / Enrollment support (migration 077). Every
+// "create user" endpoint delegates here to detect incomplete rows and
+// return the RESUME_AVAILABLE payload instead of a hard EMAIL_TAKEN
+// when the collision points at a still-draft record.
+const {
+  findResumableRegistration,
+  markRegistrationComplete,
+  resumeAvailableResponse,
+} = require('../utils/registrationStatus');
 
 // How long a password-reset OTP stays valid.
 const RESET_OTP_TTL_MINUTES = 10;
@@ -21,9 +34,20 @@ const RESET_OTP_TTL_MINUTES = 10;
 const RESET_OTP_MAX_ATTEMPTS = 5;
 
 // REGISTER a new user
+//
+// Resume Registration support:
+//   • When the request includes `resume: true`, we look up the
+//     incomplete row (matched on email or phone) and OVERWRITE it with
+//     the newly supplied name/phone/password rather than INSERT. This
+//     is the "Continue previous registration" path.
+//   • Otherwise, when the email or phone hit an incomplete row we
+//     respond 409 with `code: 'RESUME_AVAILABLE'` so the client can
+//     surface the "An incomplete registration was found..." dialog.
+//   • Completed rows (registration_completed_at IS NOT NULL) still get
+//     the classic 409 EMAIL_TAKEN / PHONE_TAKEN copy.
 exports.register = async (req, res) => {
   try {
-    const { name, email, phone, password, role } = req.body;
+    const { name, email, phone, password, role, resume: resumeFlag } = req.body;
 
     // Basic validation
     if (!name || !password || !role) {
@@ -43,40 +67,72 @@ exports.register = async (req, res) => {
     if (!eFmt.ok) return res.status(eFmt.status).json(eFmt.body);
     const pFmt = validatePhoneFormat(phone, { required: false });
     if (!pFmt.ok) return res.status(pFmt.status).json(pFmt.body);
-    // Phone uniqueness is enforced here; email uniqueness is handled
-    // by the existing "restore deleted" branch below, so we keep that
-    // logic intact and only block live duplicates on phone here.
-    if (pFmt.value) {
-      const phoneUnique = await ensurePhoneUnique(pFmt.value);
-      if (!phoneUnique.ok) {
-        return res.status(phoneUnique.status).json(phoneUnique.body);
-      }
-    }
 
     // Normalised values used for the INSERT/UPDATE.
     const cleanEmail = eFmt.value;
     const cleanPhone = pFmt.value;
 
-    // Uniqueness check — ONLY consider live rows. A soft-deleted user
-    // does not block registration: the fresh account gets its own new
-    // user_id and its own history. The old row stays soft-deleted
-    // forever for audit purposes, and the partial-unique index on
-    // users.email (migration 050) makes this INSERT safe at the DB
-    // layer too.
-    const liveExisting = await pool.query(
-      `SELECT id FROM users
-        WHERE LOWER(email) = $1
-          AND COALESCE(is_deleted, FALSE) = FALSE
-        LIMIT 1`,
-      [cleanEmail],
-    );
-    if (liveExisting.rows.length > 0) {
+    // Resume Registration — first check whether this email/phone
+    // already belongs to an INCOMPLETE user. The lookup respects
+    // roleHint so trying to admin-register with a trainer's email
+    // does NOT silently continue the trainer's flow.
+    const lookup = await findResumableRegistration({
+      email: cleanEmail, phone: cleanPhone, role,
+    });
+
+    if (lookup.status === 'completed') {
+      // Same "already registered" copy as before, but respecting
+      // which field actually matched so the client focuses the
+      // right input.
+      const isPhone = lookup.matchedOn === 'phone';
       return res.status(409).json({
-        code:    'EMAIL_TAKEN',
-        field:   'email',
-        message: 'This email is already registered. Please sign in or use a different email.',
+        code:    isPhone ? 'PHONE_TAKEN' : 'EMAIL_TAKEN',
+        field:   isPhone ? 'phone' : 'email',
+        message: isPhone
+          ? 'This phone number is already registered. Please use a different number.'
+          : 'This email is already registered. Please sign in or use a different email.',
       });
     }
+
+    // Incomplete row present — either resume it, or invite the
+    // client to opt in.
+    if (lookup.status === 'incomplete') {
+      if (!resumeFlag) {
+        // The client hasn't opted in yet. Surface the friendly
+        // "Would you like to continue where you left off?" 409.
+        return res.status(409).json(resumeAvailableResponse(lookup));
+      }
+      // Client opted in — overwrite the existing draft row with the
+      // freshly supplied fields (name/phone/password). Role is
+      // preserved from the draft to keep the state machine honest.
+      const hashedPassword = await bcrypt.hash(password, 10);
+      const updated = await pool.query(
+        `UPDATE users SET
+           name       = $1,
+           email      = LOWER($2),
+           phone      = $3,
+           password   = $4,
+           updated_at = NOW()
+         WHERE id = $5
+         RETURNING id, name, email, phone, role, institution_id, created_at`,
+        [name, cleanEmail, cleanPhone, hashedPassword, lookup.user.id],
+      );
+      const resumedUser = updated.rows[0];
+      // Mint a fresh JWT — the caller flows straight into the
+      // remaining onboarding steps as if they'd just registered.
+      const resumedToken = jwt.sign(
+        { id: resumedUser.id, role: resumedUser.role, institution_id: resumedUser.institution_id },
+        process.env.JWT_SECRET,
+        { expiresIn: '7d' },
+      );
+      return res.status(200).json({
+        message: 'Registration resumed',
+        resumed: true,
+        token:   resumedToken,
+        user:    resumedUser,
+      });
+    }
+
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
@@ -113,6 +169,52 @@ exports.register = async (req, res) => {
       // so we don't echo it back over SMS. tempPassword is left blank.
     });
 
+    // ── Welcome WhatsApp (fire-and-forget) ───────────────────────
+    // Only dispatches when EVERY spec condition is satisfied:
+    //   1. Account was successfully created (we're past the INSERT).
+    //   2. A mobile number was captured on the row.
+    //   3. The caller's institution's active plan has
+    //      whatsapp_notifications_enabled = TRUE (planFeatureGuard).
+    //   4. This account hasn't already received a welcome WhatsApp
+    //      (users.welcome_wa_sent_at IS NULL — stamped on success).
+    //
+    // Admin self-signup is a common case: user.institution_id is
+    // NULL at this point because the admin picks their plan later
+    // in onboarding. The plan gate correctly returns "disabled" so
+    // the message is skipped — the WhatsApp welcome then fires
+    // naturally when other roles created under an institution
+    // whose plan has the flag ON go through this same code path.
+    if (user.phone) {
+      sendWelcomeWhatsApp({
+        userId: user.id,
+        name:   user.name,
+        phone:  user.phone,
+        role:   smsRole,
+      })
+        .then((r) => {
+          // Loud logging so ops can spot WHY a welcome message
+          // didn't arrive: was the plan gate closed? Was the
+          // institution not linked yet (admin self-signup)? Or did
+          // the WhatsApp API itself reject the send?
+          if (r?.ok) {
+            console.log(
+              `[WhatsApp] welcome delivered → user=${user.id} phone=${user.phone} messageId=${r.messageId}`,
+            );
+          } else if (r?.skipped) {
+            console.log(
+              `[WhatsApp] welcome skipped → user=${user.id} reason=${r.skipped}`,
+            );
+          } else {
+            console.warn(
+              `[WhatsApp] welcome send FAILED → user=${user.id} error=${r?.error}`,
+            );
+          }
+        })
+        .catch(() => { /* logged inside the helper */ });
+    } else {
+      console.log(`[WhatsApp] welcome skipped → user=${user.id} reason=no-phone-on-registration`);
+    }
+
     res.status(201).json({
       message: 'User registered successfully',
       token,
@@ -128,8 +230,88 @@ exports.register = async (req, res) => {
       }
     });
   } catch (err) {
+    // Postgres 23505 = unique_violation. Fires when two clients
+    // race the pre-check and both land at the INSERT with the same
+    // email (mobile double-tap on Register, browser retry, etc.).
+    // Translate to a clean 409 so the UI shows "email already
+    // registered" instead of a scary Server error.
+    if (err?.code === '23505' && /email/i.test(err?.constraint || err?.detail || '')) {
+      return res.status(409).json({
+        code:    'EMAIL_TAKEN',
+        field:   'email',
+        message: 'This email is already registered. Please sign in or use a different email.',
+      });
+    }
+    if (err?.code === '23505' && /phone/i.test(err?.constraint || err?.detail || '')) {
+      return res.status(409).json({
+        code:    'PHONE_TAKEN',
+        field:   'phone',
+        message: 'This phone number is already registered. Please use a different number.',
+      });
+    }
     console.error('Register error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// PUBLIC: Registration Status probe
+//
+// The Resume Registration flow (spec: "Detect the existing incomplete
+// record, allow the user to continue the previous registration instead
+// of showing 'Email already exists' or 'Mobile number already exists'")
+// starts here. Accepts { email, phone, role } and returns:
+//
+//   { status: 'available' }
+//     — nothing on file. Client proceeds with a fresh registration.
+//
+//   { status: 'incomplete', resume: { user_id, role, next_step, draft } }
+//     — an existing draft matches. Client shows the "Continue previous
+//       registration?" prompt and, on confirm, re-submits the register /
+//       enrollment / trainer create endpoint with `resume: true`.
+//
+//   { status: 'completed' }
+//     — completed live account owns this email/phone. Client shows the
+//       standard "already registered" copy.
+//
+// Public + un-authenticated by design — the field surfaces before any
+// user has a token. Draft payload deliberately excludes the password
+// hash, DOB, and any other sensitive column.
+exports.registrationStatus = async (req, res) => {
+  try {
+    const { email, phone, role } = req.body || {};
+    const lookup = await findResumableRegistration({ email, phone, role });
+    if (lookup.status === 'available') {
+      return res.json({ status: 'available' });
+    }
+    if (lookup.status === 'completed') {
+      return res.json({
+        status:    'completed',
+        matchedOn: lookup.matchedOn,
+        role:      lookup.role || null,
+        reason:    lookup.reason || null,
+      });
+    }
+    if (lookup.status === 'incomplete') {
+      return res.json({
+        status:    'incomplete',
+        matchedOn: lookup.matchedOn,
+        resume: {
+          user_id:   lookup.user.id,
+          role:      lookup.user.role,
+          next_step: lookup.nextStep,
+          draft:     lookup.draft,
+        },
+      });
+    }
+    // status === 'error' — degrade gracefully. The client falls back
+    // to the plain register endpoint and lets the DB decide.
+    return res.json({ status: 'available' });
+  } catch (err) {
+    console.error('registrationStatus error:', err);
+    // Failure of the probe must never break the register flow. Return
+    // 'available' so the register endpoint's own guards catch any
+    // remaining edge cases.
+    return res.json({ status: 'available' });
   }
 };
 
@@ -171,6 +353,67 @@ const result = await pool.query(
         code:    'PAYMENT_PENDING',
         message: 'Your account is pending payment. Once payment is confirmed you\'ll receive an email with your login details.',
       });
+    }
+
+    // ── Post-grace lock (migration 075 + subscriptionExpiry.service) ──
+    // Two distinct rules apply here:
+    //
+    //  1. Institution admin + super_admin: blocked ONLY when the
+    //     account itself is inactive (i.e. the scheduler flipped
+    //     status='inactive' after the grace window closed). Keeping
+    //     this preserves their ability to sign in during trial + grace
+    //     so they can renew.
+    //
+    //  2. Students, trainers, and parents whose institution's
+    //     subscription is `expired` OR `inactive` are refused
+    //     entirely — the academy owes payment before they get access.
+    //     Applies from the moment the subscription lapses (past
+    //     subscription_end, no grace credit) so end-users can't sign
+    //     in against a paused institution. Message wording is fixed
+    //     per spec.
+    //
+    // super_admin sails through so platform-level operators can still
+    // manage things. Read-only access to the renewal path is preserved
+    // because it lives on unauthenticated / super-admin endpoints
+    // (payment link, webhook).
+    if (user.institution_id && user.role !== 'super_admin') {
+      try {
+        const instState = await pool.query(
+          `SELECT subscription_status, status FROM institutions WHERE id = $1`,
+          [user.institution_id],
+        );
+        const inst = instState.rows[0] || {};
+
+        // Rule 2 — students / trainers (and their parents) are locked
+        // out the moment the institution lapses out of `active`.
+        const isEndUserRole = user.role === 'student'
+                           || user.role === 'trainer'
+                           || user.role === 'parent';
+        if (
+          isEndUserRole
+          && (inst.subscription_status === 'expired' || inst.subscription_status === 'inactive'
+              || inst.status === 'inactive')
+        ) {
+          return res.status(403).json({
+            code:    'INSTITUTION_SUBSCRIPTION_EXPIRED',
+            message: 'Your institution subscription has expired. Please wait until your institution renews the subscription.',
+          });
+        }
+
+        // Rule 1 — institution admin path: only the full lock (post
+        // grace) blocks them. Existing behaviour is preserved so
+        // admins can still sign in during trial / expired-grace and
+        // click "Renew".
+        if (
+          !isEndUserRole
+          && (inst.subscription_status === 'inactive' || inst.status === 'inactive')
+        ) {
+          return res.status(403).json({
+            code:    'SUBSCRIPTION_INACTIVE',
+            message: 'Your subscription has expired. Please renew your plan to regain access.',
+          });
+        }
+      } catch (_) { /* if the column doesn't exist yet, allow login */ }
     }
 
     // Generate JWT

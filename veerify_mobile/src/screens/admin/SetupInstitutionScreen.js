@@ -1130,20 +1130,24 @@ export default function SetupInstitutionScreen({ navigation }) {
         contentContainerStyle={styles.body}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
-        // Close every open inline dropdown the instant the owner
-        // starts dragging. onScrollBeginDrag is user-initiated only
-        // — content-height changes from opening the panel itself do
-        // NOT trigger it (unlike onScroll), so the panel never
-        // self-dismisses just from being opened. Also fires on
-        // onMomentumScrollBegin so a quick flick past the field
-        // still collapses the panel even without a leisurely drag.
-        onScrollBeginDrag={closeAllDropdowns}
-        onMomentumScrollBegin={closeAllDropdowns}
+        // Nested-scroll support so the inline Skills / Medium panels
+        // (which now scroll internally when they overflow their
+        // bounded height) hand touches back to the outer form
+        // correctly on Android.
+        nestedScrollEnabled
         scrollEventThrottle={64}
         // Smooth scroll consistency across platforms — deceleration
         // "normal" on iOS matches Android's default so both feel the
         // same when the user flicks past the skills panel.
         decelerationRate="normal"
+        // Auto-close on scroll was removed per the Skills-picker
+        // spec ("close only when the user taps outside or explicitly
+        // closes it"). Scrolling the form must NOT dismiss the
+        // panel, otherwise the owner can never reach the last few
+        // skill rows on a small screen. Explicit close paths still
+        // work: tapping the trigger row again toggles it off, and
+        // focusing any other input calls closeAllDropdowns via its
+        // onFocus (see StepCore's field wiring).
       >
         {stepIdx === 0 && (
           <StepCore

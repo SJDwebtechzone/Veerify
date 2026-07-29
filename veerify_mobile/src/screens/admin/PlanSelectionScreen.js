@@ -22,20 +22,46 @@ const CYCLES = [
 
 // Turn plan.pricing_terms into a map keyed by billing_term for O(1)
 // lookups. Ignores disabled terms so the selector never offers
-// something the super admin has turned off.
+// something the super admin has turned off. Each value is a
+// { base_price, gst_percent, gst_amount, total_payable } snapshot
+// so the pill / total-payable card can render the GST breakdown
+// without recomputing it per render.
+function round2(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  return Math.round(n * 100) / 100;
+}
+function termBreakdown(basePrice, gstPercent) {
+  const base = round2(basePrice);
+  const pct  = Math.max(0, Math.min(50, Number(gstPercent) || 0));
+  const gst  = round2(base * (pct / 100));
+  return { base_price: base, gst_percent: pct, gst_amount: gst, total_payable: round2(base + gst) };
+}
 function termsMap(plan) {
   const out = {};
+  const defaultPct = Number.isFinite(Number(plan?.gst_percent)) ? Number(plan.gst_percent) : 18;
   (plan.pricing_terms || []).forEach((t) => {
     if (t.is_enabled === false) return;
     if (!Number.isFinite(Number(t.price))) return;
-    out[t.billing_term] = Number(t.price);
+    // Prefer server-computed breakdown when present; else compute
+    // locally using the plan default rate.
+    const pct = Number.isFinite(Number(t.gst_percent)) ? Number(t.gst_percent) : defaultPct;
+    out[t.billing_term] = {
+      base_price:    Number(t.base_price ?? t.price),
+      gst_percent:   pct,
+      gst_amount:    Number.isFinite(Number(t.gst_amount)) ? Number(t.gst_amount) : round2(Number(t.price) * (pct / 100)),
+      total_payable: Number.isFinite(Number(t.total_payable)) ? Number(t.total_payable) : round2(Number(t.price) + round2(Number(t.price) * (pct / 100))),
+    };
   });
   // Legacy fallback — very old plans without any pricing_terms row.
-  // Use the singleton price + billing_cycle so the card still renders.
   if (Object.keys(out).length === 0 && plan.price != null) {
-    out[plan.billing_cycle || 'monthly'] = Number(plan.price);
+    out[plan.billing_cycle || 'monthly'] = termBreakdown(plan.price, defaultPct);
   }
   return out;
+}
+function fmtINR2(n) {
+  const v = Number(n) || 0;
+  return `₹${v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 // Savings percentage for a longer term vs. the monthly rate. Only
@@ -113,8 +139,10 @@ export default function PlanSelectionScreen({ navigation }) {
         if (map.monthly != null) {
           seed[p.id] = 'monthly';
         } else {
+          // Sort by base_price so the cheapest surfaces first,
+          // matching the pre-GST behaviour.
           const cheapest = Object.entries(map)
-            .sort((a, b) => a[1] - b[1])[0];
+            .sort((a, b) => (a[1].base_price - b[1].base_price))[0];
           if (cheapest) seed[p.id] = cheapest[0];
         }
       });
@@ -132,7 +160,10 @@ export default function PlanSelectionScreen({ navigation }) {
     try {
       const term = cycleByPlan[plan.id] || plan.billing_cycle || 'monthly';
       const map = termsMap(plan);
-      const price = map[term] ?? Number(plan.price) ?? 0;
+      // Send the GST-EXCLUSIVE base price. The backend layers GST on
+      // itself so we never trust a client-computed total for the
+      // charge amount.
+      const price = map[term]?.base_price ?? Number(plan.price) ?? 0;
       const body = { plan_id: plan.id, billing_term: term, price };
       const code = referralCode.trim().toUpperCase();
       if (code) body.referral_code = code;
@@ -405,16 +436,18 @@ export default function PlanSelectionScreen({ navigation }) {
 // flips the selection — the parent hoists that into cycleByPlan.
 function BillingCycleSelector({ plan, selected, onSelect }) {
   const map    = termsMap(plan);
-  const monthly = map.monthly ?? null;
+  const monthlyBase = map.monthly?.base_price ?? null;
 
   return (
     <View style={styles.cycleGrid}>
       {CYCLES.map((c) => {
-        const price = map[c.term];
+        const row = map[c.term];
         // Term is disabled or the plan doesn't offer it — skip.
-        if (price == null) return null;
+        if (row == null) return null;
         const isSel = selected === c.term;
-        const save  = savingsPct(monthly, price, c.months);
+        // Savings comparison uses the GST-exclusive base (so a rate
+        // slab change doesn't distort the discount headline).
+        const save  = savingsPct(monthlyBase, row.base_price, c.months);
         return (
           <TouchableOpacity
             key={c.term}
@@ -435,10 +468,16 @@ function BillingCycleSelector({ plan, selected, onSelect }) {
               ) : null}
             </View>
             <Text style={[styles.cyclePrice, isSel && styles.cyclePriceActive]}>
-              ₹{Math.round(price).toLocaleString('en-IN')}
+              {fmtINR2(row.total_payable)}
             </Text>
             <Text style={[styles.cyclePer, isSel && styles.cyclePerActive]}>
               per {c.label.toLowerCase()}
+            </Text>
+            <Text style={[styles.cycleBreakdown, isSel && styles.cycleBreakdownActive]}>
+              Base {fmtINR2(row.base_price)} + GST {row.gst_percent}%
+            </Text>
+            <Text style={[styles.cycleIncludesGst, isSel && styles.cycleIncludesGstActive]}>
+              Includes GST
             </Text>
           </TouchableOpacity>
         );
@@ -454,9 +493,9 @@ function BillingCycleSelector({ plan, selected, onSelect }) {
 function TotalPayable({ plan, selected }) {
   const map     = termsMap(plan);
   const cycle   = CYCLES.find((c) => c.term === selected) || CYCLES[0];
-  const price   = map[cycle.term] ?? 0;
-  const monthly = map.monthly ?? null;
-  const save    = savingsPct(monthly, price, cycle.months);
+  const row     = map[cycle.term] || { base_price: 0, gst_percent: 0, gst_amount: 0, total_payable: 0 };
+  const monthlyBase = map.monthly?.base_price ?? null;
+  const save    = savingsPct(monthlyBase, row.base_price, cycle.months);
 
   return (
     <View style={styles.totalCard}>
@@ -466,9 +505,13 @@ function TotalPayable({ plan, selected }) {
           Billed once every {cycle.months} {cycle.months === 1 ? 'month' : 'months'}
           {save != null ? ` · Save ${save}% vs monthly` : ''}
         </Text>
+        <Text style={styles.totalBreakdown}>
+          Base {fmtINR2(row.base_price)} + GST {row.gst_percent}% ({fmtINR2(row.gst_amount)})
+        </Text>
+        <Text style={styles.totalIncludesGst}>Includes GST</Text>
       </View>
       <Text style={styles.totalAmount}>
-        ₹{Math.round(price).toLocaleString('en-IN')}
+        {fmtINR2(row.total_payable)}
       </Text>
     </View>
   );
@@ -725,6 +768,23 @@ const styles = StyleSheet.create({
     letterSpacing: 0.3,
   },
   cyclePerActive: { color: colors.primary, opacity: 0.85 },
+  cycleBreakdown: {
+    fontSize: 9,
+    color: colors.textLight,
+    marginTop: 4,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+  },
+  cycleBreakdownActive: { color: colors.primary, opacity: 0.85 },
+  cycleIncludesGst: {
+    fontSize: 8,
+    color: '#166534',
+    marginTop: 2,
+    fontWeight: '800',
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+  },
+  cycleIncludesGstActive: { color: colors.primary },
   saveChip: {
     paddingHorizontal: 6,
     paddingVertical: 2,
@@ -769,6 +829,14 @@ const styles = StyleSheet.create({
     color: '#4B5563',
     marginTop: 2,
     lineHeight: 15,
+  },
+  totalIncludesGst: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#166534',
+    marginTop: 3,
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
   },
   totalAmount: {
     fontSize: 22,

@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "124963914927",
+    "project_id": "martial-arts-a835c",
+    "storage_bucket": "martial-arts-a835c.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:124963914927:android:defdef90db4efbdf30005a",
+        "android_client_info": {
+          "package_name": "in.devspectra.veerify"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAxDZ4BfNH1QdYjBVYgpqvYPWIi_w6L8lg"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -138,9 +138,17 @@ const DEFAULT_WALLET = {
   settlement_history:  [],
 };
 
-export default function PaymentsTabScreen() {
+export default function PaymentsTabScreen({ route, navigation }) {
+  // Institution Home → Branch View forwards { branchId, branchName,
+  // focus } — branchId narrows the payments list to that branch,
+  // focus='pending' preselects the Pending sub-tab. Params are
+  // optional; when absent the screen behaves exactly as before.
+  const branchIdParam   = route?.params?.branchId ?? null;
+  const branchNameParam = route?.params?.branchName ?? null;
+  const focusParam      = route?.params?.focus ?? null;
+
   const [search, setSearch] = useState('');
-  const [tab, setTab] = useState('All');
+  const [tab, setTab] = useState(focusParam === 'pending' ? 'Pending' : 'All');
   const [walletVisible, setWalletVisible] = useState(false);
 
   // Wallet ledger — fully live from /institution-payouts/me/wallet.
@@ -203,7 +211,10 @@ export default function PaymentsTabScreen() {
     let cancelled = false;
     (async () => {
       try {
-        const res = await apiClient.get('/enrollments/institution/me');
+        const qs = branchIdParam != null
+          ? `?branch_id=${encodeURIComponent(branchIdParam)}`
+          : '';
+        const res = await apiClient.get(`/enrollments/institution/me${qs}`);
         // Diagnostic log so we can see the actual response shape when
         // the list looks empty. Safe to leave in — it only fires once
         // per mount and the payload is small.
@@ -248,7 +259,7 @@ export default function PaymentsTabScreen() {
       }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [branchIdParam]);
 
   // Totals for the hero + tiles.
   //

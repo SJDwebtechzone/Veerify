@@ -50,23 +50,83 @@ exports.getDashboardStats = async (req, res) => {
     const isSubBranch = !!parentRes.rows[0]?.parent_institution_id;
     const rootId      = parentRes.rows[0]?.parent_institution_id || institutionId;
 
+    // Optional ?branch_id override — Institution Home dashboard uses
+    // this when the admin picks a specific branch from the header
+    // dropdown. Semantics:
+    //
+    //   omitted            → default scope (main admin sees main,
+    //                        sub-branch admin sees own branch).
+    //   branch_id = 0      → force the "Main" scope (batches with
+    //                        branch_id IS NULL under the root
+    //                        institution). Used by the picker's
+    //                        "Main Institution" option.
+    //   branch_id = <n>    → filter to that specific sub-branch.
+    //
+    // Sub-branch admins CAN'T override at all — they only ever see
+    // their own branch, and the mobile dropdown is hidden for them.
+    // The main-institution admin is authorised to inspect any branch
+    // under their root, so we validate the id belongs to the same
+    // academy tree and refuse otherwise.
+    const rawBranchOverride = req.query.branch_id;
+    let branchOverride = null; // null=no override, 0=main, N=sub-branch id
+    if (!isSubBranch && rawBranchOverride !== undefined) {
+      const parsed = parseInt(rawBranchOverride, 10);
+      if (Number.isFinite(parsed) && parsed >= 0) {
+        if (parsed === 0) {
+          branchOverride = 0;
+        } else {
+          // Must belong to the caller's tree.
+          const bRow = await pool.query(
+            `SELECT id FROM institutions
+              WHERE id = $1
+                AND (id = $2 OR parent_institution_id = $2)
+                AND deleted_at IS NULL`,
+            [parsed, rootId],
+          );
+          if (bRow.rows.length === 0) {
+            return res.status(403).json({ message: 'Branch not in your academy' });
+          }
+          branchOverride = parsed;
+        }
+      }
+    }
+
     // Branch-scoped WHERE fragment for anything joining `batches b`.
     // Matches the same filter the Students / Payments / Batches tabs
     // use, so the dashboard's Total Students / Today's Classes /
     // Pending Fees / Revenue counts stay consistent with what the
     // admin sees when they drill into those tabs.
-    //   • main admin  → batches with branch_id IS NULL
-    //   • sub-branch  → batches with branch_id = <their inst>
+    //   • main admin (no override) → batches with branch_id IS NULL
+    //   • sub-branch admin         → batches with branch_id = <their inst>
+    //   • main admin + ?branch_id=0    → same as main scope
+    //   • main admin + ?branch_id=N    → batches with branch_id = N
     // We also anchor to the caller's academy tree via batch.institution_id.
-    const branchClause = isSubBranch
-      ? `b.branch_id = ${institutionId}`
-      : `b.branch_id IS NULL`;
+    let branchClause;
+    if (branchOverride !== null) {
+      branchClause = branchOverride === 0
+        ? `b.branch_id IS NULL`
+        : `b.branch_id = ${branchOverride}`;
+    } else {
+      branchClause = isSubBranch
+        ? `b.branch_id = ${institutionId}`
+        : `b.branch_id IS NULL`;
+    }
     const treeClause = `(b.institution_id = ${rootId}
                          OR b.institution_id IN (
                            SELECT id FROM institutions WHERE parent_institution_id = ${rootId}
                          ))`;
     // Compose the two — used inside every batch-scoped query below.
     const batchScope = `${treeClause} AND ${branchClause}`;
+
+    // Same override applies to the institution-scoped attendance
+    // query below so the "Attendance %" tile matches the other
+    // tiles when a branch is picked.
+    let attendanceInstitutionId = institutionId;
+    if (branchOverride !== null && branchOverride > 0) {
+      attendanceInstitutionId = branchOverride;
+    } else if (branchOverride === 0) {
+      attendanceInstitutionId = rootId;
+    }
 
     const todayAbbr = DAY_ABBR[new Date().getDay()];
 
@@ -163,8 +223,10 @@ exports.getDashboardStats = async (req, res) => {
             AND COALESCE(e.paid_at, e.enrolled_at) >= date_trunc('month', NOW())`,
       ),
 
-      // Attendance % this month — present / (present + absent + late). We
-      // ignore 'leave' from the denominator since leave is excused.
+      // Attendance % this month — present / (present + absent + late).
+      // We ignore 'leave' from the denominator since leave is excused.
+      // Uses `attendanceInstitutionId` so a picked branch reports its
+      // own %, not the whole academy's.
       pool.query(
         `SELECT
            COUNT(*) FILTER (WHERE status = 'present')::int AS present,
@@ -172,7 +234,7 @@ exports.getDashboardStats = async (req, res) => {
          FROM attendance
          WHERE institution_id = $1
            AND date >= date_trunc('month', NOW())`,
-        [institutionId],
+        [attendanceInstitutionId],
       ),
 
       // Monthly revenue series for the last 6 calendar months (oldest first).
@@ -272,6 +334,41 @@ exports.getDashboardStats = async (req, res) => {
       .sort((a, b) => new Date(b.at) - new Date(a.at))
       .slice(0, 8);
 
+    // Branch metadata for the Institution Home dropdown. We want to
+    // tell the mobile:
+    //   • plan_max_branches — how many branches the plan supports
+    //     (>1 means the branch feature is enabled for this academy).
+    //   • branch_count      — how many sub-branches actually exist
+    //     under this root today.
+    // The mobile hides the dropdown when either signal says "no
+    // branches" so a solo academy sees the plain dashboard. Both are
+    // cheap single-row lookups. Sub-branch admins never render the
+    // picker so we skip the work for them.
+    let planMaxBranches = 1;
+    let branchCount = 0;
+    if (!isSubBranch) {
+      try {
+        const capRes = await pool.query(
+          `SELECT COALESCE(sp.max_branches, 1)::int AS max_branches
+             FROM institutions i
+             LEFT JOIN subscription_plans sp ON sp.id = i.plan_id
+            WHERE i.id = $1`,
+          [rootId],
+        );
+        planMaxBranches = capRes.rows[0]?.max_branches || 1;
+        const cntRes = await pool.query(
+          `SELECT COUNT(*)::int AS n
+             FROM institutions
+            WHERE parent_institution_id = $1
+              AND deleted_at IS NULL`,
+          [rootId],
+        );
+        branchCount = cntRes.rows[0]?.n || 0;
+      } catch (err) {
+        console.warn('[dashboard] branch capacity probe failed:', err?.message);
+      }
+    }
+
     res.json({
       counts: {
         students:             studentsRes.rows[0]?.n || 0,
@@ -283,7 +380,13 @@ exports.getDashboardStats = async (req, res) => {
         attendance_pct:       attendancePct,
         unread_notifications: unreadRes.rows[0]?.n  || 0,
       },
-      is_sub_branch: isSubBranch,
+      is_sub_branch:    isSubBranch,
+      // Branch-picker metadata. Mobile shows the dropdown iff
+      // plan_max_branches > 1 AND branch_count > 0 AND the caller
+      // is a main-institution admin.
+      plan_max_branches: planMaxBranches,
+      branch_count:      branchCount,
+      branch_id:         branchOverride,   // echo of applied filter (0 or int, null if omitted)
       monthly_revenue: monthlyRevenueRes.rows.map((r) => ({
         label: r.label,
         total: Number(r.total) || 0,

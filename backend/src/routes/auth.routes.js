@@ -7,6 +7,13 @@ const { verifyToken } = require('../middleware/auth.middleware');
 router.post('/register', authController.register);
 router.post('/login', authController.login);
 
+// Resume Registration probe — public, no token. Accepts { email, phone,
+// role } and returns { status: 'available' | 'incomplete' | 'completed',
+// resume?: { user_id, next_step, draft } }. The client hits this before
+// showing the register form, or on the "already registered" error, to
+// decide whether to surface the "Continue previous registration?" flow.
+router.post('/registration-status', authController.registrationStatus);
+
 // Forgot / reset password flow (public - no token, but rate-limited by OTP)
 router.post('/forgot-password', authController.forgotPassword);
 router.post('/reset-password', authController.resetPassword);

@@ -6,7 +6,17 @@ const {
   sendTrialWelcomeEmail,
 } = require('../utils/mailer');
 const { dispatchWelcomeSms } = require('../utils/smsService');
+// Welcome WhatsApp — one-time, plan-gated. Fired here (not in the
+// register endpoint) because admin self-signup has no institution
+// linked yet at register time; the plan gate can only be evaluated
+// after approval. See services/whatsapp.service.js for the guards.
+const { sendWelcomeMessage: sendWelcomeWhatsApp } = require('../services/whatsapp.service');
 const { createPaymentLink, verifyWebhookSignature } = require('../utils/razorpay');
+const { computeGst, totalPayable, GST_PERCENT_DEFAULT } = require('../utils/gst');
+// Resume Registration completion stamp — swallows 42703 when
+// migration 077 hasn't been applied yet so a stale schema can't
+// rollback the activation transaction.
+const { markRegistrationComplete } = require('../utils/registrationStatus');
 const { insertNotification } = require('./notification.controller');
 const { creditReferralReward, consumeDiscount } = require('./referral.controller');
 
@@ -726,7 +736,8 @@ exports.getSubscriptionStatus = async (req, res) => {
               sp.discount_percent AS plan_discount_percent,
               sp.max_students     AS plan_max_students,
               sp.max_trainers     AS plan_max_trainers,
-              i.trial_reminder_sent_at
+              i.trial_reminder_sent_at,
+              i.subscription_status
        FROM institutions i
        LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
        WHERE i.owner_user_id = $1`,
@@ -740,10 +751,47 @@ exports.getSubscriptionStatus = async (req, res) => {
     const r = result.rows[0];
     const now = new Date();
 
+    // ── Post-payment grace window ─────────────────────────────────
+    // For paid subscriptions we compute paid_renewal_at from paid_at
+    // + billing_cycle and layer a 3-day grace window on top (see
+    // migration 075 + services/subscriptionExpiry.service.js). During
+    // grace the account can still LOG IN but premium features are
+    // refused by subscriptionGuard. After grace the scheduler flips
+    // institution.subscription_status to 'inactive' and the login
+    // gate rejects the four institution-linked roles.
+    const GRACE_DAYS = 3;
+    let paidRenewalAt = null;
+    let paidGraceEndsAt = null;
+    let daysLeftInPaidGrace = null;
+    if (r.paid_at) {
+      const start = new Date(r.paid_at);
+      const cycle = String(r.plan_billing_cycle || 'monthly').toLowerCase();
+      const renewal = new Date(start);
+      if (cycle === 'yearly') renewal.setFullYear(renewal.getFullYear() + 1);
+      else                    renewal.setMonth(renewal.getMonth() + 1);
+      paidRenewalAt = renewal;
+      const graceEnd = new Date(renewal);
+      graceEnd.setDate(graceEnd.getDate() + GRACE_DAYS);
+      paidGraceEndsAt = graceEnd;
+      if (now > renewal) {
+        const ms = graceEnd.getTime() - now.getTime();
+        daysLeftInPaidGrace = ms > 0 ? Math.ceil(ms / (24 * 60 * 60 * 1000)) : 0;
+      }
+    }
+
     // Compute phase.
     let phase;
-    if (r.paid_at) {
+    if (r.paid_at && paidRenewalAt && now < paidRenewalAt) {
+      // Paid + inside the billing window.
       phase = 'paid';
+    } else if (r.paid_at && paidGraceEndsAt && now < paidGraceEndsAt) {
+      // Paid but past renewal — inside the 3-day grace window.
+      // subscription_status on the row will be 'expired'.
+      phase = 'paid_grace';
+    } else if (r.paid_at) {
+      // Grace window closed too — institution.subscription_status is
+      // (or will imminently be) 'inactive' via the scheduler.
+      phase = 'expired';
     } else if (!r.trial_ends_at) {
       phase = 'pending';
     } else if (now <= new Date(r.trial_ends_at)) {
@@ -794,6 +842,8 @@ exports.getSubscriptionStatus = async (req, res) => {
     let nextRenewalAt = null;
     if (phase === 'paid' && r.paid_at) {
       nextRenewalAt = addPeriod(r.paid_at, r.plan_billing_cycle);
+    } else if (phase === 'paid_grace' && paidRenewalAt) {
+      nextRenewalAt = paidRenewalAt.toISOString();
     } else if (phase === 'trial') {
       nextRenewalAt = r.trial_ends_at;
     } else if (phase === 'grace') {
@@ -814,7 +864,7 @@ exports.getSubscriptionStatus = async (req, res) => {
       (trialDaysRemaining != null && trialDaysRemaining <= 3)
     );
     const paymentReady =
-      phase === 'grace' || phase === 'locked' || phase === 'expired'
+      phase === 'grace' || phase === 'locked' || phase === 'expired' || phase === 'paid_grace'
         ? true
         : phase === 'trial' ? isTrialEndingSoon : false;
 
@@ -828,6 +878,14 @@ exports.getSubscriptionStatus = async (req, res) => {
       grace_ends_at:    r.grace_ends_at,
       days_left_in_trial: trialDaysRemaining,
       days_left_in_grace: daysLeft(r.grace_ends_at),
+      // Post-payment grace window (migration 075). paid_grace phase
+      // means renewal date is past but we're inside the 3-day grace.
+      // days_left_in_paid_grace counts down 3 → 2 → 1 → 0 for the
+      // mobile Pricing banner.
+      subscription_status:    r.subscription_status || 'active',
+      paid_renewal_at:        paidRenewalAt ? paidRenewalAt.toISOString() : null,
+      paid_grace_ends_at:     paidGraceEndsAt ? paidGraceEndsAt.toISOString() : null,
+      days_left_in_paid_grace: daysLeftInPaidGrace,
       // Trial-phase UX flags for the mobile Pricing screen.
       payment_ready:          paymentReady,
       trial_ending_soon:      isTrialEndingSoon,
@@ -1128,36 +1186,40 @@ exports.getAllInstitutions = async (req, res) => {
     if (status) {
       params.push(status);
       where.push(`i.onboarding_status = $${params.length}`);
-      // "Active" on the super-admin dashboard means the academy is
-      // LIVE RIGHT NOW — subscription still within its window AND the
-      // admin hasn't toggled it off. Rows whose subscription has
-      // lapsed (or whose is_active flag is false) belong to the
-      // Expired / All views, not the Active view. Without this extra
-      // guard the "Active Institutions" page picked up any row still
-      // sitting at onboarding_status='active' even though its
-      // subscription had ended weeks ago.
+      // "Active" on the super-admin dashboard now means:
+      //   • onboarding_status='active' (row is provisioned + paid), AND
+      //   • is_active flag ON (admin hasn't toggled it off), AND
+      //   • subscription_status='active' (post-expiry scheduler has
+      //     NOT flipped this row to 'expired' or 'inactive').
+      // The old check only inspected subscription_end which the
+      // scheduler doesn't touch — it now uses the scheduler-owned
+      // subscription_status column so grace/inactive rows correctly
+      // fall out of the Active list.
       if (status === 'active') {
         where.push(`i.is_active = TRUE`);
+        // Two guards so the Active list stays clean even before the
+        // scheduler ticks:
+        //   1. scheduler-owned flag says 'active'
+        //   2. subscription_end (when set) is still in the future
+        // The subscription_end guard fires immediately as the clock
+        // passes; the flag catches rows that don't carry
+        // subscription_end but hit their paid_at + cycle boundary.
+        where.push(`i.subscription_status = 'active'`);
         where.push(`(i.subscription_end IS NULL OR i.subscription_end >= NOW())`);
       }
     }
 
     if (expired === 'true') {
-      // "Expired" on the super-admin dashboard means an academy that
-      // WAS live and whose subscription window has since ended. That
-      // rules out rows in pending_approval / approved / rejected
-      // states — those never went live in the first place, so calling
-      // them "expired" is misleading even if some early wizard row
-      // happens to carry a stale subscription_end value. We also
-      // exclude anything soft-deleted (the WHERE deleted_at IS NULL
-      // guard above already handles that, but the explicit
-      // onboarding_status check makes the intent obvious to the
-      // reader). Rows the admin has toggled off with is_active=FALSE
-      // are still surfaced here — being switched off doesn't stop the
-      // subscription from being past its end date.
+      // "Expired" now means the scheduler-owned subscription_status
+      // is 'expired' (within grace) OR 'inactive' (past grace). The
+      // legacy subscription_end < NOW() check kept as an OR so rows
+      // predating the scheduler's first tick still surface until
+      // the scheduler catches up.
       where.push(`i.onboarding_status = 'active'`);
-      where.push(`i.subscription_end IS NOT NULL`);
-      where.push(`i.subscription_end < NOW()`);
+      where.push(`(
+        i.subscription_status IN ('expired', 'inactive')
+        OR (i.subscription_end IS NOT NULL AND i.subscription_end < NOW())
+      )`);
     }
 
     const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
@@ -1185,11 +1247,17 @@ exports.getAllInstitutions = async (req, res) => {
          i.deleted_at,
          i.deletion_source,
          i.prev_onboarding_status,
+         -- Post-expiry lifecycle (migration 075). The scheduler
+         -- keeps subscription_status in sync so the dashboard can
+         -- render Active / Expired / Inactive without recomputing.
+         i.subscription_status,
+         i.subscription_expired_at,
          u.name AS owner_name,
          u.email AS owner_email,
          u.phone AS owner_phone,
-         sp.name AS plan_name,
-         sp.price AS plan_price
+         sp.name             AS plan_name,
+         sp.price            AS plan_price,
+         sp.billing_cycle    AS plan_billing_cycle
        FROM institutions i
        JOIN users u ON i.owner_user_id = u.id
        LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
@@ -1206,9 +1274,80 @@ exports.getAllInstitutions = async (req, res) => {
       params,
     );
 
+    // Enrich each row with a computed `effective_status` +
+    // `days_left_in_paid_grace` so the frontend renders identical
+    // badges everywhere without redoing the date math. The scheduler
+    // (services/subscriptionExpiry.service.js) owns the
+    // subscription_status column — we just project it into the
+    // dashboard vocabulary here.
+    const GRACE_DAYS = 3;
+    const now = Date.now();
+    const enriched = result.rows.map((r) => {
+      let effectiveStatus = r.onboarding_status;
+      let daysLeftInPaidGrace = null;
+      let paidGraceEndsAt = null;
+
+      if (r.onboarding_status === 'active') {
+        // Prefer explicit subscription_end when the approve /
+        // payment flow wrote one; otherwise derive from paid_at +
+        // billing cycle. Whichever we get, this is the renewal
+        // boundary the row's lifecycle pivots on.
+        let renewalMs = null;
+        if (r.subscription_end) {
+          const t = new Date(r.subscription_end).getTime();
+          if (Number.isFinite(t)) renewalMs = t;
+        }
+        if (renewalMs == null && r.paid_at) {
+          const paidAt = new Date(r.paid_at);
+          const cycle = String(r.plan_billing_cycle || 'monthly').toLowerCase();
+          const renewal = new Date(paidAt);
+          if (cycle === 'yearly') renewal.setFullYear(renewal.getFullYear() + 1);
+          else                    renewal.setMonth(renewal.getMonth() + 1);
+          renewalMs = renewal.getTime();
+        }
+
+        if (renewalMs != null) {
+          const graceEndMs = renewalMs + GRACE_DAYS * 24 * 60 * 60 * 1000;
+          paidGraceEndsAt = new Date(graceEndMs).toISOString();
+          if (now > renewalMs) {
+            const ms = graceEndMs - now;
+            daysLeftInPaidGrace = ms > 0 ? Math.ceil(ms / (24 * 60 * 60 * 1000)) : 0;
+          }
+        }
+
+        // Compute the date-driven state, then OR it with the
+        // scheduler-owned subscription_status column so a row that's
+        // clearly expired doesn't sit labelled Active just because
+        // the scheduler hasn't ticked yet (fresh migration, cold
+        // start, ops paused the service, etc.).
+        let dateStatus = 'active';
+        if (renewalMs != null) {
+          if (now > renewalMs + GRACE_DAYS * 24 * 60 * 60 * 1000) dateStatus = 'inactive';
+          else if (now > renewalMs)                               dateStatus = 'expired';
+        }
+        const schedStatus =
+          r.subscription_status === 'inactive' ? 'inactive'
+          : r.subscription_status === 'expired' ? 'expired'
+          : 'active';
+
+        // Pick the "worst" of the two: any row the date math OR the
+        // scheduler flag treats as past due is projected that way.
+        const rank = { active: 0, expired: 1, inactive: 2 };
+        effectiveStatus =
+          rank[dateStatus] > rank[schedStatus] ? dateStatus : schedStatus;
+      }
+
+      return {
+        ...r,
+        effective_status:         effectiveStatus,
+        days_left_in_paid_grace:  daysLeftInPaidGrace,
+        paid_grace_ends_at:       paidGraceEndsAt,
+      };
+    });
+
     res.json({
-      count: result.rows.length,
-      institutions: result.rows,
+      count: enriched.length,
+      institutions: enriched,
     });
   } catch (err) {
     console.error('Get all institutions error:', err);
@@ -1240,7 +1379,8 @@ exports.approveInstitution = async (req, res) => {
               sp.trial_days AS plan_trial_days,
               sp.grace_days AS plan_grace_days,
               sp.discount_enabled AS plan_discount_enabled,
-              sp.discount_percent AS plan_discount_percent
+              sp.discount_percent AS plan_discount_percent,
+              sp.gst_percent AS plan_gst_percent
        FROM institutions i
        JOIN users u ON i.owner_user_id = u.id
        LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
@@ -1266,16 +1406,24 @@ exports.approveInstitution = async (req, res) => {
       });
     }
 
-    // Effective price = plan price with discount applied if enabled. We round
-    // to the nearest rupee so the Razorpay link doesn't end up with paise.
+    // Effective price = plan price with discount applied if enabled.
+    // Discount is applied on the GST-exclusive base; GST is layered on
+    // TOP of the discounted base so total_payable = discounted × (1 + gst%/100).
+    // We round to two decimals so the Razorpay link and the invoice
+    // line match to the paise.
     const trialDays   = Number(institution.plan_trial_days)   || 0;
     const graceDays   = Number(institution.plan_grace_days)   || 0;
     const discountOn  = !!institution.plan_discount_enabled;
     const discountPct = Number(institution.plan_discount_percent) || 0;
+    const gstPercent  = Number(institution.plan_gst_percent) || GST_PERCENT_DEFAULT;
     const basePrice   = Number(institution.plan_price);
-    const effectivePrice = discountOn && discountPct > 0
-      ? Math.round(basePrice * (1 - discountPct / 100))
+    const discountedBase = discountOn && discountPct > 0
+      ? Math.round(basePrice * (1 - discountPct / 100) * 100) / 100
       : basePrice;
+    // Effective price stays GST-EXCLUSIVE for reporting parity with the
+    // legacy field. Razorpay is charged total_payable below.
+    const effectivePrice = discountedBase;
+    const gstBreakdown   = computeGst(discountedBase, gstPercent);
 
     // Flip status to approved AND open the trial window in the same write so
     // we don't end up with an approved institution that has no trial_ends_at
@@ -1309,6 +1457,8 @@ exports.approveInstitution = async (req, res) => {
 
     // 3a. Apply referral-wallet discount (if any) before generating the link.
     //     This is the FIRST renewal payment so we consume points here.
+    //     Referral wallet is drawn against the GST-EXCLUSIVE base so the
+    //     tax on the ex-post-discount amount is computed correctly.
     let referralDiscount = 0;
     try {
       const ref = await consumeDiscount(id, effectivePrice);
@@ -1316,15 +1466,26 @@ exports.approveInstitution = async (req, res) => {
     } catch (err) {
       console.warn('[approve] referral discount failed:', err?.message);
     }
-    const finalPayable = Math.max(0, effectivePrice - referralDiscount);
+    const finalBase       = Math.max(0, effectivePrice - referralDiscount);
+    const finalBreakdown  = computeGst(finalBase, gstPercent);
+    const finalPayable    = finalBreakdown.total_payable;
 
     // 3b. Create payment link ONLY for the no-trial path. Trial plans
     //     skip this — the scheduler handles it 3 days before expiry.
+    //     Razorpay is charged the GST-INCLUSIVE total_payable so the
+    //     amount on the payment page matches the "Total Payable" shown
+    //     on the plan card in the app.
     let linkResult = { ok: false, error: 'skipped (trial)' };
     if (!hasTrial) {
       linkResult = await createPaymentLink({
         amountInRupees: finalPayable,
         institution,
+        notes: {
+          base_price:    String(finalBreakdown.base_price),
+          gst_percent:   String(finalBreakdown.gst_percent),
+          gst_amount:    String(finalBreakdown.gst_amount),
+          total_payable: String(finalBreakdown.total_payable),
+        },
       });
 
       if (linkResult.ok) {
@@ -1355,7 +1516,7 @@ exports.approveInstitution = async (req, res) => {
     if (institution.plan_id) {
       try {
         const pp = await pool.query(
-          `SELECT billing_term, price, is_enabled
+          `SELECT billing_term, price, is_enabled, gst_percent
              FROM plan_pricing
             WHERE plan_id = $1
               AND is_enabled = TRUE
@@ -1369,11 +1530,20 @@ exports.approveInstitution = async (req, res) => {
               END`,
           [institution.plan_id],
         );
-        pricingTerms = pp.rows.map((r) => ({
-          billing_term: r.billing_term,
-          price:        Number(r.price),
-          is_enabled:   true,
-        }));
+        pricingTerms = pp.rows.map((r) => {
+          const base = Number(r.price) || 0;
+          const pct  = Number(r.gst_percent) || gstPercent;
+          const g    = computeGst(base, pct);
+          return {
+            billing_term:  r.billing_term,
+            price:         g.base_price,          // legacy alias
+            base_price:    g.base_price,
+            gst_percent:   g.gst_percent,
+            gst_amount:    g.gst_amount,
+            total_payable: g.total_payable,
+            is_enabled:    true,
+          };
+        });
       } catch (err) {
         console.warn('[approve] plan_pricing lookup failed:', err?.message);
       }
@@ -1440,6 +1610,7 @@ exports.approveInstitution = async (req, res) => {
     // Return the fresh row so the admin UI re-renders correctly.
     const fresh = await pool.query(
       `SELECT i.*, u.email AS owner_email, u.name AS owner_name,
+              u.phone AS owner_phone,
               sp.name AS plan_name, sp.price AS plan_price
        FROM institutions i
        JOIN users u ON i.owner_user_id = u.id
@@ -1465,6 +1636,40 @@ exports.approveInstitution = async (req, res) => {
       message += ' Approval email sent, but payment link could NOT be created — use "Resend approval email" after fixing Razorpay creds.';
     } else {
       message += ' Payment link + email BOTH failed — check Razorpay + SMTP env vars, then "Resend approval email".';
+    }
+
+    // ── Welcome WhatsApp — fires HERE (not at register time) ──────
+    // Admin self-signup has no institution linked at register, so
+    // the plan gate correctly refuses then. Now that the institution
+    // is approved and its plan is set, the gate can succeed. The
+    // helper's one-time stamp (users.welcome_wa_sent_at) guarantees
+    // the message is sent at most once per account even if approval
+    // is rerun (rejection → re-approval).
+    const ownerRow = fresh.rows[0];
+    const ownerId    = ownerRow?.owner_user_id;
+    const ownerName  = ownerRow?.owner_name || institution.owner_name;
+    const ownerPhone = ownerRow?.owner_phone || institution.owner_phone;
+    if (ownerId && ownerPhone) {
+      sendWelcomeWhatsApp({
+        userId: ownerId,
+        name:   ownerName,
+        phone:  ownerPhone,
+        role:   'institution',
+      })
+        .then((r) => {
+          if (r?.ok) {
+            console.log(`[WhatsApp] welcome delivered → owner user=${ownerId} phone=${ownerPhone} messageId=${r.messageId}`);
+          } else if (r?.skipped) {
+            console.log(`[WhatsApp] welcome skipped → owner user=${ownerId} reason=${r.skipped}`);
+          } else {
+            console.warn(`[WhatsApp] welcome send FAILED → owner user=${ownerId} error=${r?.error}`);
+          }
+        })
+        .catch(() => { /* logged inside the helper */ });
+    } else {
+      console.log(
+        `[WhatsApp] welcome skipped after approval → owner user=${ownerId} reason=${ownerPhone ? 'no-owner-id' : 'no-owner-phone'}`,
+      );
     }
 
     res.json({
@@ -1506,7 +1711,8 @@ exports.resendApprovalEmail = async (req, res) => {
               sp.trial_days AS plan_trial_days,
               sp.grace_days AS plan_grace_days,
               sp.discount_enabled AS plan_discount_enabled,
-              sp.discount_percent AS plan_discount_percent
+              sp.discount_percent AS plan_discount_percent,
+              sp.gst_percent AS plan_gst_percent
          FROM institutions i
          JOIN users u ON i.owner_user_id = u.id
          LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
@@ -1538,13 +1744,16 @@ exports.resendApprovalEmail = async (req, res) => {
 
     // Recompute the effective price + referral discount fresh so a
     // wallet credit added AFTER approval also flows into the retry.
+    // GST is layered on top of the post-discount base — same order as
+    // approveInstitution so both paths mint identical amounts.
     const trialDays   = Number(institution.plan_trial_days)   || 0;
     const graceDays   = Number(institution.plan_grace_days)   || 0;
     const discountOn  = !!institution.plan_discount_enabled;
     const discountPct = Number(institution.plan_discount_percent) || 0;
+    const gstPercent  = Number(institution.plan_gst_percent) || GST_PERCENT_DEFAULT;
     const basePrice   = Number(institution.plan_price);
     const effectivePrice = discountOn && discountPct > 0
-      ? Math.round(basePrice * (1 - discountPct / 100))
+      ? Math.round(basePrice * (1 - discountPct / 100) * 100) / 100
       : basePrice;
 
     let referralDiscount = 0;
@@ -1554,11 +1763,19 @@ exports.resendApprovalEmail = async (req, res) => {
     } catch (err) {
       console.warn('[resend] referral discount failed:', err?.message);
     }
-    const finalPayable = Math.max(0, effectivePrice - referralDiscount);
+    const finalBase      = Math.max(0, effectivePrice - referralDiscount);
+    const finalBreakdown = computeGst(finalBase, gstPercent);
+    const finalPayable   = finalBreakdown.total_payable;
 
     const linkResult = await createPaymentLink({
       amountInRupees: finalPayable,
       institution,
+      notes: {
+        base_price:    String(finalBreakdown.base_price),
+        gst_percent:   String(finalBreakdown.gst_percent),
+        gst_amount:    String(finalBreakdown.gst_amount),
+        total_payable: String(finalBreakdown.total_payable),
+      },
     });
     if (linkResult.ok) {
       await pool.query(
@@ -1576,7 +1793,7 @@ exports.resendApprovalEmail = async (req, res) => {
     if (institution.plan_id) {
       try {
         const pp = await pool.query(
-          `SELECT billing_term, price, is_enabled
+          `SELECT billing_term, price, is_enabled, gst_percent
              FROM plan_pricing
             WHERE plan_id = $1 AND is_enabled = TRUE
             ORDER BY CASE billing_term
@@ -1587,11 +1804,20 @@ exports.resendApprovalEmail = async (req, res) => {
               ELSE 5 END`,
           [institution.plan_id],
         );
-        pricingTerms = pp.rows.map((r) => ({
-          billing_term: r.billing_term,
-          price:        Number(r.price),
-          is_enabled:   true,
-        }));
+        pricingTerms = pp.rows.map((r) => {
+          const base = Number(r.price) || 0;
+          const pct  = Number(r.gst_percent) || gstPercent;
+          const g    = computeGst(base, pct);
+          return {
+            billing_term:  r.billing_term,
+            price:         g.base_price,
+            base_price:    g.base_price,
+            gst_percent:   g.gst_percent,
+            gst_amount:    g.gst_amount,
+            total_payable: g.total_payable,
+            is_enabled:    true,
+          };
+        });
       } catch (err) {
         console.warn('[resend] plan_pricing lookup failed:', err?.message);
       }
@@ -1650,7 +1876,8 @@ exports.resendPaymentLink = async (req, res) => {
       `SELECT i.*, u.email AS owner_email, u.name AS owner_name, u.phone AS owner_phone,
               sp.name AS plan_name, sp.price AS plan_price,
               sp.discount_enabled AS plan_discount_enabled,
-              sp.discount_percent AS plan_discount_percent
+              sp.discount_percent AS plan_discount_percent,
+              sp.gst_percent AS plan_gst_percent
        FROM institutions i
        JOIN users u ON i.owner_user_id = u.id
        LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
@@ -1669,18 +1896,26 @@ exports.resendPaymentLink = async (req, res) => {
       });
     }
 
-    // Same discount math as approveInstitution so a resend doesn't accidentally
-    // charge full price.
+    // Same discount + GST math as approveInstitution so a resend
+    // charges exactly what the plan card advertises.
     const discountOn  = !!institution.plan_discount_enabled;
     const discountPct = Number(institution.plan_discount_percent) || 0;
+    const gstPercent  = Number(institution.plan_gst_percent) || GST_PERCENT_DEFAULT;
     const basePrice   = Number(institution.plan_price);
     const effectivePrice = discountOn && discountPct > 0
-      ? Math.round(basePrice * (1 - discountPct / 100))
+      ? Math.round(basePrice * (1 - discountPct / 100) * 100) / 100
       : basePrice;
+    const effectiveBreakdown = computeGst(effectivePrice, gstPercent);
 
     const linkResult = await createPaymentLink({
-      amountInRupees: effectivePrice,
+      amountInRupees: effectiveBreakdown.total_payable,
       institution,
+      notes: {
+        base_price:    String(effectiveBreakdown.base_price),
+        gst_percent:   String(effectiveBreakdown.gst_percent),
+        gst_amount:    String(effectiveBreakdown.gst_amount),
+        total_payable: String(effectiveBreakdown.total_payable),
+      },
     });
     if (!linkResult.ok) {
       return res.status(502).json({ message: `Payment link not created: ${linkResult.error}` });
@@ -1702,7 +1937,7 @@ exports.resendPaymentLink = async (req, res) => {
     if (institution.plan_id) {
       try {
         const pp = await pool.query(
-          `SELECT billing_term, price
+          `SELECT billing_term, price, gst_percent
              FROM plan_pricing
             WHERE plan_id = $1 AND is_enabled = TRUE
             ORDER BY
@@ -1715,11 +1950,20 @@ exports.resendPaymentLink = async (req, res) => {
               END`,
           [institution.plan_id],
         );
-        resendPricingTerms = pp.rows.map((r) => ({
-          billing_term: r.billing_term,
-          price:        Number(r.price),
-          is_enabled:   true,
-        }));
+        resendPricingTerms = pp.rows.map((r) => {
+          const base = Number(r.price) || 0;
+          const pct  = Number(r.gst_percent) || gstPercent;
+          const g    = computeGst(base, pct);
+          return {
+            billing_term:  r.billing_term,
+            price:         g.base_price,
+            base_price:    g.base_price,
+            gst_percent:   g.gst_percent,
+            gst_amount:    g.gst_amount,
+            total_payable: g.total_payable,
+            is_enabled:    true,
+          };
+        });
       } catch (err) {
         console.warn('[resend] plan_pricing lookup failed:', err?.message);
       }
@@ -1851,7 +2095,7 @@ exports.activateInstitution = async (req, res) => {
       );
     }
 
-    // Also activate the owner user
+    // Also activate the owner user.
     await pool.query(
       `UPDATE users SET status = 'active'
        WHERE id = (
@@ -1859,6 +2103,18 @@ exports.activateInstitution = async (req, res) => {
        )`,
       [id]
     );
+    // Resume Registration completion stamp — done through the helper
+    // (post-activation) so a missing `registration_completed_at`
+    // column on a pre-077 schema doesn't rollback the manual activate.
+    try {
+      const ownerRow = await pool.query(
+        `SELECT owner_user_id FROM institutions WHERE id = $1`, [id],
+      );
+      const ownerId = ownerRow.rows[0]?.owner_user_id;
+      if (ownerId) {
+        markRegistrationComplete(ownerId).catch(() => { /* logged inside */ });
+      }
+    } catch { /* stamping failure never fails an activation */ }
 
     // Email the owner. Failures are non-fatal — activation already succeeded.
     const mailResult = await sendActivationEmail({
@@ -2241,6 +2497,13 @@ exports.handlePaymentWebhook = async (req, res) => {
         `UPDATE users SET status = 'active' WHERE id = $1`,
         [institution.owner_user_id]
       );
+      // Terminal state for Resume Registration (spec: "Only after the
+      // registration/enrollment is successfully completed should the
+      // email address and mobile number become unique and unavailable
+      // for new registrations"). Stamp via the helper so a schema
+      // that hasn't seen migration 077 yet doesn't abort the webhook
+      // — the helper swallows the 42703 and logs once.
+      markRegistrationComplete(institution.owner_user_id).catch(() => { /* logged inside */ });
 
       // Credit the referring institution (if any) — best effort, after commit.
       // The `wasAlreadyPaid` guard lives inside the else-branch above, so
@@ -3019,9 +3282,14 @@ exports.getOnboardingCounts = async (_req, res) => {
         SELECT
           COUNT(*) FILTER (WHERE onboarding_status = 'pending_approval' AND deleted_at IS NULL AND parent_institution_id IS NULL) AS pending_approval,
           COUNT(*) FILTER (WHERE onboarding_status = 'approved'         AND deleted_at IS NULL AND parent_institution_id IS NULL) AS approved,
-          COUNT(*) FILTER (WHERE onboarding_status = 'active'           AND deleted_at IS NULL AND parent_institution_id IS NULL) AS active,
+          -- Active: onboarding_status='active' AND scheduler-owned
+          -- subscription_status='active' (not in grace / not inactive).
+          COUNT(*) FILTER (WHERE onboarding_status = 'active' AND subscription_status = 'active' AND deleted_at IS NULL AND parent_institution_id IS NULL) AS active,
           COUNT(*) FILTER (WHERE onboarding_status = 'rejected'         AND deleted_at IS NULL AND parent_institution_id IS NULL) AS rejected,
-          COUNT(*) FILTER (WHERE subscription_end IS NOT NULL AND subscription_end < NOW() AND deleted_at IS NULL AND parent_institution_id IS NULL) AS expired,
+          -- Expired: inside the 3-day grace window (login OK, features gated).
+          COUNT(*) FILTER (WHERE onboarding_status = 'active' AND subscription_status = 'expired' AND deleted_at IS NULL AND parent_institution_id IS NULL) AS expired,
+          -- Inactive: past grace (login blocked).
+          COUNT(*) FILTER (WHERE onboarding_status = 'active' AND subscription_status = 'inactive' AND deleted_at IS NULL AND parent_institution_id IS NULL) AS inactive,
           COUNT(*) FILTER (WHERE deleted_at IS NOT NULL                                     AND parent_institution_id IS NULL) AS deleted,
           COUNT(*) FILTER (WHERE deleted_at IS NULL                                         AND parent_institution_id IS NULL) AS total
         FROM institutions
@@ -3062,6 +3330,7 @@ exports.getOnboardingCounts = async (_req, res) => {
         FROM institutions i
         LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
         WHERE i.onboarding_status = 'active'
+          AND i.subscription_status = 'active'
           AND i.deleted_at IS NULL
           AND i.parent_institution_id IS NULL
       `),
@@ -3128,6 +3397,18 @@ function renderApprovalPickerHtml({ institution, planName, terms }) {
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
+  const fmtBreakdown = (t) => {
+    const base = Number(t.base_price ?? t.price ?? 0);
+    const gAmt = Number(t.gst_amount ?? 0);
+    const pct  = Number(t.gst_percent ?? 0);
+    // Only render the breakdown line when we have the enriched data.
+    // Older callers that only carry `.price` still render cleanly.
+    if (!t.total_payable) return '';
+    return `<div style="font-size:11px;color:#64748b;margin-top:4px;">
+        Base ${fmtINR(base)} + GST ${pct}% (${fmtINR(gAmt)}) — includes GST
+      </div>`;
+  };
+
   const rows = terms.map((t) => `
     <a href="./${institution.id}?term=${encodeURIComponent(t.billing_term)}"
        style="display:flex;align-items:center;gap:12px;text-decoration:none;color:inherit;
@@ -3140,6 +3421,7 @@ function renderApprovalPickerHtml({ institution, planName, terms }) {
         <div style="font-size:12px;color:#64748b;margin-top:2px;">
           ${escape(TERM_HINT[t.billing_term] || '')}
         </div>
+        ${fmtBreakdown(t)}
       </div>
       <div style="font-weight:900;font-size:17px;color:#E63946;letter-spacing:-0.2px;">
         ${fmtINR(t.price)}
@@ -3266,13 +3548,15 @@ exports.startApprovalPayment = async (req, res) => {
     // link and redirects.
     if (wantsPickerPage) {
       const allTerms = await pool.query(
-        `SELECT billing_term, price, is_enabled
-           FROM plan_pricing
-          WHERE plan_id = $1
-            AND is_enabled = TRUE
-            AND price > 0
+        `SELECT pp.billing_term, pp.price, pp.is_enabled, pp.gst_percent,
+                sp.gst_percent AS plan_gst_percent
+           FROM plan_pricing pp
+           LEFT JOIN subscription_plans sp ON sp.id = pp.plan_id
+          WHERE pp.plan_id = $1
+            AND pp.is_enabled = TRUE
+            AND pp.price > 0
           ORDER BY
-            CASE billing_term
+            CASE pp.billing_term
               WHEN 'monthly'     THEN 1
               WHEN 'quarterly'   THEN 2
               WHEN 'half_yearly' THEN 3
@@ -3281,10 +3565,23 @@ exports.startApprovalPayment = async (req, res) => {
             END`,
         [institution.plan_id],
       );
-      const enabled = allTerms.rows.map((r) => ({
-        billing_term: r.billing_term,
-        price:        Number(r.price),
-      }));
+      // Picker page shows Total Payable (base + GST) — the same figure
+      // the payment link will actually charge on the next click, so the
+      // owner never sees a "why did it jump" delta between the button
+      // and the Razorpay checkout.
+      const enabled = allTerms.rows.map((r) => {
+        const base = Number(r.price) || 0;
+        const pct  = Number(r.gst_percent) || Number(r.plan_gst_percent) || GST_PERCENT_DEFAULT;
+        const g    = computeGst(base, pct);
+        return {
+          billing_term:  r.billing_term,
+          price:         g.total_payable,   // displayed figure
+          base_price:    g.base_price,
+          gst_percent:   g.gst_percent,
+          gst_amount:    g.gst_amount,
+          total_payable: g.total_payable,
+        };
+      });
       if (enabled.length === 0) {
         return res.status(400).send('This plan has no billing terms configured yet. Please contact support.');
       }
@@ -3298,10 +3595,14 @@ exports.startApprovalPayment = async (req, res) => {
     }
 
     // ── Redirect branch (?term=X) ──────────────────────────────────
-    // Look up the picked term's price.
+    // Look up the picked term's price + GST rate. GST falls back to the
+    // parent plan's rate when a legacy row omits it.
     const pp = await pool.query(
-      `SELECT price, is_enabled FROM plan_pricing
-        WHERE plan_id = $1 AND billing_term = $2`,
+      `SELECT pp.price, pp.is_enabled, pp.gst_percent,
+              sp.gst_percent AS plan_gst_percent
+         FROM plan_pricing pp
+         LEFT JOIN subscription_plans sp ON sp.id = pp.plan_id
+        WHERE pp.plan_id = $1 AND pp.billing_term = $2`,
       [institution.plan_id, rawTerm],
     );
     const priceRow = pp.rows[0];
@@ -3315,11 +3616,15 @@ exports.startApprovalPayment = async (req, res) => {
     if (priceRupees <= 0) {
       return res.status(400).send('This billing term has no payable amount configured.');
     }
+    const gstPct = Number(priceRow.gst_percent) || Number(priceRow.plan_gst_percent) || GST_PERCENT_DEFAULT;
+    const breakdown = computeGst(priceRupees, gstPct);
 
-    // Mint the Razorpay Payment Link. Notes carry the term so the
-    // webhook can extend subscription_end by the right number of days.
+    // Mint the Razorpay Payment Link. Amount is the GST-INCLUSIVE
+    // total_payable so the checkout page matches the plan card. Notes
+    // carry the term so the webhook can extend subscription_end by the
+    // right number of days, plus the GST snapshot for invoice history.
     const linkResult = await createPaymentLink({
-      amountInRupees: priceRupees,
+      amountInRupees: breakdown.total_payable,
       institution: { ...institution, plan_name: institution.plan_name },
       notes: {
         action:         'onboarding',
@@ -3327,6 +3632,10 @@ exports.startApprovalPayment = async (req, res) => {
         target_plan_id: String(institution.plan_id),
         plan_name:      institution.plan_name || '',
         billing_term:   rawTerm,
+        base_price:     String(breakdown.base_price),
+        gst_percent:    String(breakdown.gst_percent),
+        gst_amount:     String(breakdown.gst_amount),
+        total_payable:  String(breakdown.total_payable),
       },
     });
     if (!linkResult.ok) {
@@ -3503,7 +3812,7 @@ exports.createRenewalPaymentLink = async (req, res) => {
 
     const { rows } = await pool.query(
       `SELECT i.*, u.email AS owner_email, u.name AS owner_name, u.phone AS owner_phone,
-              sp.name AS plan_name, sp.price AS plan_price
+              sp.name AS plan_name, sp.price AS plan_price, sp.gst_percent AS plan_gst_percent
          FROM institutions i
          JOIN users u ON i.owner_user_id = u.id
          LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
@@ -3518,18 +3827,19 @@ exports.createRenewalPaymentLink = async (req, res) => {
     }
 
     // Resolve target plan. When plan_id is provided we validate + fetch
-    // its own row (with discount cols) so upgrade / downgrade go
+    // its own row (with discount + GST cols) so upgrade / downgrade go
     // through the same code path as renewal.
     let targetPlanId = institution.plan_id;
     let targetPlanName = institution.plan_name;
     let targetPlanPrice = Number(institution.plan_price) || 0;
+    let targetGstPct = Number(institution.plan_gst_percent) || GST_PERCENT_DEFAULT;
     let targetDiscountOn = false;
     let targetDiscountPct = 0;
     let action = 'renew';
 
     if (requestedPlanId && Number(requestedPlanId) !== Number(institution.plan_id)) {
       const tp = await pool.query(
-        `SELECT id, name, price, discount_enabled, discount_percent, is_active
+        `SELECT id, name, price, discount_enabled, discount_percent, is_active, gst_percent
            FROM subscription_plans WHERE id = $1 LIMIT 1`,
         [requestedPlanId],
       );
@@ -3539,30 +3849,36 @@ exports.createRenewalPaymentLink = async (req, res) => {
       targetPlanId    = t.id;
       targetPlanName  = t.name;
       targetPlanPrice = Number(t.price) || 0;
+      targetGstPct    = Number(t.gst_percent) || GST_PERCENT_DEFAULT;
       targetDiscountOn  = !!t.discount_enabled;
       targetDiscountPct = Number(t.discount_percent) || 0;
       action = 'change_plan';
     } else {
-      // Renewing the current plan — read its discount cols separately.
+      // Renewing the current plan — read its discount + gst cols separately.
       if (institution.plan_id) {
         const cp = await pool.query(
-          `SELECT discount_enabled, discount_percent FROM subscription_plans WHERE id = $1`,
+          `SELECT discount_enabled, discount_percent, gst_percent
+             FROM subscription_plans WHERE id = $1`,
           [institution.plan_id],
         );
         targetDiscountOn  = !!cp.rows[0]?.discount_enabled;
         targetDiscountPct = Number(cp.rows[0]?.discount_percent) || 0;
+        targetGstPct      = Number(cp.rows[0]?.gst_percent) || GST_PERCENT_DEFAULT;
       }
     }
 
     // ── Per-term pricing (migration 049) ────────────────────────────
-    // When the client sends a billing_term, resolve the price from
-    // plan_pricing so the payment amount matches whichever term the
-    // admin picked on mobile. Falls back to the legacy singleton price
-    // for older clients or plans without per-term rows.
+    // When the client sends a billing_term, resolve the price + GST
+    // from plan_pricing so the payment amount matches whichever term
+    // the admin picked on mobile. Falls back to the legacy singleton
+    // price for older clients or plans without per-term rows. Per-term
+    // gst_percent, when present, overrides the plan-level rate — this
+    // is how a Super Admin can taxes a promotional yearly at a
+    // different slab than the monthly.
     let resolvedTerm = requestedTerm || null;
     if (resolvedTerm) {
       const pp = await pool.query(
-        `SELECT price, is_enabled FROM plan_pricing
+        `SELECT price, is_enabled, gst_percent FROM plan_pricing
           WHERE plan_id = $1 AND billing_term = $2`,
         [targetPlanId, resolvedTerm],
       );
@@ -3574,6 +3890,9 @@ exports.createRenewalPaymentLink = async (req, res) => {
         return res.status(400).json({ message: `${resolvedTerm} billing is not available on this plan.` });
       }
       targetPlanPrice = Number(row.price) || 0;
+      if (Number.isFinite(Number(row.gst_percent))) {
+        targetGstPct = Number(row.gst_percent);
+      }
     }
 
     if (!targetPlanPrice || targetPlanPrice <= 0) {
@@ -3582,7 +3901,7 @@ exports.createRenewalPaymentLink = async (req, res) => {
 
     const basePrice = targetPlanPrice;
     const effectivePrice = targetDiscountOn && targetDiscountPct > 0
-      ? Math.round(basePrice * (1 - targetDiscountPct / 100))
+      ? Math.round(basePrice * (1 - targetDiscountPct / 100) * 100) / 100
       : basePrice;
 
     // Referral wallet discount — only apply to a straight renewal, not
@@ -3596,12 +3915,15 @@ exports.createRenewalPaymentLink = async (req, res) => {
         console.warn('[renew] referral discount failed:', err?.message);
       }
     }
-    const finalPayable = Math.max(0, effectivePrice - referralDiscount);
+    const finalBase      = Math.max(0, effectivePrice - referralDiscount);
+    const finalBreakdown = computeGst(finalBase, targetGstPct);
+    const finalPayable   = finalBreakdown.total_payable;
 
     // Mint the Razorpay Payment Link with rich notes so the webhook
-    // knows exactly what it's confirming — action, plan, AND billing
-    // term. The billing_term drives the subscription-window extension
-    // (30 / 90 / 180 / 365 days) on webhook confirmation.
+    // knows exactly what it's confirming — action, plan, billing term,
+    // AND the GST snapshot. The billing_term drives the subscription-
+    // window extension (30 / 90 / 180 / 365 days) on webhook
+    // confirmation. Amount is GST-INCLUSIVE total_payable.
     const linkResult = await createPaymentLink({
       amountInRupees: finalPayable,
       institution: { ...institution, plan_name: targetPlanName },
@@ -3611,6 +3933,10 @@ exports.createRenewalPaymentLink = async (req, res) => {
         target_plan_id: String(targetPlanId),
         plan_name:      targetPlanName || '',
         billing_term:   resolvedTerm || '',
+        base_price:     String(finalBreakdown.base_price),
+        gst_percent:    String(finalBreakdown.gst_percent),
+        gst_amount:     String(finalBreakdown.gst_amount),
+        total_payable:  String(finalBreakdown.total_payable),
       },
     });
     if (!linkResult.ok) {
@@ -3662,8 +3988,11 @@ exports.createRenewalPaymentLink = async (req, res) => {
       action,
       payment_link_url: linkResult.link.short_url,
       link_id:          linkResult.link.id,
-      amount:           finalPayable,
-      base_price:       effectivePrice,
+      amount:           finalPayable,          // GST-inclusive (what Razorpay charges)
+      base_price:       finalBreakdown.base_price,
+      gst_percent:      finalBreakdown.gst_percent,
+      gst_amount:       finalBreakdown.gst_amount,
+      total_payable:    finalBreakdown.total_payable,
       referral_discount: referralDiscount,
       plan_id:          targetPlanId,
       plan_name:        targetPlanName,

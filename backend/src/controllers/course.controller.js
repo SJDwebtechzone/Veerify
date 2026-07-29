@@ -9,6 +9,50 @@ const getAdminInstitutionId = async (userId) => {
   return result.rows[0]?.institution_id;
 };
 
+// ─── Schema-aware column filter ─────────────────────────────────────────
+//
+// The controller has grown to write ~28 columns on courses. Several of
+// those (intro_video_url, curriculum, billing_cycle, trainer_id, …)
+// were added by later migrations. On a DB that hasn't caught up, an
+// INSERT that names a missing column fails with 42703 and blocks
+// course creation entirely.
+//
+// Rather than special-casing every new column, we ask information_schema
+// once (per process) which columns actually exist on `courses` and
+// build every INSERT / UPDATE against that intersection. New columns
+// still get persisted the moment the migration is applied and the
+// process restarts; missing columns are silently skipped with a single
+// startup log line so ops knows what's pending.
+let coursesColumnSetPromise = null;
+async function loadCoursesColumns() {
+  if (!coursesColumnSetPromise) {
+    coursesColumnSetPromise = (async () => {
+      try {
+        const r = await pool.query(
+          `SELECT column_name
+             FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name   = 'courses'`,
+        );
+        return new Set(r.rows.map((row) => row.column_name));
+      } catch (err) {
+        console.warn('[course] schema probe failed, falling back to full column set:', err?.message);
+        return null; // null → treat every column as present
+      }
+    })();
+  }
+  return coursesColumnSetPromise;
+}
+// Clear the cache so the NEXT createCourse / updateCourse re-probes.
+// Called from the 42703 catch below so a live migration doesn't need a
+// full process restart to be noticed (though restart is still cleaner).
+function invalidateCoursesColumns() {
+  coursesColumnSetPromise = null;
+}
+function hasCol(cols, name) {
+  return !cols || cols.has(name);
+}
+
 // Whitelist of mode / level / badge / status values we accept. Anything else is
 // silently dropped to the default so a malformed client can't break the DB.
 const ALLOWED_MODES   = new Set(['online', 'offline', 'hybrid']);
@@ -111,42 +155,27 @@ exports.createCourse = async (req, res) => {
       p.trainer_name = tr.rows[0].name;
     }
 
-    const result = await pool.query(
-      `INSERT INTO courses (
-         institution_id, name, short_description, description, category,
-         level, age_group, duration_months,
-         days_of_week, class_start_time, class_end_time,
-         batch_size_min, batch_size_max, language,
-         price, admission_fee,
-         belt_system, certificate_available,
-         image_url, intro_video_url, curriculum,
-         badge, trainer_name, branch_name,
-         mode, status, trainer_id, billing_cycle
-       )
-       VALUES (
-         $1, $2, $3, $4, $5,
-         $6, $7, $8,
-         $9, $10, $11,
-         $12, $13, $14,
-         $15, $16,
-         $17, $18,
-         $19, $20, $21::jsonb,
-         $22, $23, $24,
-         $25, $26, $27, $28
-       )
-       RETURNING *`,
-      [
-        institutionId, p.name, p.short_description, p.description, p.category,
-        p.level, p.age_group, p.duration_months,
-        p.days_of_week, p.class_start_time, p.class_end_time,
-        p.batch_size_min, p.batch_size_max, p.language,
-        p.price, p.admission_fee,
-        p.belt_system, p.certificate_available,
-        p.image_url, p.intro_video_url, JSON.stringify(p.curriculum),
-        p.badge, p.trainer_name, p.branch_name,
-        p.mode, p.status, p.trainer_id, p.billing_cycle,
-      ],
-    );
+    // Build the INSERT against only the columns that actually exist
+    // on this DB. On a stale schema (e.g. migration 065 not yet
+    // applied) the missing columns are silently omitted so course
+    // creation keeps working. A 42703 that slips through despite the
+    // probe (rare race with a mid-request migration rollback)
+    // invalidates the cache and retries once.
+    let result;
+    try {
+      result = await insertCourseDynamic(pool, institutionId, p);
+    } catch (err) {
+      if (err?.code === '42703') {
+        console.warn(
+          '[course] INSERT hit 42703 despite schema probe (%s). Re-probing and retrying once.',
+          err?.message,
+        );
+        invalidateCoursesColumns();
+        result = await insertCourseDynamic(pool, institutionId, p);
+      } else {
+        throw err;
+      }
+    }
 
     res.status(201).json({
       message: 'Course created successfully',
@@ -157,6 +186,59 @@ exports.createCourse = async (req, res) => {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
+
+// Dynamic INSERT — walks every column the controller wants to write
+// and drops the ones the current schema doesn't have. Value type
+// coercions (JSON.stringify for curriculum) still apply so the pg
+// driver hands the right shape to the DB.
+async function insertCourseDynamic(db, institutionId, p) {
+  const cols = await loadCoursesColumns();
+  // Column → value pairs in write order. Anything the schema doesn't
+  // carry gets skipped without any special-casing per column, so the
+  // moment a migration lands the value simply starts persisting.
+  const candidates = [
+    ['institution_id',        institutionId],
+    ['name',                  p.name],
+    ['short_description',     p.short_description],
+    ['description',           p.description],
+    ['category',              p.category],
+    ['level',                 p.level],
+    ['age_group',             p.age_group],
+    ['duration_months',       p.duration_months],
+    ['days_of_week',          p.days_of_week],
+    ['class_start_time',      p.class_start_time],
+    ['class_end_time',        p.class_end_time],
+    ['batch_size_min',        p.batch_size_min],
+    ['batch_size_max',        p.batch_size_max],
+    ['language',              p.language],
+    ['price',                 p.price],
+    ['admission_fee',         p.admission_fee],
+    ['belt_system',           p.belt_system],
+    ['certificate_available', p.certificate_available],
+    ['image_url',             p.image_url],
+    ['intro_video_url',       p.intro_video_url],
+    // curriculum needs an explicit jsonb cast at the placeholder level;
+    // we set jsonb=true on the record so the SQL builder emits it.
+    ['curriculum',            JSON.stringify(p.curriculum), { cast: 'jsonb' }],
+    ['badge',                 p.badge],
+    ['trainer_name',          p.trainer_name],
+    ['branch_name',           p.branch_name],
+    ['mode',                  p.mode],
+    ['status',                p.status],
+    ['trainer_id',            p.trainer_id],
+    ['billing_cycle',         p.billing_cycle],
+  ];
+  const kept = candidates.filter(([name]) => hasCol(cols, name));
+  const columnList = kept.map(([name]) => name).join(', ');
+  const placeholders = kept
+    .map(([, , opts], i) => (opts?.cast ? `$${i + 1}::${opts.cast}` : `$${i + 1}`))
+    .join(', ');
+  const params = kept.map(([, v]) => v);
+  return db.query(
+    `INSERT INTO courses (${columnList}) VALUES (${placeholders}) RETURNING *`,
+    params,
+  );
+}
 
 // GET my institution's courses (admin only)
 exports.getMyCourses = async (req, res) => {
@@ -358,69 +440,81 @@ exports.updateCourse = async (req, res) => {
           : null)
       : null;
 
-    const result = await pool.query(
-      `UPDATE courses SET
-         name                  = COALESCE($1,  name),
-         short_description     = COALESCE($2,  short_description),
-         description           = COALESCE($3,  description),
-         category              = COALESCE($4,  category),
-         level                 = COALESCE($5,  level),
-         age_group             = COALESCE($6,  age_group),
-         duration_months       = COALESCE($7,  duration_months),
-         days_of_week          = COALESCE($8,  days_of_week),
-         class_start_time      = COALESCE($9,  class_start_time),
-         class_end_time        = COALESCE($10, class_end_time),
-         batch_size_min        = COALESCE($11, batch_size_min),
-         batch_size_max        = COALESCE($12, batch_size_max),
-         language              = COALESCE($13, language),
-         price                 = COALESCE($14, price),
-         admission_fee         = COALESCE($15, admission_fee),
-         belt_system           = COALESCE($16, belt_system),
-         certificate_available = COALESCE($17, certificate_available),
-         image_url             = COALESCE($18, image_url),
-         intro_video_url       = COALESCE($19, intro_video_url),
-         curriculum            = COALESCE($20::jsonb, curriculum),
-         badge                 = COALESCE($21, badge),
-         trainer_name          = COALESCE($22, trainer_name),
-         branch_name           = COALESCE($23, branch_name),
-         mode                  = COALESCE($24, mode),
-         status                = COALESCE($25, status),
-         trainer_id            = COALESCE($27, trainer_id),
-         billing_cycle         = COALESCE($28, billing_cycle)
-       WHERE id = $26
-       RETURNING *`,
-      [
-        has('name')                  ? body.name                                              : null,
-        has('short_description')     ? body.short_description                                 : null,
-        has('description')           ? body.description                                       : null,
-        has('category')              ? body.category                                          : null,
-        has('level')                 ? body.level                                             : null,
-        has('age_group')             ? body.age_group                                         : null,
-        has('duration_months')       ? parseInt(body.duration_months, 10)                     : null,
-        has('days_of_week')          ? body.days_of_week                                      : null,
-        has('class_start_time')      ? body.class_start_time                                  : null,
-        has('class_end_time')        ? body.class_end_time                                    : null,
-        has('batch_size_min')        ? (body.batch_size_min ? parseInt(body.batch_size_min, 10) : null) : null,
-        has('batch_size_max')        ? (body.batch_size_max ? parseInt(body.batch_size_max, 10) : null) : null,
-        has('language')              ? body.language                                          : null,
-        has('price')                 ? parseFloat(body.price)                                 : null,
-        has('admission_fee')         ? parseFloat(body.admission_fee)                         : null,
-        has('belt_system')           ? !!body.belt_system                                     : null,
-        has('certificate_available') ? !!body.certificate_available                           : null,
-        has('image_url')             ? body.image_url                                         : null,
-        has('intro_video_url')       ? body.intro_video_url                                   : null,
-        // curriculum needs the JSONB normaliser; if absent, COALESCE keeps existing.
-        has('curriculum')            ? JSON.stringify(sanitizeCoursePayload(body).curriculum) : null,
-        badge,
-        trainerNameParam,
-        has('branch_name')           ? body.branch_name                                       : null,
-        mode,
-        status,
-        id,
-        trainerIdParam,
-        billingCycleParam,
-      ],
+    // Schema-aware UPDATE — same idea as createCourse. Each field is a
+    // (col, was_supplied, value, opts?) tuple; we assemble the SET
+    // clause from the intersection of "the client set this field" and
+    // "the column exists on this schema", then run one COALESCE-style
+    // UPDATE. Missing columns are skipped without any special-casing.
+    const cols = await loadCoursesColumns();
+    const updates = [
+      ['name',                  has('name'),                  has('name')                  ? body.name                                              : null],
+      ['short_description',     has('short_description'),     has('short_description')     ? body.short_description                                 : null],
+      ['description',           has('description'),           has('description')           ? body.description                                       : null],
+      ['category',              has('category'),              has('category')              ? body.category                                          : null],
+      ['level',                 has('level'),                 has('level')                 ? body.level                                             : null],
+      ['age_group',             has('age_group'),             has('age_group')             ? body.age_group                                         : null],
+      ['duration_months',       has('duration_months'),       has('duration_months')       ? parseInt(body.duration_months, 10)                     : null],
+      ['days_of_week',          has('days_of_week'),          has('days_of_week')          ? body.days_of_week                                      : null],
+      ['class_start_time',      has('class_start_time'),      has('class_start_time')      ? body.class_start_time                                  : null],
+      ['class_end_time',        has('class_end_time'),        has('class_end_time')        ? body.class_end_time                                    : null],
+      ['batch_size_min',        has('batch_size_min'),        has('batch_size_min')        ? (body.batch_size_min ? parseInt(body.batch_size_min, 10) : null) : null],
+      ['batch_size_max',        has('batch_size_max'),        has('batch_size_max')        ? (body.batch_size_max ? parseInt(body.batch_size_max, 10) : null) : null],
+      ['language',              has('language'),              has('language')              ? body.language                                          : null],
+      ['price',                 has('price'),                 has('price')                 ? parseFloat(body.price)                                 : null],
+      ['admission_fee',         has('admission_fee'),         has('admission_fee')         ? parseFloat(body.admission_fee)                         : null],
+      ['belt_system',           has('belt_system'),           has('belt_system')           ? !!body.belt_system                                     : null],
+      ['certificate_available', has('certificate_available'), has('certificate_available') ? !!body.certificate_available                           : null],
+      ['image_url',             has('image_url'),             has('image_url')             ? body.image_url                                         : null],
+      ['intro_video_url',       has('intro_video_url'),       has('intro_video_url')       ? body.intro_video_url                                   : null],
+      ['curriculum',            has('curriculum'),            has('curriculum')            ? JSON.stringify(sanitizeCoursePayload(body).curriculum) : null, { cast: 'jsonb' }],
+      ['badge',                 has('badge'),                 badge],
+      ['trainer_name',          has('trainer_name') || has('trainer_id'), trainerNameParam],
+      ['branch_name',           has('branch_name'),           has('branch_name')           ? body.branch_name                                       : null],
+      ['mode',                  has('mode'),                  mode],
+      ['status',                has('status'),                status],
+      ['trainer_id',            has('trainer_id'),            trainerIdParam],
+      ['billing_cycle',         has('billing_cycle'),         billingCycleParam],
+    ];
+    const kept = updates.filter(([name]) => hasCol(cols, name));
+    // Nothing to update — return the row untouched so the client's
+    // PATCH is still a no-op success instead of a 500.
+    if (kept.length === 0) {
+      const untouched = await pool.query('SELECT * FROM courses WHERE id = $1', [id]);
+      return res.json({ message: 'Course updated successfully', course: untouched.rows[0] });
+    }
+    // Build the COALESCE SET clauses + params in one pass.
+    const setClauses = [];
+    const params = [];
+    kept.forEach(([name, , value, opts]) => {
+      params.push(value);
+      const placeholder = opts?.cast
+        ? `$${params.length}::${opts.cast}`
+        : `$${params.length}`;
+      setClauses.push(`${name} = COALESCE(${placeholder}, ${name})`);
+    });
+    params.push(id);
+    const idPlaceholder = params.length;
+
+    const runUpdate = async () => pool.query(
+      `UPDATE courses SET ${setClauses.join(', ')} WHERE id = $${idPlaceholder} RETURNING *`,
+      params,
     );
+
+    let result;
+    try {
+      result = await runUpdate();
+    } catch (err) {
+      if (err?.code === '42703') {
+        console.warn(
+          '[course] UPDATE hit 42703 despite schema probe (%s). Re-probing and retrying once.',
+          err?.message,
+        );
+        invalidateCoursesColumns();
+        result = await runUpdate();
+      } else {
+        throw err;
+      }
+    }
 
     res.json({
       message: 'Course updated successfully',

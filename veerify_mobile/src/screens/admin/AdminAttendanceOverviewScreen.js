@@ -54,7 +54,14 @@ function fmtDate(iso) {
   });
 }
 
-export default function AdminAttendanceOverviewScreen({ navigation }) {
+export default function AdminAttendanceOverviewScreen({ navigation, route }) {
+  // Institution Home → Branch View passes { branchId, branchName } so
+  // this screen shows only that branch's batches. Absent → default
+  // scope (main-institution batches for a main admin, own-branch for
+  // sub-branch admin).
+  const branchIdParam   = route?.params?.branchId ?? null;
+  const branchNameParam = route?.params?.branchName ?? null;
+
   const [date, setDate]       = useState(todayIso());
   const [rows, setRows]       = useState([]);
   const [loading, setLoading] = useState(true);
@@ -69,7 +76,12 @@ export default function AdminAttendanceOverviewScreen({ navigation }) {
   const load = useCallback(async () => {
     try {
       setError('');
-      const r = await apiClient.get(`/attendance/institution/by-batch?date=${encodeURIComponent(date)}`);
+      const branchQs = branchIdParam != null
+        ? `&branch_id=${encodeURIComponent(branchIdParam)}`
+        : '';
+      const r = await apiClient.get(
+        `/attendance/institution/by-batch?date=${encodeURIComponent(date)}${branchQs}`,
+      );
       setRows(r.data?.batches || []);
     } catch (err) {
       setError(err?.response?.data?.message || err?.message || 'Could not load attendance.');
@@ -78,7 +90,7 @@ export default function AdminAttendanceOverviewScreen({ navigation }) {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [date]);
+  }, [date, branchIdParam]);
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   // Derive filter options from the loaded rows so the chips always
@@ -147,7 +159,9 @@ export default function AdminAttendanceOverviewScreen({ navigation }) {
           <ArrowLeft size={20} color={palette.text} strokeWidth={2.4} />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
-          <Text style={styles.title}>Attendance</Text>
+          <Text style={styles.title}>
+            {branchNameParam ? `${branchNameParam} — Attendance` : 'Attendance'}
+          </Text>
           <Text style={styles.subtitle}>Batch-wise summary · {fmtDate(date)}</Text>
         </View>
         <View style={styles.headerBadge}>

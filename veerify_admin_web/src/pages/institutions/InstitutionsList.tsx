@@ -41,6 +41,16 @@ interface Institution {
   owner_phone: string | null;
   plan_name: string | null;
   plan_price: string | null;
+  // Scheduler-maintained subscription lifecycle (migration 075).
+  // subscription_status: 'active' | 'expired' | 'inactive'.
+  // effective_status projects onboarding_status + subscription_status
+  // into the dashboard vocabulary so the badge / counts / filters
+  // read from ONE field.
+  subscription_status?: 'active' | 'expired' | 'inactive';
+  subscription_expired_at?: string | null;
+  effective_status?: string;
+  days_left_in_paid_grace?: number | null;
+  paid_grace_ends_at?: string | null;
 }
 
 type StatusFilter =
@@ -49,7 +59,8 @@ type StatusFilter =
   | 'approved'
   | 'pending_approval'
   | 'rejected'
-  | 'expired';
+  | 'expired'
+  | 'inactive';
 
 interface Props {
   presetFilter?: StatusFilter;
@@ -97,7 +108,11 @@ export function InstitutionsList({
     setError('');
     try {
       const params = new URLSearchParams();
-      if (statusFilter === 'expired') {
+      if (statusFilter === 'expired' || statusFilter === 'inactive') {
+        // Both grace-period (`expired`) and post-grace (`inactive`)
+        // land under the backend's `expired=true` query — it returns
+        // both since they share the "past renewal" condition. We
+        // filter to just one on the client using effective_status.
         params.set('expired', 'true');
       } else if (statusFilter !== 'all') {
         params.set('status', statusFilter);
@@ -279,16 +294,36 @@ export function InstitutionsList({
   };
 
   const visible = useMemo(() => {
-    if (!search.trim()) return institutions;
+    let rows = institutions;
+    // Client-side lifecycle filters. The backend's ?expired=true
+    // returns every past-due row (grace + post-grace). Here:
+    //   • filter === 'expired'  → both 'expired' AND 'inactive'
+    //     (so the "Expired Plans" sidebar entry shows every past-due
+    //     institution — the badge inside the row still distinguishes
+    //     Expired vs Inactive so ops can eyeball the state).
+    //   • filter === 'inactive' → only post-grace rows.
+    //   • filter === 'active'   → strict scheduler + date check
+    //     so an unticked stale row can't slip in.
+    if (filter === 'expired') {
+      rows = rows.filter((i) => {
+        const eff = (i.effective_status || '').toLowerCase();
+        return eff === 'expired' || eff === 'inactive';
+      });
+    } else if (filter === 'inactive') {
+      rows = rows.filter((i) => (i.effective_status || '').toLowerCase() === 'inactive');
+    } else if (filter === 'active') {
+      rows = rows.filter((i) => (i.effective_status || 'active') === 'active');
+    }
+    if (!search.trim()) return rows;
     const q = search.trim().toLowerCase();
-    return institutions.filter(
+    return rows.filter(
       (i) =>
         i.name?.toLowerCase().includes(q) ||
         i.owner_name?.toLowerCase().includes(q) ||
         i.owner_email?.toLowerCase().includes(q) ||
         i.city?.toLowerCase().includes(q),
     );
-  }, [institutions, search]);
+  }, [institutions, search, filter]);
 
   // Header checkbox derives its state from selection ∩ current visible
   // rows so filtering / searching doesn't lie about the "select all".
@@ -312,20 +347,40 @@ export function InstitutionsList({
   };
 
   const counts = useMemo(() => {
-    const c = { all: institutions.length, active: 0, approved: 0, pending_approval: 0, rejected: 0, expired: 0 };
-    const now = Date.now();
+    const c = {
+      all: institutions.length,
+      active: 0, approved: 0, pending_approval: 0, rejected: 0,
+      // Expired = grace window (login still allowed, features off).
+      // Inactive = past grace (login blocked). Both are computed by
+      // the backend scheduler and projected onto effective_status.
+      expired: 0, inactive: 0,
+    };
     institutions.forEach((i) => {
-      // Matches the backend's strict definitions:
-      // • Active  = onboarding_status='active' + is_active=true + subscription still valid.
-      // • Expired = onboarding_status='active' + subscription_end in the past.
-      //   (Pending / approved / rejected rows never went live, so they
-      //   don't count as expired even if some stale end-date lingers.)
-      const subEnded = !!(i.subscription_end && new Date(i.subscription_end).getTime() < now);
-      if (i.onboarding_status === 'active' && i.is_active && !subEnded) c.active++;
-      if (i.onboarding_status === 'approved') c.approved++;
-      if (i.onboarding_status === 'pending_approval') c.pending_approval++;
-      if (i.onboarding_status === 'rejected') c.rejected++;
-      if (i.onboarding_status === 'active' && subEnded) c.expired++;
+      // Prefer the backend's effective_status (scheduler-authoritative,
+      // owns the subscription lifecycle). Fall back to the legacy
+      // subscription_end < NOW() derivation only when effective_status
+      // is missing (older backend, mid-migration).
+      const eff = (i.effective_status || '').toLowerCase();
+      if (eff) {
+        if (i.onboarding_status === 'active' && i.is_active && eff === 'active') c.active++;
+        if (i.onboarding_status === 'approved')                                 c.approved++;
+        if (i.onboarding_status === 'pending_approval')                         c.pending_approval++;
+        if (i.onboarding_status === 'rejected')                                 c.rejected++;
+        // Expired pill sums grace + post-grace so its count matches
+        // the list rendered when the pill is clicked (both states
+        // show under "Expired"). The Inactive pill sub-counts just
+        // the post-grace subset for a quick "how many are hard-
+        // locked out" glance.
+        if (eff === 'expired' || eff === 'inactive')                            c.expired++;
+        if (eff === 'inactive')                                                 c.inactive++;
+      } else {
+        const subEnded = !!(i.subscription_end && new Date(i.subscription_end).getTime() < Date.now());
+        if (i.onboarding_status === 'active' && i.is_active && !subEnded) c.active++;
+        if (i.onboarding_status === 'approved')                           c.approved++;
+        if (i.onboarding_status === 'pending_approval')                   c.pending_approval++;
+        if (i.onboarding_status === 'rejected')                           c.rejected++;
+        if (i.onboarding_status === 'active' && subEnded)                 c.expired++;
+      }
     });
     return c;
   }, [institutions]);
@@ -367,7 +422,8 @@ export function InstitutionsList({
           <FilterPill label="Awaiting Pay"   count={counts.approved}         active={filter === 'approved'}         onClick={() => setFilter('approved')} color="blue" />
           <FilterPill label="Pending"        count={counts.pending_approval} active={filter === 'pending_approval'} onClick={() => setFilter('pending_approval')} color="yellow" />
           <FilterPill label="Rejected"       count={counts.rejected}         active={filter === 'rejected'}         onClick={() => setFilter('rejected')} color="red" />
-          <FilterPill label="Expired"        count={counts.expired}          active={filter === 'expired'}          onClick={() => setFilter('expired')} color="gray" />
+          <FilterPill label="Expired"        count={counts.expired}          active={filter === 'expired'}          onClick={() => setFilter('expired')} color="amber" />
+          <FilterPill label="Inactive"       count={counts.inactive}         active={filter === 'inactive'}         onClick={() => setFilter('inactive')} color="gray" />
         </div>
       )}
 
@@ -713,7 +769,12 @@ function Row({
         )}
       </td>
       <td className="px-5 py-4">
-        <StatusBadge status={inst.onboarding_status} subscriptionEnd={inst.subscription_end} />
+        <StatusBadge
+          status={inst.onboarding_status}
+          subscriptionEnd={inst.subscription_end}
+          effectiveStatus={inst.effective_status}
+          daysLeftInPaidGrace={inst.days_left_in_paid_grace}
+        />
       </td>
       <td className="px-5 py-4">
         <p className="text-sm text-gray-700">{formatDate(inst.subscription_start)}</p>
@@ -805,15 +866,51 @@ function Logo({ logoUrl, name }: { logoUrl: string | null; name: string }) {
 }
 
 function StatusBadge({
-  status, subscriptionEnd,
-}: { status: string; subscriptionEnd: string | null }) {
-  if (status === 'active' && subscriptionEnd && new Date(subscriptionEnd).getTime() < Date.now()) {
+  status, subscriptionEnd, effectiveStatus, daysLeftInPaidGrace,
+}: {
+  status: string;
+  subscriptionEnd: string | null;
+  effectiveStatus?: string;
+  daysLeftInPaidGrace?: number | null;
+}) {
+  // Prefer the backend-computed effective_status (scheduler-owned).
+  // Fall back to the subscription_end < NOW() derivation only when
+  // effective_status hasn't been populated yet (mid-deploy safety).
+  const eff = (effectiveStatus || '').toLowerCase();
+
+  if (eff === 'inactive') {
+    return (
+      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-700 border border-gray-200">
+        INACTIVE
+      </span>
+    );
+  }
+  if (eff === 'expired') {
+    // Amber "EXPIRED" pill during the 3-day grace period so it reads
+    // distinct from post-grace INACTIVE. Grace-days remainder is
+    // surfaced inside the pill so ops can scan at a glance.
+    const daysLabel =
+      typeof daysLeftInPaidGrace === 'number'
+        ? daysLeftInPaidGrace <= 0
+          ? ' · 0d LEFT'
+          : ` · ${daysLeftInPaidGrace}d LEFT`
+        : '';
+    return (
+      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 border border-amber-200">
+        EXPIRED{daysLabel}
+      </span>
+    );
+  }
+
+  // Legacy fallback for backends that haven't been redeployed yet.
+  if (!eff && status === 'active' && subscriptionEnd && new Date(subscriptionEnd).getTime() < Date.now()) {
     return (
       <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-700 border border-gray-200">
         EXPIRED
       </span>
     );
   }
+
   const map: Record<string, string> = {
     active:           'bg-emerald-100 text-emerald-700 border-emerald-200',
     approved:         'bg-blue-100 text-blue-700 border-blue-200',
@@ -837,7 +934,7 @@ function FilterPill({
   count: number;
   active: boolean;
   onClick: () => void;
-  color?: 'slate' | 'emerald' | 'blue' | 'yellow' | 'red' | 'gray';
+  color?: 'slate' | 'emerald' | 'blue' | 'yellow' | 'red' | 'gray' | 'amber';
 }) {
   const palette: Record<string, string> = {
     slate:   'bg-slate-100 text-slate-700 border-slate-200',
@@ -846,6 +943,7 @@ function FilterPill({
     yellow:  'bg-yellow-50 text-yellow-800 border-yellow-200',
     red:     'bg-red-50 text-red-700 border-red-200',
     gray:    'bg-gray-50 text-gray-700 border-gray-200',
+    amber:   'bg-amber-50 text-amber-700 border-amber-200',
   };
   return (
     <button

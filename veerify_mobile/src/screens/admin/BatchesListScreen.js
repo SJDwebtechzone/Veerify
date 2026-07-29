@@ -51,7 +51,13 @@ function buildSchedule(batch) {
     }));
 }
 
-export default function BatchesListScreen({ navigation }) {
+export default function BatchesListScreen({ navigation, route }) {
+  // Institution Home → Branch View passes { branchId, branchName } so
+  // this screen renders only that branch's batches. When absent, the
+  // default main-admin scope (b.branch_id IS NULL) still applies.
+  const branchIdParam   = route?.params?.branchId ?? null;
+  const branchNameParam = route?.params?.branchName ?? null;
+
   const [batches, setBatches] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -63,11 +69,17 @@ export default function BatchesListScreen({ navigation }) {
 
   const load = useCallback(async () => {
     try {
-      const res = await apiClient.get('/batches');
+      // Forward the branch filter — the backend already accepts
+      // ?branch_id=<n>|main|all so we just pass whatever the tile
+      // sent through.
+      const qs = branchIdParam != null
+        ? `?branch_id=${encodeURIComponent(branchIdParam)}`
+        : '';
+      const res = await apiClient.get(`/batches${qs}`);
       setBatches(res.data.batches);
     } catch (err) { console.log(err.message); }
     finally { setLoading(false); setRefreshing(false); }
-  }, []);
+  }, [branchIdParam]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
@@ -138,7 +150,9 @@ export default function BatchesListScreen({ navigation }) {
   return (
     <View style={commonStyles.screen}>
       <View style={commonStyles.header}>
-        <Text style={commonStyles.headerTitle}>My Batches</Text>
+        <Text style={commonStyles.headerTitle}>
+          {branchNameParam ? `${branchNameParam} — Batches` : 'My Batches'}
+        </Text>
         <Text style={commonStyles.headerSubtitle}>{batches.length} batches</Text>
       </View>
 

@@ -1,6 +1,14 @@
 import React, { createContext, useState, useEffect, useContext } from 'react';
 import { saveToken, getToken, deleteToken } from '../utils/storage';
 import apiClient from '../api/client';
+// FCM push registration — request permission + POST the token to the
+// backend right after a successful sign-in / register / resume. Every
+// helper is fail-open so a permission denial or Firebase outage
+// never blocks the auth flow.
+import {
+  requestPermissionAndRegister as fcmRegister,
+  revokeOnLogout as fcmRevoke,
+} from '../services/fcm.service';
 
 const AuthContext = createContext();
 
@@ -63,6 +71,12 @@ useEffect(() => {
             setInstitution(inst);
           }
           setUser(userData ?? null);
+          // Re-register the FCM token on session resume so a token
+          // that rotated while the app was closed still lands on the
+          // backend against the correct user.
+          if (userData) {
+            fcmRegister().catch((e) => console.log('[AUTH] fcm resume register threw:', e?.message));
+          }
         }
       } catch (err) {
         console.log('[AUTH] /auth/me failed safely:', err?.message);
@@ -132,6 +146,11 @@ useEffect(() => {
 
       setUser(userData);
 
+      // FCM registration — fire-and-forget. Delayed so setUser has
+      // flushed and the navigator mounted before the OS prompt (on
+      // Android 13+ / iOS) pops.
+      fcmRegister().catch((e) => console.log('[AUTH] fcm register threw:', e?.message));
+
       return { success: true, user: userData, onboardingStatus: status, institution: inst };
     } catch (err) {
       const message = err.response?.data?.message || 'Login failed';
@@ -163,21 +182,55 @@ useEffect(() => {
           setInstitution(inst);
         }
         setUser(userData);
+        // FCM registration on register/resume — same fire-and-forget
+        // pattern as login().
+        fcmRegister().catch((e) => console.log('[AUTH] fcm register threw:', e?.message));
 
-        return { success: true, user: userData, onboardingStatus: status, institution: inst };
+        return {
+          success:          true,
+          resumed:          !!response.data.resumed,
+          user:             userData,
+          onboardingStatus: status,
+          institution:      inst,
+        };
       }
 
       // Fallback: if no token in register response, do login
       return await login(data.email, data.password);
     } catch (err) {
+      // Resume Registration — if the backend detected an incomplete
+      // draft for this email/phone, surface the resume payload so the
+      // screen can prompt "Continue previous registration?". The
+      // screen re-invokes register() with { ...data, resume: true }.
+      if (err.response?.status === 409 && err.response?.data?.code === 'RESUME_AVAILABLE') {
+        return {
+          success:         false,
+          resumable:       true,
+          code:            'RESUME_AVAILABLE',
+          field:           err.response.data.field,
+          resume:          err.response.data.resume,
+          message:         err.response.data.message,
+        };
+      }
       const message = err.response?.data?.message || 'Registration failed';
-      return { success: false, message };
+      return {
+        success: false,
+        message,
+        code:    err.response?.data?.code || null,
+        field:   err.response?.data?.field || null,
+      };
     }
   };
 
   const logout = async () => {
     // eslint-disable-next-line no-console
     console.log('[Auth] logout invoked');
+    // Revoke the FCM token FIRST while the JWT is still valid, so
+    // the ex-user's device stops receiving pushes for this account.
+    // Fire-and-forget on failure so a network hiccup can't strand
+    // the caller in a half-logged-out state.
+    try { await fcmRevoke(); }
+    catch (err) { console.warn('[Auth] fcm revoke threw:', err?.message); }
     // Tear down auth state first so the navigator switches roots
     // immediately, before we touch keychain. If the keychain delete
     // throws, the user is already logged out as far as the app is

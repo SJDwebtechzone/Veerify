@@ -101,15 +101,23 @@ export function StudentsList() {
   const [viewing, setViewing] = useState<StudentRow | null>(null);
 
   useEffect(() => {
+    // Refetch whenever the gender filter changes. The backend narrows
+    // to student_profiles.gender case-insensitively; sending no
+    // `gender` param means "All" (unfiltered). Search + institution
+    // stay client-side per spec ("do not change any other student
+    // filters or pagination logic").
     setLoading(true);
+    const qs = new URLSearchParams();
+    if (genderFilter) qs.set('gender', genderFilter);
+    const url = qs.toString() ? `/students/all?${qs.toString()}` : '/students/all';
     apiClient
-      .get('/students/all')
+      .get(url)
       .then((r) => setStudents(r.data?.students || []))
       .catch((err) =>
         setError(err.response?.data?.message || 'Failed to load students'),
       )
       .finally(() => setLoading(false));
-  }, []);
+  }, [genderFilter]);
 
   // ── Derive filter option lists ──
   const institutions = useMemo(() => {

@@ -94,6 +94,49 @@ function sanitizePayload(body) {
     // COALESCE on update doesn't accidentally clear a saved image
     // when the admin re-saves the form without touching the upload.
     image_url:     body.image_url ? String(body.image_url).trim() : null,
+    // WhatsApp notifications gate (migration 073). Default FALSE.
+    // Applied by planFeatureGuard.assertWhatsAppAllowed before every
+    // WhatsApp API send so an institution on a lower-tier plan can
+    // never dispatch WhatsApp messages, even if the client tries.
+    whatsapp_notifications_enabled: !!body.whatsapp_notifications_enabled,
+    // GST percentage (migration 076). Defaults to 18 (India SaaS
+    // slab). Clamped to 0..50 by the DB CHECK constraint; we clamp
+    // here too so a malformed payload gets a friendly value instead
+    // of a raw 23514 error.
+    gst_percent: (() => {
+      const raw = body.gst_percent;
+      if (raw === undefined || raw === null || raw === '') return 18;
+      const n = parseFloat(raw);
+      if (!Number.isFinite(n)) return 18;
+      return Math.max(0, Math.min(50, n));
+    })(),
+  };
+}
+
+// ── GST helpers ──────────────────────────────────────────────────────
+// Rounds a rupee amount to 2 decimal places using half-away-from-zero
+// so a ₹99.995 base doesn't drift to ₹99.99 (bankers' rounding surprises
+// customers on invoice line items).
+function round2(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return 0;
+  return Math.round(v * 100) / 100;
+}
+
+// Given a base price and a gst_percent, return the { gst_amount,
+// total_payable } pair as 2dp numbers. Used everywhere the API needs
+// to project GST into the client — attachPricing for lists, the
+// approve / renew flows for Razorpay charge amounts, and the invoice
+// renderer for line breakdowns.
+function computeGst(basePrice, gstPercent) {
+  const base = round2(basePrice);
+  const pct  = Number(gstPercent) || 0;
+  const gst  = round2(base * (pct / 100));
+  return {
+    base_price:    base,
+    gst_percent:   pct,
+    gst_amount:    gst,
+    total_payable: round2(base + gst),
   };
 }
 
@@ -103,7 +146,7 @@ function sanitizePayload(body) {
 async function loadPricingByPlan(planIds) {
   if (!planIds.length) return new Map();
   const r = await pool.query(
-    `SELECT plan_id, billing_term, price, is_enabled
+    `SELECT plan_id, billing_term, price, is_enabled, gst_percent
        FROM plan_pricing
       WHERE plan_id = ANY($1::int[])
       ORDER BY
@@ -123,6 +166,7 @@ async function loadPricingByPlan(planIds) {
       billing_term: row.billing_term,
       price:        Number(row.price),
       is_enabled:   !!row.is_enabled,
+      gst_percent:  Number(row.gst_percent) || 0,
     });
   }
   return byPlan;
@@ -131,12 +175,41 @@ async function loadPricingByPlan(planIds) {
 // Attach pricing_terms to each plan row so the mobile shows the correct
 // term options + prices. For consumers that only understand the legacy
 // singleton `price` + `billing_cycle`, both stay populated on the row.
+//
+// Every term row is enriched with base_price / gst_percent /
+// gst_amount / total_payable so both the Web Admin and mobile display
+// identical breakdowns (spec: "API returns Base Price, GST Percentage,
+// GST Amount, and Total Payable"). Same enrichment is projected onto
+// the plan's legacy singleton price so an older client that reads
+// plan.total_payable / plan.gst_amount still gets a sane value.
 async function attachPricing(plans) {
   const ids = plans.map((p) => p.id);
   const byPlan = await loadPricingByPlan(ids);
   return plans.map((p) => {
-    const terms = byPlan.get(p.id) || [];
-    return { ...p, pricing_terms: terms };
+    const planGstPercent = Number(p.gst_percent);
+    const defaultPct = Number.isFinite(planGstPercent) ? planGstPercent : 18;
+    const terms = (byPlan.get(p.id) || []).map((t) => {
+      const pct = Number.isFinite(t.gst_percent) && t.gst_percent > 0
+        ? t.gst_percent
+        : defaultPct;
+      const gst = computeGst(t.price, pct);
+      return {
+        ...t,
+        gst_percent:   pct,
+        base_price:    gst.base_price,
+        gst_amount:    gst.gst_amount,
+        total_payable: gst.total_payable,
+      };
+    });
+    const legacyGst = computeGst(p.price, defaultPct);
+    return {
+      ...p,
+      gst_percent:   defaultPct,
+      base_price:    legacyGst.base_price,
+      gst_amount:    legacyGst.gst_amount,
+      total_payable: legacyGst.total_payable,
+      pricing_terms: terms,
+    };
   });
 }
 
@@ -180,21 +253,33 @@ exports.getPlanById = async (req, res) => {
 // terms overwrite. Cleans invalid terms silently to avoid 400ing on a
 // stale client payload.
 const VALID_TERMS = new Set(['monthly', 'quarterly', 'half_yearly', 'annual']);
-async function upsertPricingTerms(planId, rawTerms) {
+async function upsertPricingTerms(planId, rawTerms, defaultGstPct) {
   if (!Array.isArray(rawTerms)) return;
+  const fallbackPct = Number.isFinite(defaultGstPct) ? defaultGstPct : 18;
   for (const t of rawTerms) {
     if (!t || !VALID_TERMS.has(t.billing_term)) continue;
     const priceNum = Number(t.price);
     if (!Number.isFinite(priceNum) || priceNum < 0) continue;
     const enabled = t.is_enabled === false ? false : true;
+    // Per-term gst_percent snapshot. Falls back to the parent plan's
+    // rate so a legacy client that only sends { billing_term, price,
+    // is_enabled } still lands with the plan default. Clamped to
+    // 0..50 mirroring the CHECK constraint.
+    const gstRaw = t.gst_percent;
+    const gstPct = Math.max(0, Math.min(50,
+      gstRaw === undefined || gstRaw === null || gstRaw === ''
+        ? fallbackPct
+        : (parseFloat(gstRaw) || fallbackPct),
+    ));
     await pool.query(
-      `INSERT INTO plan_pricing (plan_id, billing_term, price, is_enabled)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO plan_pricing (plan_id, billing_term, price, is_enabled, gst_percent)
+       VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (plan_id, billing_term) DO UPDATE SET
-         price      = EXCLUDED.price,
-         is_enabled = EXCLUDED.is_enabled,
-         updated_at = NOW()`,
-      [planId, t.billing_term, priceNum, enabled],
+         price       = EXCLUDED.price,
+         is_enabled  = EXCLUDED.is_enabled,
+         gst_percent = EXCLUDED.gst_percent,
+         updated_at  = NOW()`,
+      [planId, t.billing_term, priceNum, enabled, gstPct],
     );
   }
 }
@@ -260,8 +345,8 @@ exports.createPlan = async (req, res) => {
          (name, price, billing_cycle, max_branches, max_students, max_trainers,
           features, is_popular, is_active,
           trial_days, grace_days, discount_enabled, discount_percent,
-          image_url)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14)
+          image_url, whatsapp_notifications_enabled, gst_percent)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15, $16)
        RETURNING *`,
       [
         p.name, p.price, p.billing_cycle,
@@ -270,21 +355,25 @@ exports.createPlan = async (req, res) => {
         p.is_popular, p.is_active,
         p.trial_days, p.grace_days, p.discount_enabled, p.discount_percent,
         p.image_url,
+        p.whatsapp_notifications_enabled,
+        p.gst_percent,
       ],
     );
     const plan = result.rows[0];
 
     // Persist pricing_terms if the caller sent them; otherwise seed a
     // single row from the legacy singleton pair so the new shape is
-    // always returnable.
+    // always returnable. Plan's default GST rate is forwarded so per-
+    // term rows inherit it when the client omits gst_percent.
     if (rawTerms) {
-      await upsertPricingTerms(plan.id, rawTerms);
+      await upsertPricingTerms(plan.id, rawTerms, p.gst_percent);
     } else {
       await upsertPricingTerms(plan.id, [{
         billing_term: p.billing_cycle || 'monthly',
         price:        Number(p.price),
         is_enabled:   true,
-      }]);
+        gst_percent:  p.gst_percent,
+      }], p.gst_percent);
     }
     await refreshLegacyPricing(plan.id);
 
@@ -319,21 +408,23 @@ exports.updatePlan = async (req, res) => {
 
     const result = await pool.query(
       `UPDATE subscription_plans SET
-         name             = COALESCE($1, name),
-         price            = COALESCE($2, price),
-         billing_cycle    = COALESCE($3, billing_cycle),
-         max_branches     = COALESCE($4, max_branches),
-         max_students     = COALESCE($5, max_students),
-         max_trainers     = COALESCE($6, max_trainers),
-         features         = COALESCE($7::jsonb, features),
-         is_popular       = COALESCE($8, is_popular),
-         is_active        = COALESCE($9, is_active),
-         trial_days       = COALESCE($10, trial_days),
-         grace_days       = COALESCE($11, grace_days),
-         discount_enabled = COALESCE($12, discount_enabled),
-         discount_percent = COALESCE($13, discount_percent),
-         image_url        = CASE WHEN $15::boolean THEN $14 ELSE image_url END
-       WHERE id = $16
+         name                            = COALESCE($1, name),
+         price                           = COALESCE($2, price),
+         billing_cycle                   = COALESCE($3, billing_cycle),
+         max_branches                    = COALESCE($4, max_branches),
+         max_students                    = COALESCE($5, max_students),
+         max_trainers                    = COALESCE($6, max_trainers),
+         features                        = COALESCE($7::jsonb, features),
+         is_popular                      = COALESCE($8, is_popular),
+         is_active                       = COALESCE($9, is_active),
+         trial_days                      = COALESCE($10, trial_days),
+         grace_days                      = COALESCE($11, grace_days),
+         discount_enabled                = COALESCE($12, discount_enabled),
+         discount_percent                = COALESCE($13, discount_percent),
+         image_url                       = CASE WHEN $15::boolean THEN $14 ELSE image_url END,
+         whatsapp_notifications_enabled  = COALESCE($16, whatsapp_notifications_enabled),
+         gst_percent                     = COALESCE($17, gst_percent)
+       WHERE id = $18
        RETURNING *`,
       [
         has('name')             ? p.name             : null,
@@ -351,6 +442,8 @@ exports.updatePlan = async (req, res) => {
         has('discount_percent') ? p.discount_percent : null,
         imageOrNull,
         has('image_url'),
+        has('whatsapp_notifications_enabled') ? p.whatsapp_notifications_enabled : null,
+        has('gst_percent')      ? p.gst_percent      : null,
         id,
       ],
     );
@@ -361,8 +454,11 @@ exports.updatePlan = async (req, res) => {
 
     // pricing_terms round-trip. Same semantics as create — the caller
     // sends any subset (partial edits work), missing terms untouched.
+    // Forward the effective plan gst_percent so any newly-inserted term
+    // rows default to it when the client omitted per-row gst_percent.
     if (Array.isArray(req.body?.pricing_terms)) {
-      await upsertPricingTerms(plan.id, req.body.pricing_terms);
+      const effectiveGst = Number(plan.gst_percent) || p.gst_percent || 18;
+      await upsertPricingTerms(plan.id, req.body.pricing_terms, effectiveGst);
       await refreshLegacyPricing(plan.id);
     }
 

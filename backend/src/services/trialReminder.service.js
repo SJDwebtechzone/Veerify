@@ -174,8 +174,15 @@ async function processOne(row) {
   return { ok: true };
 }
 
+// Set to true once we've detected that migration 070 hasn't been
+// applied. Prevents the scheduler from spamming an identical error
+// every hour on a fresh clone — the operator sees ONE clear line
+// telling them what to run, and the ticker sleeps until restart.
+let schemaMissing = false;
+
 async function tick() {
   if (running) return;
+  if (schemaMissing) return;
   running = true;
   try {
     const candidates = await findCandidates();
@@ -189,7 +196,19 @@ async function tick() {
       }
     }
   } catch (err) {
-    console.warn('[trialReminder] tick failed:', err?.message);
+    // Postgres error code 42703 = undefined_column. Fires when
+    // migration 070 (idx + trial_reminder_sent_at) hasn't landed
+    // yet. Log one clear "run the migration" line and stop ticking
+    // so we don't fill the log with repeats every hour.
+    if (err?.code === '42703' || /column .* does not exist/i.test(err?.message || '')) {
+      schemaMissing = true;
+      console.warn(
+        '[trialReminder] disabled — migration 070_trial_reminder.sql has not been applied. ' +
+        'Run `npm run migrate -- src/db/migrations/070_trial_reminder.sql` and restart the server.',
+      );
+    } else {
+      console.warn('[trialReminder] tick failed:', err?.message);
+    }
   } finally {
     running = false;
   }

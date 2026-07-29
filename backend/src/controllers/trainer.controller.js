@@ -4,9 +4,21 @@ const { ensureCapacity, limitResponse } = require('../utils/planLimits');
 const { sendTrainerCredentialsEmail } = require('../utils/mailer');
 const { dispatchWelcomeSms } = require('../utils/smsService');
 const {
+  sendTrainerCredentialsMessage,
+} = require('../services/whatsapp.service');
+const {
   validateEmailFormat, validatePhoneFormat,
   ensureEmailUnique, ensurePhoneUnique,
 } = require('../utils/contactValidation');
+// Resume Registration / Enrollment (migration 077). When a trainer
+// create hits an email/phone that already belongs to an INCOMPLETE
+// record, we hand back a RESUME_AVAILABLE 409 instead of blocking so
+// the admin can continue the previous enrollment attempt from the UI.
+const {
+  findResumableRegistration,
+  markRegistrationComplete,
+  resumeAvailableResponse,
+} = require('../utils/registrationStatus');
 
 // Helper: get admin's institution_id
 const getAdminInstitutionId = async (userId) => {
@@ -16,6 +28,7 @@ const getAdminInstitutionId = async (userId) => {
   );
   return result.rows[0]?.institution_id;
 };
+
 
 // CREATE trainer (admin only)
 // This creates BOTH a user account AND a trainer profile in one transaction
@@ -92,16 +105,33 @@ exports.createTrainer = async (req, res) => {
     const pFmt = validatePhoneFormat(phone, { required: false });
     if (!pFmt.ok) return res.status(pFmt.status).json(pFmt.body);
 
-    const emailUnique = await ensureEmailUnique(eFmt.value);
-    if (!emailUnique.ok) return res.status(emailUnique.status).json(emailUnique.body);
-    if (pFmt.value) {
-      const phoneUnique = await ensurePhoneUnique(pFmt.value);
-      if (!phoneUnique.ok) return res.status(phoneUnique.status).json(phoneUnique.body);
-    }
-
     // Use the cleaned/normalised values everywhere below.
     const cleanEmail = eFmt.value;
     const cleanPhone = pFmt.value;
+
+    // Resume Registration probe (spec: don't reserve email/phone
+    // until enrollment truly completes). If the collision points at
+    // an INCOMPLETE trainer row (no institution_id yet, or the
+    // registration_completed_at stamp is still NULL), we surface a
+    // RESUME_AVAILABLE 409 so the admin can opt in with resume:true.
+    const resumeLookup = await findResumableRegistration({
+      email: cleanEmail, phone: cleanPhone, role: 'trainer',
+    });
+    const resumeFlag = req.body?.resume === true;
+
+    if (resumeLookup.status === 'completed') {
+      const isPhone = resumeLookup.matchedOn === 'phone';
+      return res.status(409).json({
+        code:    isPhone ? 'PHONE_TAKEN' : 'EMAIL_TAKEN',
+        field:   isPhone ? 'phone' : 'email',
+        message: isPhone
+          ? 'This phone number is already registered to another user.'
+          : 'This email is already registered. Please use a different email or sign in.',
+      });
+    }
+    if (resumeLookup.status === 'incomplete' && !resumeFlag) {
+      return res.status(409).json(resumeAvailableResponse(resumeLookup));
+    }
 
     const institutionId = await getAdminInstitutionId(adminId);
     if (!institutionId) {
@@ -121,19 +151,40 @@ exports.createTrainer = async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Step 1: Create user.
+    // Step 1: Create user — or, on resume, reuse the existing draft
+    // user row so we don't accumulate abandoned trainer accounts.
     // must_change_password=TRUE — the trainer was provisioned by the
     // institution admin with a temp password emailed to them, so the
     // mobile login flow pops a "set a new password / I'll do it later"
     // dialog on their first sign-in.
-    const userResult = await client.query(
-      `INSERT INTO users (name, email, phone, password, role, institution_id,
-                          must_change_password)
-       VALUES ($1, $2, $3, $4, 'trainer', $5, TRUE)
-       RETURNING id, name, email, phone, role`,
-      [name, cleanEmail, cleanPhone, hashedPassword, institutionId]
-    );
-    const user = userResult.rows[0];
+    let user;
+    if (resumeFlag && resumeLookup.status === 'incomplete' && resumeLookup.user) {
+      const resumedId = resumeLookup.user.id;
+      const upd = await client.query(
+        `UPDATE users SET
+           name                 = $1,
+           email                = LOWER($2),
+           phone                = $3,
+           password             = $4,
+           role                 = 'trainer',
+           institution_id       = $5,
+           must_change_password = TRUE,
+           updated_at           = NOW()
+         WHERE id = $6
+         RETURNING id, name, email, phone, role`,
+        [name, cleanEmail, cleanPhone, hashedPassword, institutionId, resumedId],
+      );
+      user = upd.rows[0];
+    } else {
+      const userResult = await client.query(
+        `INSERT INTO users (name, email, phone, password, role, institution_id,
+                            must_change_password)
+         VALUES ($1, $2, $3, $4, 'trainer', $5, TRUE)
+         RETURNING id, name, email, phone, role`,
+        [name, cleanEmail, cleanPhone, hashedPassword, institutionId]
+      );
+      user = userResult.rows[0];
+    }
 
     // Step 2: Create trainer profile with all the extended-enrollment fields.
     // If the client sent the structured skills array, that becomes the
@@ -160,6 +211,20 @@ exports.createTrainer = async (req, res) => {
          basic_salary
        )
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14)
+       ON CONFLICT (user_id) DO UPDATE SET
+         institution_id    = EXCLUDED.institution_id,
+         specialization    = COALESCE(EXCLUDED.specialization,    trainers.specialization),
+         belt_level        = COALESCE(EXCLUDED.belt_level,        trainers.belt_level),
+         experience_years  = COALESCE(EXCLUDED.experience_years,  trainers.experience_years),
+         bio               = COALESCE(EXCLUDED.bio,               trainers.bio),
+         gender            = COALESCE(EXCLUDED.gender,            trainers.gender),
+         date_of_birth     = COALESCE(EXCLUDED.date_of_birth,     trainers.date_of_birth),
+         govt_proof_type   = COALESCE(EXCLUDED.govt_proof_type,   trainers.govt_proof_type),
+         govt_proof_number = COALESCE(EXCLUDED.govt_proof_number, trainers.govt_proof_number),
+         photo_url         = COALESCE(EXCLUDED.photo_url,         trainers.photo_url),
+         certificate_url   = COALESCE(EXCLUDED.certificate_url,   trainers.certificate_url),
+         skills            = EXCLUDED.skills,
+         basic_salary      = EXCLUDED.basic_salary
        RETURNING *`,
       [
         user.id, institutionId,
@@ -174,16 +239,32 @@ exports.createTrainer = async (req, res) => {
 
     await client.query('COMMIT');
 
+    // Terminal state — the trainer account is fully provisioned:
+    // user row + trainer profile + institution link. Stamp the
+    // completion timestamp so future re-use of this email/phone is
+    // blocked with EMAIL_TAKEN / PHONE_TAKEN rather than the resume
+    // prompt. Done post-commit and through markRegistrationComplete
+    // (which swallows a 42703 "column does not exist" when migration
+    // 077 hasn't been applied yet) so a stale schema can never abort
+    // an otherwise-successful trainer creation.
+    markRegistrationComplete(user.id).catch(() => { /* logged inside */ });
+
     // ── Email the new trainer their login credentials so they can sign
     // into the Veerify mobile app. Best-effort: if SMTP isn't configured
     // or the send fails, we still return 201 — the admin can verify the
     // trainer exists in the list and re-share credentials manually.
+    //
+    // institutionName is HOISTED out of the try block so the WhatsApp
+    // credentials send below can reference it too (previously it was
+    // declared inside the try and the WhatsApp send hit
+    // "institutionName is not defined").
+    let institutionName = 'your academy';
     try {
       const instRow = await pool.query(
         'SELECT name FROM institutions WHERE id = $1',
         [institutionId],
       );
-      const institutionName = instRow.rows[0]?.name || 'your academy';
+      institutionName = instRow.rows[0]?.name || institutionName;
       const mailResult = await sendTrainerCredentialsEmail({
         to: email,
         name,
@@ -211,7 +292,31 @@ exports.createTrainer = async (req, res) => {
       loginId:      user.email,
       tempPassword: password,
     });
+// WhatsApp credentials (best effort)
+try {
+  const waResult = await sendTrainerCredentialsMessage({
+    userId: user.id,
+    trainerName: user.name,
+    phone: cleanPhone,
+    academyName: institutionName,
+    otp: password, // your temporary password
+  });
 
+  if (waResult.ok) {
+    console.log(
+      `[WhatsApp] Trainer credentials sent → user=${user.id} phone=${cleanPhone}`,
+    );
+  } else {
+    console.log(
+      `[WhatsApp] Trainer credentials skipped → user=${user.id} reason=${waResult.skipped || waResult.error}`,
+    );
+  }
+} catch (err) {
+  console.warn(
+    `[WhatsApp] Trainer credentials failed → user=${user.id}`,
+    err.message,
+  );
+}
     res.status(201).json({
       message: 'Trainer created successfully. Login details emailed to the trainer.',
       trainer: {

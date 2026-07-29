@@ -20,6 +20,26 @@ const PDFDocument = require('pdfkit');
 const pool = require('../config/db');
 const { sendMail } = require('./mailer');
 
+// Latched at the first 42P01 that names the `invoices` table, which
+// means migration 063_invoices.sql hasn't been applied on this DB.
+// Once flipped, both public entry points short-circuit and return
+// `{ ok: false, skipped: 'invoices-table-missing' }` so the callers'
+// fire-and-forget catches log one clean line per request instead of
+// a fresh stack trace. A process restart re-checks the schema.
+let invoicesTableMissing = false;
+function isInvoicesTableMissing(err) {
+  return err?.code === '42P01'
+      && /"?invoices"?/i.test(err?.message || '');
+}
+function noteInvoicesTableMissing(where) {
+  if (invoicesTableMissing) return;
+  invoicesTableMissing = true;
+  console.warn(
+    `[invoiceService] ${where}: invoices table missing — migration 063_invoices.sql has not been applied. `
+    + 'PDF invoice generation is disabled. Run `npm run migrate -- src/db/migrations/063_invoices.sql` and restart the server.',
+  );
+}
+
 // Where the rendered PDFs live. Served by the existing static /uploads
 // route in server.js. Everything under this dir is public — the auth
 // gate is enforced by the /api/invoices/:id/pdf controller before it
@@ -173,6 +193,10 @@ function renderInvoicePdf({
 
 // ── Public: enrollment invoice ────────────────────────────────────
 async function generateEnrollmentInvoice({ enrollmentId }) {
+  // Fast-path when migration 063 hasn't been applied yet.
+  if (invoicesTableMissing) {
+    return { ok: false, skipped: 'invoices-table-missing' };
+  }
   try {
     if (!Number.isInteger(enrollmentId)) {
       return { ok: false, error: 'Invalid enrollment id' };
@@ -294,6 +318,10 @@ async function generateEnrollmentInvoice({ enrollmentId }) {
 
     return { ok: true, invoice };
   } catch (err) {
+    if (isInvoicesTableMissing(err)) {
+      noteInvoicesTableMissing('enrollment invoice');
+      return { ok: false, skipped: 'invoices-table-missing' };
+    }
     console.error('[invoiceService] enrollment invoice failed:', err);
     return { ok: false, error: err?.message || 'Invoice generation failed' };
   }
@@ -303,6 +331,9 @@ async function generateEnrollmentInvoice({ enrollmentId }) {
 async function generateSubscriptionInvoice({
   institutionId, paymentReference, amount, planName,
 }) {
+  if (invoicesTableMissing) {
+    return { ok: false, skipped: 'invoices-table-missing' };
+  }
   try {
     if (!Number.isInteger(institutionId)) {
       return { ok: false, error: 'Invalid institution id' };
@@ -404,6 +435,10 @@ async function generateSubscriptionInvoice({
 
     return { ok: true, invoice };
   } catch (err) {
+    if (isInvoicesTableMissing(err)) {
+      noteInvoicesTableMissing('subscription invoice');
+      return { ok: false, skipped: 'invoices-table-missing' };
+    }
     console.error('[invoiceService] subscription invoice failed:', err);
     return { ok: false, error: err?.message || 'Invoice generation failed' };
   }

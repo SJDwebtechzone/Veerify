@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { LogBox } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { AuthProvider } from './src/context/AuthContext';
@@ -8,6 +8,10 @@ import { NotificationAlertProvider } from './src/context/NotificationAlertContex
 import AppNavigator from './src/navigation/AppNavigator';
 import { ConfirmDialogHost } from './src/components/ConfirmDialog';
 import GlobalNotificationBell from './src/components/GlobalNotificationBell';
+// FCM tap handlers — foreground alert, background tap navigation,
+// and terminated-launch tap navigation. Reads the shared navigation
+// ref set inside AppNavigator, so it's safe to attach once at root.
+import { attachHandlers as attachFcmHandlers } from './src/services/fcm.service';
 // Top-level error boundary — contains first-launch crashes so the
 // user sees a Retry card instead of the OS killing the app back to
 // the launcher. Only rendered outside every provider so a provider
@@ -25,6 +29,13 @@ LogBox.ignoreLogs([
 ]);
 
 export default function App() {
+  useEffect(() => {
+    // Attach foreground / background / terminated-tap listeners
+    // once. The service latches internally so a re-mount from
+    // hot-reload doesn't stack duplicate subscriptions.
+    attachFcmHandlers();
+  }, []);
+
   return (
     <ErrorBoundary>
       <SafeAreaProvider>

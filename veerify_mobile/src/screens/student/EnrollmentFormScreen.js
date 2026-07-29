@@ -49,11 +49,14 @@ const BORDER = '#E5E7EB';
 // combinations.
 const BLOOD_GROUPS = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
 
-// Current belt rank for an incoming student. "New student" is the default
-// (no prior martial-arts training). "Other" reveals a free-text input
-// for academies that use non-standard belt names.
+// Current belt rank for an incoming student. Every new enrollment
+// defaults to "White" (freshly starting martial-arts training); the
+// dropdown stays fully editable so the admin can pick any higher
+// rank if the student is joining with prior training. "Other" reveals
+// a free-text input for academies that use non-standard belt names.
+// Note: the legacy "New student" placeholder has been removed per
+// spec — every enrollment now starts at "White" instead.
 const BELT_OPTIONS = [
-  'New student',
   'White',
   'Yellow',
   'Orange',
@@ -226,9 +229,11 @@ export default function EnrollmentFormScreen({ route, navigation }) {
     // allergies, asthma, mobility considerations, dietary restrictions,
     // anything the trainer should know.
     health_notes: '',
-    // belt_category — defaults to "New student" so brand-new joiners
-    // don't have to pick anything. "Other" reveals belt_category_other.
-    belt_category: 'New student',
+    // belt_category — defaults to "White" per the enrollment-form
+    // spec. Admin can change it to any other rank if the student
+    // is joining with prior training. "Other" reveals
+    // belt_category_other for non-standard belt names.
+    belt_category: 'White',
     belt_category_other: '',
     photo_url: '',
     photo_uri: '',
@@ -347,7 +352,7 @@ export default function EnrollmentFormScreen({ route, navigation }) {
             health_notes:   p.health_notes || p.disabilities || '',
             belt_category:  savedBelt
               ? (isStandardBelt ? savedBelt : 'Other')
-              : 'New student',
+              : 'White',
             belt_category_other: savedBelt && !isStandardBelt ? savedBelt : '',
             photo_url:      p.photo_url || '',
           }));
@@ -481,16 +486,22 @@ export default function EnrollmentFormScreen({ route, navigation }) {
     return null;
   };
 
-  // Live invalid state — powers the disabled "Pay Now" button below so
-  // the student CAN'T reach the payment gateway with a half-filled form.
+  // Live invalid state — used ONLY to render the small hint under the
+  // button so the student knows which field is still missing. The
+  // button itself stays enabled by default (see canSubmit below); the
+  // submit() handler runs the same validate() check on tap and pops
+  // a friendly "Check this detail" dialog when something's missing.
+  // Disabling the button caused too many "why can't I tap Submit?"
+  // reports where the user hadn't scrolled far enough to see the
+  // failing field — task #28's fix.
   const validationError = useMemo(() => validate(), [
     form.full_name, form.date_of_birth, form.contact_number,
     form.email, form.address, form.belt_category, form.belt_category_other,
     adminMode,
   ]);
-  const canSubmit = !validationError && !submitting;
+  const canSubmit = !submitting;
 
-  const submit = async () => {
+  const submit = async ({ resume: resumeFlag = false } = {}) => {
     const err = validate();
     if (err) {
       confirm({
@@ -516,13 +527,20 @@ export default function EnrollmentFormScreen({ route, navigation }) {
     setSubmitting(true);
     try {
       // Resolve the belt category: when "Other" is picked we send the
-      // custom string. New student / standard belts go through as-is.
+      // custom string. Standard belts go through as-is. Fallback is
+      // "White" (default for every new enrollment per spec).
       const beltVal = form.belt_category === 'Other'
         ? (form.belt_category_other || '').trim() || 'Other'
-        : (form.belt_category || 'New student');
+        : (form.belt_category || 'White');
 
       const res = await apiClient.post('/enrollments', {
         batch_id: batchId,
+        // Resume Registration opt-in — set when the admin has
+        // accepted the "Continue previous registration?" prompt for
+        // this student's email/mobile. The backend then updates the
+        // existing draft user row instead of blocking with
+        // EMAIL_TAKEN / PHONE_TAKEN. See migration 077.
+        resume: resumeFlag,
         // Tell the backend this is an admin-driven enrolment. When set,
         // the server creates a brand-new student user (or reuses the
         // existing email's account), emails the login credentials, then
@@ -628,6 +646,21 @@ export default function EnrollmentFormScreen({ route, navigation }) {
           plan_name: data.plan_name,
         });
         setPlanModalOpen(true);
+      } else if (e?.response?.status === 409 && data.code === 'RESUME_AVAILABLE') {
+        // Resume Registration prompt (spec: "An incomplete registration
+        // was found for this email/mobile number. Would you like to
+        // continue where you left off?"). On accept, retry with
+        // resume:true so the backend overwrites the draft student
+        // row instead of rejecting the collision.
+        confirm({
+          title:       'Continue previous enrolment?',
+          message:     data.message
+            || 'An incomplete registration was found for this email/mobile number. Would you like to continue where you left off?',
+          variant:     'info',
+          confirmText: 'Yes, continue',
+          cancelText:  'Cancel',
+          onConfirm:   () => submit({ resume: true }),
+        });
       } else {
         // Server-side validation (e.g. "Please enter a valid 10-digit
         // mobile number starting with 6-9.") and other backend errors
@@ -1080,7 +1113,7 @@ export default function EnrollmentFormScreen({ route, navigation }) {
             dropdown so the form doesn't grow a 3-line chip wrap.
             "Other" still reveals the free-text field below. The Award
             icon hints at "rank / achievement" without taking space. */}
-        <Field label="Current Belt Category" hint="Default is 'New student'. Pick the right rank if the student has prior training.">
+        <Field label="Current Belt Category" hint="Default is 'White'. Pick a higher rank if the student is joining with prior training.">
           <Dropdown
             options={BELT_OPTIONS}
             value={form.belt_category}
@@ -1218,15 +1251,17 @@ export default function EnrollmentFormScreen({ route, navigation }) {
           <Text style={styles.btnGhostText}>Cancel</Text>
         </TouchableOpacity>
         <TouchableOpacity
-          // Disabled until the mandatory-field validator is clean, so
-          // the student cannot possibly reach the payment gateway with
-          // a half-filled form. Faded appearance signals the state.
+          // Enabled by default. Missing / invalid fields still block
+          // the submission — validate() runs first inside submit()
+          // and pops a "Check this detail" dialog — but the button
+          // itself stays tappable so the user gets clear inline
+          // feedback instead of a silent grey button.
           style={[
             styles.btn, styles.btnPrimary,
-            (!canSubmit) && { opacity: 0.45 },
+            submitting && { opacity: 0.45 },
           ]}
           onPress={submit}
-          disabled={!canSubmit}
+          disabled={submitting}
           activeOpacity={0.85}
         >
           {submitting ? (

@@ -627,6 +627,29 @@ exports.getInstitutionByBatch = async (req, res) => {
     if (scope?.type === 'sub_branch') {
       params.push(instId);
       batchWhere = `AND b.branch_id = $${params.length}`;
+    } else if (req.query.branch_id !== undefined) {
+      // Institution Home Branch View override — main admin drilled
+      // in through the Attendance % tile for a specific branch.
+      // Validate the branch belongs to their tree, then lock the
+      // scope; `0` means "Main institution" (branch_id IS NULL).
+      const raw = parseInt(req.query.branch_id, 10);
+      if (Number.isFinite(raw) && raw >= 0) {
+        if (raw === 0) {
+          batchWhere = `AND b.branch_id IS NULL`;
+        } else {
+          const chk = await pool.query(
+            `SELECT id FROM institutions
+              WHERE id = $1
+                AND (id = $2 OR parent_institution_id = $2)
+                AND deleted_at IS NULL`,
+            [raw, instId],
+          );
+          if (chk.rows.length > 0) {
+            params.push(raw);
+            batchWhere = `AND b.branch_id = $${params.length}`;
+          }
+        }
+      }
     }
 
     const rows = await pool.query(

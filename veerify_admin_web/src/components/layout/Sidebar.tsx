@@ -133,10 +133,18 @@ function NavGroup({ section }: { section: NavSection }) {
 }
 
 function ChildLink({ child, count }: { child: NavChild; count: number }) {
+  // `end` = require an EXACT match, not a prefix match. Sidebar
+  // children are always leaf routes in this app, so without this a
+  // parent-shaped path like `/institutions` would stay highlighted
+  // whenever the URL descended into `/institutions/active`,
+  // `/institutions/expired`, or `/institutions/pending`. The result
+  // was two highlighted tabs — "All" plus whichever sub-tab was
+  // clicked. `end` on every child restores the "only one highlight
+  // at a time" behaviour the spec calls for.
   return (
     <NavLink
       to={child.to}
-      end={child.to === '/'}
+      end
       className={({ isActive }) =>
         cn(
           'flex items-center justify-between px-3 py-1.5 rounded-lg text-[13px] font-medium transition-colors',

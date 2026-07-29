@@ -1,4 +1,9 @@
 const pool = require('../config/db');
+// FCM fan-out — fired after every successful in-app notification
+// insert so the mobile app gets a push in parallel with the bell
+// update. Never throws; disabled cleanly when firebase-admin isn't
+// configured. See services/notification.service.js.
+const { fanOutFromNotificationRow, sendToUsers } = require('../services/notification.service');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Notifications
@@ -31,10 +36,83 @@ async function insertNotification({
      RETURNING *`,
     [user_id, institution_id, category, title, message, JSON.stringify(data || {}), created_by],
   );
-  return res.rows[0];
+  const row = res.rows[0];
+
+  // FCM fan-out — fire-and-forget so a push failure NEVER blocks the
+  // DB insert. Every category the app currently drops into the bell
+  // (enrolment, attendance, announcements, videos, fee reminders,
+  // payment success, certificates, performance reports, …) gets a
+  // push automatically because they ALL go through this helper.
+  fanOutFromNotificationRow({ ...row, data: data || {} });
+
+  return row;
 }
 // Exported for cross-controller use.
 exports.insertNotification = insertNotification;
+
+// ─── FCM token register / revoke ───────────────────────────────────────
+// The mobile app POSTs its FCM token here after permission grant and
+// on every onTokenRefresh event. The (token) unique constraint means
+// re-registering the same device just bumps last_seen_at, and moving
+// a device from account A to account B overwrites the user_id.
+exports.registerFcmToken = async (req, res) => {
+  try {
+    const userId = req.user?.id || req.user?.userId;
+    if (!userId) return res.status(401).json({ message: 'Not authenticated' });
+    const { token, platform, app_version, device_id } = req.body || {};
+    if (!token || typeof token !== 'string') {
+      return res.status(400).json({ message: 'token is required' });
+    }
+    const platformClean = ['android', 'ios', 'web'].includes(String(platform || '').toLowerCase())
+      ? String(platform).toLowerCase()
+      : 'unknown';
+    await pool.query(
+      `INSERT INTO fcm_tokens (user_id, token, platform, app_version, device_id, last_seen_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())
+       ON CONFLICT (token) DO UPDATE SET
+         user_id      = EXCLUDED.user_id,
+         platform     = EXCLUDED.platform,
+         app_version  = EXCLUDED.app_version,
+         device_id    = EXCLUDED.device_id,
+         last_seen_at = NOW()`,
+      [userId, token, platformClean, app_version || null, device_id || null],
+    );
+    return res.json({ ok: true });
+  } catch (err) {
+    if (err?.code === '42P01') {
+      // migration 080 not applied yet — degrade silently so the app
+      // launch doesn't error out.
+      return res.json({ ok: true, skipped: 'schema-missing' });
+    }
+    console.error('registerFcmToken error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+exports.revokeFcmToken = async (req, res) => {
+  try {
+    const userId = req.user?.id || req.user?.userId;
+    if (!userId) return res.status(401).json({ message: 'Not authenticated' });
+    const { token } = req.body || {};
+    if (!token) {
+      // No token means "revoke every token for this user" — used on
+      // logout so the ex-user doesn't keep receiving pushes.
+      await pool.query(`DELETE FROM fcm_tokens WHERE user_id = $1`, [userId]);
+      return res.json({ ok: true });
+    }
+    await pool.query(
+      `DELETE FROM fcm_tokens WHERE user_id = $1 AND token = $2`,
+      [userId, token],
+    );
+    return res.json({ ok: true });
+  } catch (err) {
+    if (err?.code === '42P01') {
+      return res.json({ ok: true, skipped: 'schema-missing' });
+    }
+    console.error('revokeFcmToken error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
 
 // GET /api/notifications?category=&unread=true&limit=50
 exports.list = async (req, res) => {

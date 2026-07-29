@@ -27,6 +27,13 @@ interface PricingTerm {
   billing_term: 'monthly' | 'quarterly' | 'half_yearly' | 'annual';
   price:        number;
   is_enabled:   boolean;
+  // GST breakdown (migration 076). `price` is the GST-EXCLUSIVE base
+  // rate; the three fields below are what the backend computes on
+  // read. Kept optional so an older API response still renders.
+  base_price?:    number;
+  gst_percent?:   number;
+  gst_amount?:    number;
+  total_payable?: number;
 }
 interface Plan {
   id: number;
@@ -50,6 +57,12 @@ interface Plan {
   pricing_terms?: PricingTerm[];
   // Optional plan image (migration 051). Shown next to the plan name.
   image_url?: string | null;
+  // GST default for this plan (migration 076). Every term inherits
+  // this unless the term row overrides it.
+  gst_percent?: number | string;
+  base_price?:    number;
+  gst_amount?:    number;
+  total_payable?: number;
 }
 
 // One row per billing term. Prices are strings while editing (empty
@@ -73,6 +86,16 @@ type Draft = {
   // Optional image (migration 051). '' means "no image"; a non-empty
   // value is a server-returned path like '/uploads/plan-xyz.jpg'.
   image_url: string;
+  // Plan-scoped WhatsApp Notifications toggle (migration 073).
+  // Default OFF — institutions on this plan can only dispatch
+  // WhatsApp messages when this is TRUE; otherwise the backend
+  // planFeatureGuard blocks the send and the app falls back to
+  // email / in-app channels.
+  whatsapp_notifications_enabled: boolean;
+  // Plan-level GST rate (migration 076). Applied to every billing term
+  // unless the term overrides it. Range guard 0..50 mirrors the DB
+  // CHECK constraint; UI shows a preview breakdown per term.
+  gst_percent: string;
 };
 
 const BLANK: Draft = {
@@ -94,6 +117,8 @@ const BLANK: Draft = {
   discount_enabled: false,
   discount_percent: '',
   image_url: '',
+  whatsapp_notifications_enabled: false,
+  gst_percent: '18',
 };
 
 // Effective price after discount, in rupees.
@@ -275,6 +300,8 @@ export function Plans() {
       discount_enabled: !!plan.discount_enabled,
       discount_percent: plan.discount_percent != null ? String(plan.discount_percent) : '',
       image_url:        plan.image_url || '',
+      whatsapp_notifications_enabled: !!(plan as any).whatsapp_notifications_enabled,
+      gst_percent:    plan.gst_percent != null ? String(plan.gst_percent) : '18',
     });
     setEditing(plan);
   };
@@ -330,6 +357,15 @@ export function Plans() {
         // Empty string → null so the backend's present-check clears
         // the column instead of storing "".
         image_url: draft.image_url ? draft.image_url : null,
+        // WhatsApp Notifications toggle — plan-scoped feature flag.
+        // The backend planFeatureGuard reads this before every
+        // WhatsApp API dispatch and refuses when false.
+        whatsapp_notifications_enabled: !!draft.whatsapp_notifications_enabled,
+        // Plan-level GST default (migration 076). Clamped 0..50 to
+        // mirror the DB CHECK; blank falls back to 18 so an admin
+        // saving an older plan without touching GST still lands with
+        // the standard SaaS slab.
+        gst_percent: Math.max(0, Math.min(50, parseFloat(draft.gst_percent) || 0)),
       };
       if (editing === 'new') await api.post('/plans', body);
       else if (editing)      await api.put(`/plans/${editing.id}`, body);
@@ -482,14 +518,46 @@ export function Plans() {
 
           {/* Section: Pricing — one row per billing term, each with an
               enable toggle + price. Only enabled terms are surfaced on
-              the mobile plan-selection screen. */}
+              the mobile plan-selection screen. Each row shows a live
+              breakdown of Base / GST / Total Payable so the admin
+              knows exactly what Razorpay will charge. */}
           <FormSection title="Pricing" icon={Tag}>
             <p className="text-xs text-slate-500 mb-3">
-              Turn on any billing terms this plan should offer and set the price. Mobile users will pick a term when they proceed to payment.
+              Turn on any billing terms this plan should offer and set the base price (excluding GST). Mobile users pick a term at payment; GST is added at checkout.
             </p>
+            {/* Plan-level GST rate — applied to every enabled term.
+                Range guard 0..50 mirrors the migration CHECK. */}
+            <div className="mb-4 grid grid-cols-1 sm:grid-cols-[1fr,180px] gap-3 items-end">
+              <div>
+                <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5 block">
+                  GST percentage
+                </label>
+                <p className="text-[11px] text-slate-500 leading-relaxed">
+                  Applied on top of every base price below. Default 18% (India standard SaaS slab). Historical invoices keep the rate they were issued at.
+                </p>
+              </div>
+              <div className="relative">
+                <Input
+                  type="number"
+                  min="0"
+                  max="50"
+                  step="0.5"
+                  value={draft.gst_percent}
+                  onChange={(e) => setDraft({ ...draft, gst_percent: e.target.value })}
+                  placeholder="18"
+                />
+                <Percent className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
+              </div>
+            </div>
+
             <div className="space-y-2">
               {PRICING_TERMS.map((t) => {
                 const row = draft.pricing[t.key];
+                const baseNum = parseFloat(row.price) || 0;
+                const gstPct  = Math.max(0, Math.min(50, parseFloat(draft.gst_percent) || 0));
+                const gstAmt  = Math.round(baseNum * (gstPct / 100) * 100) / 100;
+                const total   = Math.round((baseNum + gstAmt) * 100) / 100;
+                const showBreakdown = row.is_enabled && baseNum > 0;
                 return (
                   <div
                     key={t.key}
@@ -550,6 +618,24 @@ export function Plans() {
                         />
                       </div>
                     </div>
+                    {showBreakdown ? (
+                      <div className="col-span-12 pt-1 border-t border-brand-100 dark:border-brand-500/20 mt-1">
+                        <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-[11px]">
+                          <span className="text-slate-500">
+                            Base <span className="font-mono font-semibold text-slate-700 dark:text-slate-300">₹{baseNum.toFixed(2)}</span>
+                          </span>
+                          <span className="text-slate-500">
+                            + GST {gstPct}% <span className="font-mono font-semibold text-slate-700 dark:text-slate-300">₹{gstAmt.toFixed(2)}</span>
+                          </span>
+                          <span className="ml-auto font-bold text-emerald-700 dark:text-emerald-400">
+                            Total Payable ₹{total.toFixed(2)}
+                          </span>
+                          <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10 px-1.5 py-0.5 rounded">
+                            Includes GST
+                          </span>
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
                 );
               })}
@@ -672,6 +758,22 @@ export function Plans() {
                 checked={draft.is_active}
                 onChange={(v) => setDraft({ ...draft, is_active: v })}
                 label="Visible to institutions"
+              />
+            </div>
+          </FormSection>
+
+          {/* Section: Notification Channels — plan-scoped feature
+              flags for outbound comms. The WhatsApp gate defaults
+              OFF; institutions on this plan can only dispatch
+              WhatsApp messages when the toggle is ON. Existing
+              channels (email + in-app) are always available. */}
+          <FormSection title="Notification Channels" icon={Sparkles}>
+            <div className="flex flex-col gap-3">
+              <Toggle
+                checked={draft.whatsapp_notifications_enabled}
+                onChange={(v) => setDraft({ ...draft, whatsapp_notifications_enabled: v })}
+                label="Enable WhatsApp Notifications"
+                description="When ON, institutions on this plan can send WhatsApp messages via the integrated provider. Default is OFF; email + in-app channels remain available regardless."
               />
             </div>
           </FormSection>
@@ -886,14 +988,21 @@ function PlanCard({
 
   const featureList = normaliseFeatures(plan.features);
 
-  // Trial / discount derived data.
+  // Trial / discount / GST derived data. GST is layered on top of the
+  // post-discount effective price so the "Total Payable" line matches
+  // what Razorpay actually charges.
   const trialDays = Number(plan.trial_days) || 0;
   const graceDays = Number(plan.grace_days) || 0;
   const discountOn = !!plan.discount_enabled;
   const discountPct = Number(plan.discount_percent) || 0;
   const effectivePriceVal = discountOn && discountPct > 0
-    ? Math.round(price * (1 - discountPct / 100))
+    ? Math.round(price * (1 - discountPct / 100) * 100) / 100
     : price;
+  const gstPct = Number(plan.gst_percent);
+  const effectiveGstPct = Number.isFinite(gstPct) ? gstPct : 18;
+  const gstAmt = Math.round(effectivePriceVal * (effectiveGstPct / 100) * 100) / 100;
+  const totalPayable = Math.round((effectivePriceVal + gstAmt) * 100) / 100;
+  const fmt2 = (n: number) => `₹${n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
   return (
     <div
@@ -965,6 +1074,26 @@ function PlanCard({
               </span>
             ) : null}
           </div>
+
+          {/* GST breakdown — mirrors the mobile plan card so the admin
+              previews exactly what the institution sees at checkout. */}
+          {price > 0 ? (
+            <div className="mt-2 rounded-lg border border-emerald-100 dark:border-emerald-500/20 bg-emerald-50/60 dark:bg-emerald-500/5 px-2.5 py-1.5">
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-slate-600 dark:text-slate-400">
+                  Base <span className="font-mono font-semibold">{fmt2(effectivePriceVal)}</span>
+                  <span className="mx-1 text-slate-400">·</span>
+                  GST {effectiveGstPct}% <span className="font-mono font-semibold">{fmt2(gstAmt)}</span>
+                </span>
+                <span className="font-bold text-emerald-700 dark:text-emerald-400">
+                  {fmt2(totalPayable)}
+                </span>
+              </div>
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-emerald-700 dark:text-emerald-400 mt-0.5">
+                Total Payable — Includes GST
+              </div>
+            </div>
+          ) : null}
 
           {/* Trial + Grace pills */}
           {(trialDays > 0 || graceDays > 0) ? (

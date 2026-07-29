@@ -6,11 +6,141 @@ const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const { sendStudentCredentialsEmail } = require('../utils/mailer');
 const { dispatchWelcomeSms } = require('../utils/smsService');
+// WhatsApp credentials dispatch — plan-gated + one-shot per call.
+// Fire-and-forget: WhatsApp API outages, plan-not-enabled, or an
+// invalid phone must NEVER fail an otherwise-successful enrolment.
+// The helper below wraps sendStudentCredentialsMessage with a
+// uniform log line so we can grep for the outcome per student.
+const { sendStudentCredentialsMessage: sendStudentCredentialsWhatsApp } = require('../services/whatsapp.service');
+
+// Shared, non-blocking dispatch used at every "credentials just went
+// out" site (offline admin enrolment, post-payment activation, admin
+// resend). `userId` MUST be set so isWhatsAppEnabledForUser() can
+// resolve the institution + plan for the gate check — that's why we
+// always call this AFTER the student's user row is linked to the
+// institution (either via institution_id on the row or via the
+// enrolment we just wrote).
+//
+// Duplicate-send protection: when `enrollmentId` is supplied, we
+// consult enrollments.credentials_wa_sent_at (migration 079). If the
+// row is already stamped the send is skipped; on successful delivery
+// we stamp it so a webhook retry / reload never double-sends. Set
+// `force: true` (used by the admin resend endpoint) to override the
+// stamp AND clear it before delivery so the classic "one-shot per
+// enrolment unless an admin explicitly asks again" behaviour holds.
+//
+// `institutionName` is threaded through to the WhatsApp template so
+// the message can address the student by academy — spec required.
+function dispatchStudentCredentialsWa({
+  userId, phone, studentName, email, password,
+  enrollmentId, institutionName,
+  tag = 'enroll',
+  force = false,
+}) {
+  // Pre-dispatch trace so it's OBVIOUS in the terminal that we
+  // reached the WhatsApp send site. Every silent skip below carries a
+  // matching "→ skipped" line so a missing PRE line means we never
+  // even attempted the send (usually because `if (createdStudentCreds)`
+  // was false — i.e. we reused an existing user).
+  console.log(
+    `[WhatsApp][PRE] student credentials → tag=${tag} user=${userId || 'n/a'} `
+    + `phone=${phone || 'n/a'} enrollment=${enrollmentId || 'n/a'} `
+    + `institution=${institutionName || 'n/a'} force=${!!force}`,
+  );
+  if (!userId || !phone) {
+    console.log(`[WhatsApp] student credentials skipped → tag=${tag} reason=missing-required-data user=${userId || 'n/a'} phone=${phone || 'n/a'}`);
+    return;
+  }
+  (async () => {
+    // Duplicate-send guard. When enrollmentId is present, look up the
+    // stamp; skip if already sent unless the caller explicitly forces
+    // a resend. Missing `credentials_wa_sent_at` column (migration
+    // 079 pending) silently degrades to "no dedup" so a stale schema
+    // never blocks the send.
+    if (enrollmentId && !force) {
+      try {
+        const stamp = await pool.query(
+          `SELECT credentials_wa_sent_at FROM enrollments WHERE id = $1`,
+          [enrollmentId],
+        );
+        if (stamp.rows[0]?.credentials_wa_sent_at) {
+          console.log(
+            `[WhatsApp] student credentials skipped → tag=${tag} enrollment=${enrollmentId} reason=already-sent`,
+          );
+          return;
+        }
+      } catch (err) {
+        if (err?.code === '42703') {
+          // migration 079 not yet applied — carry on without dedup.
+        } else {
+          console.warn(`[WhatsApp] dedup check failed → tag=${tag} error=${err?.message}`);
+        }
+      }
+    }
+
+    let r = { ok: false, error: 'send-not-attempted' };
+    try {
+      r = await sendStudentCredentialsWhatsApp({
+        userId,
+        phone,
+        studentName,
+        institutionName,
+        email,
+        password,
+      });
+    } catch (err) {
+      console.warn(
+        `[WhatsApp] student credentials threw → tag=${tag} user=${userId} error=${err?.message}`,
+      );
+      return;
+    }
+
+    if (r?.ok) {
+      console.log(
+        `[WhatsApp] student credentials delivered → tag=${tag} user=${userId} phone=${phone} messageId=${r.messageId || 'n/a'}`,
+      );
+      // Stamp the enrolment so retries can't double-send. Best-effort
+      // — a failure here doesn't roll back the actual delivery.
+      if (enrollmentId) {
+        try {
+          await pool.query(
+            `UPDATE enrollments
+                SET credentials_wa_sent_at = NOW()
+              WHERE id = $1`,
+            [enrollmentId],
+          );
+        } catch (err) {
+          if (err?.code !== '42703') {
+            console.warn(
+              `[WhatsApp] failed to stamp credentials_wa_sent_at → enrollment=${enrollmentId} error=${err?.message}`,
+            );
+          }
+        }
+      }
+    } else if (r?.skipped) {
+      console.log(
+        `[WhatsApp] student credentials skipped → tag=${tag} user=${userId} reason=${r.skipped}`,
+      );
+    } else {
+      console.warn(
+        `[WhatsApp] student credentials send FAILED → tag=${tag} user=${userId} error=${r?.error || 'unknown'}`,
+      );
+    }
+  })();
+}
 const { ensureCapacity, limitResponse } = require('../utils/planLimits');
 const {
   validateEmailFormat, validatePhoneFormat,
   ensureEmailUnique, ensurePhoneUnique,
 } = require('../utils/contactValidation');
+// Resume Registration / Enrollment (migration 077). Admin-mode student
+// enrolments delegate here so a re-used email/phone that points at an
+// INCOMPLETE student record surfaces a friendly RESUME_AVAILABLE 409.
+const {
+  findResumableRegistration,
+  markRegistrationComplete,
+  resumeAvailableResponse,
+} = require('../utils/registrationStatus');
 // Branch-scope filter — main admins only see main-institution batches'
 // students; sub-branch admins only see their own branch's students.
 const { getBranchScope, batchBranchClause } = require('../utils/branchScope');
@@ -106,8 +236,43 @@ exports.getEnrollmentsForMyInstitution = async (req, res) => {
                         SELECT id FROM institutions
                          WHERE parent_institution_id = $1
                       ))`;
-    const branchClause = batchBranchClause(scope, 'b', params);
-    if (branchClause) where += ` AND ${branchClause}`;
+
+    // Branch View override — the Institution Home dashboard passes
+    // ?branch_id=X when the admin drilled into a specific branch's
+    // tile. `0` maps to "Main institution only" (b.branch_id IS NULL),
+    // a positive int locks to that branch. Sub-branch admins can't
+    // override (they only see their own branch anyway); an invalid
+    // id is silently ignored so a stale link never leaks another
+    // academy's data.
+    let usedOverride = false;
+    if (!scope.isSubBranchAdmin && req.query.branch_id !== undefined) {
+      const raw = parseInt(req.query.branch_id, 10);
+      if (Number.isFinite(raw) && raw >= 0) {
+        if (raw === 0) {
+          where += ` AND b.branch_id IS NULL`;
+          usedOverride = true;
+        } else {
+          // Validate the branch belongs to the caller's tree so a
+          // spoofed id can't spy on another academy.
+          const bRow = await pool.query(
+            `SELECT id FROM institutions
+              WHERE id = $1
+                AND (id = $2 OR parent_institution_id = $2)
+                AND deleted_at IS NULL`,
+            [raw, scope.rootId],
+          );
+          if (bRow.rows.length > 0) {
+            params.push(raw);
+            where += ` AND b.branch_id = $${params.length}`;
+            usedOverride = true;
+          }
+        }
+      }
+    }
+    if (!usedOverride) {
+      const branchClause = batchBranchClause(scope, 'b', params);
+      if (branchClause) where += ` AND ${branchClause}`;
+    }
 
     const result = await pool.query(
       `SELECT
@@ -240,6 +405,21 @@ exports.enrollInBatch = async (req, res) => {
       const pFmt = validatePhoneFormat(contact_number, { required: false });
       if (!pFmt.ok) return res.status(pFmt.status).json(pFmt.body);
       const cleanEmail = eFmt.value;
+
+      // ── Resume Registration probe ─────────────────────────────────
+      // The spec forbids reserving an email/phone until the enrolment
+      // fully completes. So before we go looking for a live user
+      // match, ask registrationStatus whether this email/phone maps
+      // to an INCOMPLETE student — if so, surface RESUME_AVAILABLE
+      // (client shows the "Would you like to continue where you left
+      // off?" prompt) unless the admin opted in with { resume: true }.
+      const resumeLookup = await findResumableRegistration({
+        email: cleanEmail, phone: pFmt.value, role: 'student',
+      });
+      const resumeFlag = req.body?.resume === true;
+      if (resumeLookup.status === 'incomplete' && !resumeFlag) {
+        return res.status(409).json(resumeAvailableResponse(resumeLookup));
+      }
 
       // ── Phone uniqueness ─────────────────────────────────────────
       // We check the phone against every other user globally. If this
@@ -605,6 +785,17 @@ exports.enrollInBatch = async (req, res) => {
 
     await client.query('COMMIT');
 
+    // Terminal state for a student's Resume Registration flow: the
+    // enrolment is written, the institution is linked, and (for the
+    // offline path) the login is fully activated. Stamp
+    // registration_completed_at so a future submission of the same
+    // email/phone gets the classic EMAIL_TAKEN response instead of
+    // the resume prompt. Fire post-commit and via
+    // markRegistrationComplete (which swallows a 42703 when
+    // migration 077 hasn't been applied yet) so a stale schema
+    // never rolls back an otherwise-successful enrolment.
+    markRegistrationComplete(studentId).catch(() => { /* logged inside */ });
+
     // Fire-and-forget: if this enrolment pushed the institution over its
     // max_students cap, notify the owner so they can upgrade. We do this
     // OUTSIDE the transaction so a notification write hiccup never blocks
@@ -644,6 +835,12 @@ exports.enrollInBatch = async (req, res) => {
     // doesn't fail the enrollment (the account exists and the admin can
     // re-share the password manually if needed).
     if (createdStudentCreds) {
+      // Look up institution name + course name once — both email +
+      // WhatsApp templates want the academy in the copy. Hoisted out
+      // of the try so a mail failure doesn't rob the WhatsApp send
+      // of its institutionName.
+      let institutionNameForCreds = 'your academy';
+      let courseNameForCreds = null;
       try {
         const inst = await pool.query(
           `SELECT i.name, c.name AS course_name
@@ -653,10 +850,12 @@ exports.enrollInBatch = async (req, res) => {
             WHERE b.id = $1`,
           [batch_id],
         );
+        institutionNameForCreds = inst.rows[0]?.name || institutionNameForCreds;
+        courseNameForCreds      = inst.rows[0]?.course_name || null;
         const mailResult = await sendStudentCredentialsEmail({
           ...createdStudentCreds,
-          institutionName: inst.rows[0]?.name || 'your academy',
-          courseName:      inst.rows[0]?.course_name || null,
+          institutionName: institutionNameForCreds,
+          courseName:      courseNameForCreds,
         });
         if (!mailResult.ok) {
           console.warn('[enroll] student credentials email failed:', mailResult.error);
@@ -677,6 +876,22 @@ exports.enrollInBatch = async (req, res) => {
           tempPassword: createdStudentCreds.password,
         });
       }
+
+      // WhatsApp credentials (fire-and-forget, plan-gated). Sent AFTER
+      // the enrolment is committed AND the account row is created.
+      // Duplicate-send protection via enrollments.credentials_wa_sent_at
+      // (migration 079) so a webhook retry / admin retry can't
+      // deliver a second WhatsApp for the same enrolment.
+      dispatchStudentCredentialsWa({
+        userId:          studentId,
+        phone:           createdStudentCreds.phone,
+        studentName:     createdStudentCreds.name,
+        email:           createdStudentCreds.loginEmail,
+        password:        createdStudentCreds.password,
+        enrollmentId:    result.rows[0]?.id,
+        institutionName: institutionNameForCreds,
+        tag:             'offline-admin-enroll',
+      });
     }
 
     // Tailor the message:
@@ -898,6 +1113,10 @@ exports.activateStudentAfterPayment = async function (enrollmentId) {
        WHERE id = $2`,
       [hashed, row.student_id],
     );
+    // Resume Registration completion stamp — done separately so a
+    // stale schema (missing `registration_completed_at` before
+    // migration 077 is applied) doesn't rollback the activation.
+    markRegistrationComplete(row.student_id).catch(() => { /* logged inside */ });
 
     // Send credentials email — same helper the offline / trainer
     // flows already use, so the copy stays consistent.
@@ -947,6 +1166,25 @@ exports.activateStudentAfterPayment = async function (enrollmentId) {
         tempPassword,
       });
     }
+
+    // WhatsApp credentials (fire-and-forget, plan-gated). The
+    // idempotency guard above (`row.user_status === 'active'` early
+    // return) already prevents a webhook retry from double-sending
+    // this message — a paid student is only activated once. Even so
+    // we pass `enrollmentId` so the per-enrolment stamp acts as a
+    // second belt-and-braces guard against retries that slip past
+    // the alreadyActive check (e.g. two webhooks racing on the same
+    // link_id before the UPDATE lands).
+    dispatchStudentCredentialsWa({
+      userId:          row.student_id,
+      phone:           row.student_phone,
+      studentName:     row.student_name,
+      email:           row.student_email,
+      password:        tempPassword,
+      enrollmentId:    enrollmentId,
+      institutionName: row.institution_name,
+      tag:             'activate-after-payment',
+    });
 
     return {
       ok:                true,
@@ -1401,6 +1639,39 @@ exports.resendStudentCredentials = async (req, res) => {
         loginId:      row.student_email,
         tempPassword,
       });
+    }
+
+    // WhatsApp credentials (fire-and-forget, plan-gated). Admin
+    // explicitly requested a resend, so a duplicate-send guard is
+    // intentionally NOT applied here — that's the whole point of the
+    // endpoint. The plan gate + phone presence still protect it from
+    // firing on institutions that never opted into WhatsApp.
+    dispatchStudentCredentialsWa({
+      userId:          row.student_id,
+      phone:           row.student_phone,
+      studentName:     row.student_name,
+      email:           row.student_email,
+      password:        tempPassword,
+      enrollmentId:    enrollmentId,
+      institutionName: row.institution_name,
+      tag:             'admin-resend',
+      // Admin explicitly requested a fresh delivery — bypass the
+      // per-enrolment dedup stamp and clear it inline so the next
+      // organic send (if any) starts clean.
+      force:           true,
+    });
+    // Clear the stamp so `force: true` above lands on a fresh row.
+    // Best-effort — a schema pre-079 has no column and the query
+    // will 42703, which we swallow silently.
+    try {
+      await pool.query(
+        `UPDATE enrollments SET credentials_wa_sent_at = NULL WHERE id = $1`,
+        [enrollmentId],
+      );
+    } catch (err) {
+      if (err?.code !== '42703') {
+        console.warn(`[resendStudentCredentials] clear stamp failed: ${err?.message}`);
+      }
     }
 
     console.log(
@@ -2533,19 +2804,40 @@ exports.updateStudentByAdmin = async (req, res) => {
 // ─── Admin: delete a student ───────────────────────────────────────
 // DELETE /api/enrollments/student/:userId
 //
-// Used by the Students tab (institution + branch login) to remove a
-// student the admin has access to. Soft-delete pattern — same as the
-// trainer delete flow (see trainer.controller.js `deleteTrainer`):
-//   • Flip users.is_deleted = TRUE and stamp deleted_at / deleted_by.
-//     Preserves audit history (enrollments / attendance FK to the user
-//     stay intact) while, thanks to migration 050's partial unique
-//     indexes, freeing the email/phone for reuse.
-//   • Also mark the user 'inactive' so future sign-in is rejected.
+// Used by the Students tab (institution + branch login) to permanently
+// remove a student the admin has access to. HARD delete — every row
+// linked to this student is purged inside a single transaction:
+//
+//   • users
+//   • student_profiles           (ON DELETE CASCADE)
+//   • enrollments                (ON DELETE CASCADE)
+//   • attendance + attendance_audit (ON DELETE CASCADE)
+//   • leave_requests             (ON DELETE CASCADE)
+//   • notifications              (ON DELETE CASCADE)
+//   • performance_reports        (ON DELETE CASCADE)
+//   • student_belt_promotions +
+//     certificates               (ON DELETE CASCADE)
+//   • student_curriculum_progress + student_lesson_feedback (ON DELETE CASCADE)
+//   • event_payments             (ON DELETE CASCADE)
+//   • feedback                   (ON DELETE CASCADE)
+//   • course_completions         (ON DELETE CASCADE)
+//   • account_activity_log       (ON DELETE CASCADE)
+//   • invoices                   (enrollment_id → ON DELETE SET NULL,
+//                                 so we MANUALLY purge them before the
+//                                 cascade so payment records are gone
+//                                 too, per spec.)
+//
+// account_deletion_audit stays as a tamper-evident tombstone — the row
+// carries user_id / role / email / phone snapshots but no FK, so it
+// survives even after the identifying rows are gone.
 //
 // Branch scope: the admin must have visibility into the student per the
 // existing rules (main admin → student enrolled in a main-institution
 // batch; sub-branch admin → student enrolled in one of THEIR branch's
 // batches). Enforced via the shared adminCanSeeStudent() helper.
+//
+// Everything runs inside BEGIN … COMMIT. Any error rolls the entire
+// transaction back so a partial deletion is impossible.
 exports.deleteStudentByAdmin = async (req, res) => {
   const adminId   = req.user.id || req.user.userId;
   const studentId = parseInt(req.params.userId, 10);
@@ -2555,14 +2847,15 @@ exports.deleteStudentByAdmin = async (req, res) => {
 
   const client = await pool.connect();
   try {
-    // Branch scope check — same guard used by updateStudentByAdmin.
+    // ── Authorization: same guards used by updateStudentByAdmin ──
     const { adminCanSeeStudent } = require('../utils/branchScope');
     const scope = await getBranchScope(adminId);
     if (!scope) {
       return res.status(403).json({ message: 'Admin not linked to an institution' });
     }
     const studentRow = await pool.query(
-      'SELECT id, name, institution_id FROM users WHERE id = $1 AND role = $2',
+      `SELECT id, name, email, phone, institution_id
+         FROM users WHERE id = $1 AND role = $2`,
       [studentId, 'student'],
     );
     const student = studentRow.rows[0];
@@ -2575,27 +2868,100 @@ exports.deleteStudentByAdmin = async (req, res) => {
       return res.status(403).json({ message: 'Student not in your branch' });
     }
 
-    await client.query('BEGIN');
-    // Soft-delete the user row + mark inactive.
-    await client.query(
-      `UPDATE users
-          SET is_deleted = TRUE,
-              deleted_at = CURRENT_TIMESTAMP,
-              deleted_by = $2,
-              status     = 'inactive'
-        WHERE id = $1`,
-      [studentId, adminId],
+    // ── Pre-flight schema probe (OUTSIDE the transaction) ──────────
+    // Postgres poisons a transaction after ANY statement error — even
+    // one we catch — so we can't just try/catch 42P01 inside BEGIN.
+    // Ask information_schema which optional tables actually exist and
+    // only include the statements we know will succeed.
+    const schemaProbe = await pool.query(
+      `SELECT
+         to_regclass('public.invoices')                 IS NOT NULL AS has_invoices,
+         to_regclass('public.account_deletion_audit')   IS NOT NULL AS has_audit`,
     );
+    const hasInvoices = !!schemaProbe.rows[0]?.has_invoices;
+    const hasAudit    = !!schemaProbe.rows[0]?.has_audit;
+
+    // Capture enrolment ids BEFORE the txn so the DELETE FROM
+    // invoices below doesn't need a preceding SELECT inside the
+    // transaction (keeps the txn footprint minimal).
+    const erPre = await pool.query(
+      'SELECT id FROM enrollments WHERE student_id = $1',
+      [studentId],
+    );
+    const enrollmentIds = erPre.rows.map((r) => r.id);
+
+    // ── Hard delete transaction ────────────────────────────────────
+    await client.query('BEGIN');
+
+    // 1. Purge invoices that reference the student's enrolments.
+    //    `invoices.enrollment_id` uses ON DELETE SET NULL, so without
+    //    this the invoice row would survive the cascade with a NULL
+    //    enrollment_id. Spec: "payments/related records" must be
+    //    permanently deleted.
+    if (hasInvoices && enrollmentIds.length > 0) {
+      await client.query(
+        `DELETE FROM invoices WHERE enrollment_id = ANY($1::int[])`,
+        [enrollmentIds],
+      );
+    }
+
+    // 2. Write the audit tombstone BEFORE the user row disappears
+    //    so we always have a permanent record of who removed what.
+    //    account_deletion_audit has no FK, so it survives the cascade.
+    if (hasAudit) {
+      await client.query(
+        `INSERT INTO account_deletion_audit
+           (user_id, role_snapshot, email_snapshot, phone_snapshot,
+            institution_id, initiated_by, metadata)
+         VALUES ($1, 'student', $2, $3, $4, 'admin', $5::jsonb)`,
+        [
+          studentId,
+          student.email || null,
+          student.phone || null,
+          student.institution_id || null,
+          JSON.stringify({
+            deleted_by_admin_id: adminId,
+            enrollment_count:    enrollmentIds.length,
+            reason:              'admin_hard_delete',
+          }),
+        ],
+      );
+    }
+
+    // 3. Cascade the user delete. Every table with an
+    //    `ON DELETE CASCADE` referencing users.id (student_profiles,
+    //    enrollments, attendance, notifications, leave_requests,
+    //    performance_reports, student_belt_promotions, certificates,
+    //    student_curriculum_progress, event_payments, feedback,
+    //    course_completions, attendance_audit, account_activity_log,
+    //    …) is emptied automatically.
+    const del = await client.query(
+      'DELETE FROM users WHERE id = $1 AND role = $2 RETURNING id',
+      [studentId, 'student'],
+    );
+    if (del.rowCount === 0) {
+      // Shouldn't happen — we just SELECTed the row above — but roll
+      // back so we never return success on a phantom delete.
+      throw new Error('Student row not deleted (concurrent modification?)');
+    }
+
     await client.query('COMMIT');
 
-    res.json({
-      message: `${student.name} has been removed. Their email and phone are now free for reuse.`,
-      student_id: studentId,
+    console.log(
+      `[deleteStudentByAdmin] hard-deleted student=${studentId} by admin=${adminId}, enrollments=${enrollmentIds.length}`,
+    );
+    return res.json({
+      message: `${student.name} and all their data have been permanently removed.`,
+      student_id:       studentId,
+      enrollments_purged: enrollmentIds.length,
     });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('deleteStudentByAdmin error:', err);
-    res.status(500).json({ message: 'Server error', error: err.message });
+    return res.status(500).json({
+      message: 'Failed to delete student. Nothing was changed.',
+      error:   err.message,
+    });
   } finally {
     client.release();
   }

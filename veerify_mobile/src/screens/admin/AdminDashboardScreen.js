@@ -18,7 +18,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet,
   Dimensions, Image, Alert, ActivityIndicator, RefreshControl,
-  Linking,
+  Linking, Modal, FlatList,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import {
@@ -26,7 +26,7 @@ import {
   TrendingUp, ClipboardCheck, UserPlus, CalendarPlus,
   Megaphone, BellPlus, ChevronRight, BookOpen,
   Clock, AlertTriangle, Lock, CheckCircle2,
-  CalendarOff, Gift,
+  CalendarOff, Gift, Building2, ChevronDown, X as XIcon,
 } from 'lucide-react-native';
 import { LineChart } from 'react-native-chart-kit';
 
@@ -123,13 +123,34 @@ export default function AdminDashboardScreen({ navigation }) {
   // it doesn't wipe out the other stats.
   const [todayAtt, setTodayAtt] = useState(null);
 
-  const load = useCallback(async () => {
+  // ── Branch view state (spec: Institution Home Dashboard – Branch View) ─
+  // `branches` — the list of sub-branches under this academy. Populated
+  //   lazily; only fetched when the dashboard tells us the plan supports
+  //   branches AND the academy actually has at least one branch.
+  // `selectedBranch` — { id, name } | null. NULL means the default
+  //   "whole academy" view (all sections visible). Non-null triggers
+  //   the branch-only view — analytics tiles ONLY, no charts / no
+  //   quick actions.
+  // `branchPickerOpen` — modal visibility for the branch picker sheet.
+  const [branches, setBranches] = useState([]);
+  const [selectedBranch, setSelectedBranch] = useState(null);
+  const [branchPickerOpen, setBranchPickerOpen] = useState(false);
+
+  const load = useCallback(async (branchIdArg) => {
     try {
+      // Resolve the branch filter — arg wins so the picker's onChange
+      // can pass a fresh id without waiting for setState.
+      const filterId = branchIdArg !== undefined
+        ? branchIdArg
+        : (selectedBranch?.id ?? null);
+      const dashUrl = filterId != null
+        ? `/admin/dashboard?branch_id=${encodeURIComponent(filterId)}`
+        : '/admin/dashboard';
       // All three ride the same refresh so pull-to-refresh updates
       // everything at once. .catch on the non-critical ones keeps the
       // dashboard from failing entirely if any single endpoint hiccups.
       const [dashRes, subRes, attRes] = await Promise.all([
-        apiClient.get('/admin/dashboard'),
+        apiClient.get(dashUrl),
         apiClient.get('/onboarding/subscription-status').catch((err) => {
           console.log('[AdminDashboard] subscription-status error:', err.message);
           return null;
@@ -142,6 +163,32 @@ export default function AdminDashboardScreen({ navigation }) {
       setData(dashRes.data || {});
       if (subRes && subRes.data) setSubscription(subRes.data);
       setTodayAtt(attRes?.data?.today || null);
+
+      // Populate the branch list when the dashboard says branches are
+      // enabled AND we don't already have them. Sub-branch admins
+      // never see the picker so we skip the fetch for them.
+      const d = dashRes.data || {};
+      const branchesEnabled = !d.is_sub_branch
+        && Number(d.plan_max_branches || 1) > 1
+        && Number(d.branch_count || 0) > 0;
+      if (branchesEnabled && branches.length === 0) {
+        try {
+          const br = await apiClient.get('/branches');
+          // Only sub-branches (they own batches). Satellite locations
+          // are just extra map pins — irrelevant here.
+          const subs = (br.data?.branches || []).filter(
+            (b) => b.branch_kind === 'sub_branch',
+          );
+          setBranches(subs);
+        } catch (err) {
+          console.log('[AdminDashboard] branches fetch error:', err.message);
+        }
+      } else if (!branchesEnabled) {
+        // Plan downgraded or all branches removed → wipe local state
+        // so the dropdown never lingers with stale rows.
+        if (branches.length > 0) setBranches([]);
+        if (selectedBranch) setSelectedBranch(null);
+      }
     } catch (err) {
       // Leave the previous snapshot in place on transient errors so the
       // screen doesn't flash zeros.
@@ -150,10 +197,32 @@ export default function AdminDashboardScreen({ navigation }) {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [selectedBranch, branches.length]);
 
   // Refetch when the screen regains focus (after Add Course / Add Batch etc.)
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  // Whether the branch picker should render at all. Derived from the
+  // last dashboard response — the same signals the load() effect
+  // consults, so the two stay in sync.
+  const branchesEnabled = !data.is_sub_branch
+    && Number(data.plan_max_branches || 1) > 1
+    && Number(data.branch_count || 0) > 0
+    && branches.length > 0;
+
+  // Whether we're currently rendering the "single branch analytics"
+  // view. Branch view is the trimmed layout — five tiles only, no
+  // trainers card, no charts, no quick actions.
+  const branchView = !!selectedBranch;
+
+  const onPickBranch = useCallback((branch) => {
+    // Collapse the inline dropdown, apply the new branch, kick a
+    // fresh fetch. Passing branchId explicitly avoids a stale-
+    // selection race with setState batching.
+    setBranchPickerOpen(false);
+    setSelectedBranch(branch);
+    load(branch?.id ?? null);
+  }, [load]);
 
   // Greeting prefers the academy name; falls back to the owner's first name
   // if for any reason the institution row hasn't loaded yet.
@@ -356,18 +425,104 @@ export default function AdminDashboardScreen({ navigation }) {
           </View>
         </View>
 
+        {/* ───── Branch dropdown ─────
+            Renders ONLY when the plan supports branches AND the
+            academy actually has at least one sub-branch. Tapping the
+            trigger EXPANDS an inline dropdown right below the row
+            (no bottom sheet) so the branch list appears exactly
+            where the eye is. Selecting a branch flips the dashboard
+            into "branch view" — five analytics tiles only, everything
+            else (chart, activity, quick actions, subscription banner)
+            collapses. Selecting "All (whole academy)" restores the
+            default layout without reloading the page. */}
+        {branchesEnabled ? (
+          <BranchPickerBar
+            selected={selectedBranch}
+            open={branchPickerOpen}
+            branches={branches}
+            onToggle={() => setBranchPickerOpen((v) => !v)}
+            onClear={() => onPickBranch(null)}
+            onPick={onPickBranch}
+          />
+        ) : null}
+
         {/* ───── Subscription banner (trial / grace / locked) ─────
             Hidden when the academy has already paid (phase === 'paid') or
             isn't yet approved (phase === 'pending' / 'registered'). Inside
             the trial it's an informational blue strip; in grace it turns
-            amber + adds Pay Now; after grace it goes red + locks the CTA. */}
-        <SubscriptionBanner
-          subscription={subscription}
-        />
+            amber + adds Pay Now; after grace it goes red + locks the CTA.
+            Also hidden in Branch View so the trimmed layout only has
+            analytics on-screen. */}
+        {branchView ? null : (
+          <SubscriptionBanner
+            subscription={subscription}
+          />
+        )}
 
-        {/* ───── Stats grid (original 6 cards) ───── */}
+        {/* ───── Stats grid ─────
+            Default view: all 6 tiles (Total Students, Trainers,
+            Today's Classes, Pending Fees, Revenue, Today's Attendance).
+            Branch view: only the 5 tiles the spec calls out —
+            Total Students, Attendance %, Today's Classes, Revenue,
+            Pending Fees. We swap "Today's Attendance" for the
+            Attendance % counts.attendance_pct so the tile matches
+            what the picked branch actually reported this month. */}
         <View style={styles.statsGrid}>
-          {stats.reduce((rows, stat, idx) => {
+          {(() => {
+            // Branch View: rebuild the 5 tiles so each carries the
+            // picked branchId as a route param — the destination
+            // screens honour it and re-query with ?branch_id=X so the
+            // list they show contains ONLY that branch's rows.
+            const b = selectedBranch;
+            const brRoute = b ? { branchId: b.id, branchName: b.name } : {};
+            const branchTiles = [
+              {
+                label: 'Total Students',
+                value: String(counts.students || 0),
+                delta: counts.students === 0 ? 'No enrollments yet' : `In ${b?.name || 'this branch'}`,
+                accent: palette.purple,
+                icon: Users,
+                onPress: () => navigation.navigate('Students', brRoute),
+              },
+              {
+                label: 'Attendance %',
+                value: counts.attendance_pct == null ? '—' : `${counts.attendance_pct}%`,
+                delta: counts.attendance_pct == null
+                  ? 'No attendance marked yet'
+                  : 'This month',
+                accent: palette.teal,
+                icon: ClipboardCheck,
+                onPress: () => navigation.navigate('AdminAttendanceOverview', brRoute),
+              },
+              {
+                label: "Today's Classes",
+                value: String(counts.today_classes || 0),
+                delta: counts.today_classes === 0 ? 'No classes today' : `In ${b?.name || 'this branch'}`,
+                accent: palette.green,
+                icon: Calendar,
+                onPress: () => navigation.navigate('BatchesList', brRoute),
+              },
+              {
+                label: 'Revenue',
+                value: fmtINRShort(counts.revenue_this_month || 0),
+                delta: 'This month',
+                accent: palette.pink,
+                icon: TrendingUp,
+                onPress: () => navigation.navigate('Earnings', { ...brRoute, focus: 'revenue' }),
+              },
+              {
+                label: 'Pending Fees',
+                value: fmtINRShort(counts.pending_fees_total || 0),
+                delta: counts.pending_fees_count > 0
+                  ? `${counts.pending_fees_count} ${counts.pending_fees_count === 1 ? 'student' : 'students'}`
+                  : 'All up to date',
+                accent: palette.orange,
+                icon: Wallet,
+                onPress: () => navigation.navigate('Earnings', { ...brRoute, focus: 'pending' }),
+              },
+            ];
+            return branchView ? branchTiles : stats;
+          })().reduce((rows, stat, idx) => {
             if (idx % 2 === 0) rows.push([stat]);
             else rows[rows.length - 1].push(stat);
             return rows;
@@ -384,13 +539,17 @@ export default function AdminDashboardScreen({ navigation }) {
                   onPress={s.onPress}
                 />
               ))}
+              {/* Pad odd-count rows so the last tile keeps its width. */}
+              {row.length === 1 ? <View style={{ flex: 1 }} /> : null}
             </View>
           ))}
         </View>
 
-        {/* ───── Quick actions ───── */}
-        {/* Six tiles in one row look cramped — chunk into rows of 3 so each
-            tile gets ~1/3 of the available width and the labels can breathe. */}
+        {/* ───── Quick actions (hidden in Branch View) ───── */}
+        {/* Branch View intentionally shows only the 5 analytics tiles
+            per spec, so Quick Actions collapse. Sub-branch admins and
+            the default main view keep the full six-tile row of 3. */}
+        {branchView ? null : (
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Quick Actions</Text>
@@ -451,8 +610,10 @@ export default function AdminDashboardScreen({ navigation }) {
             ))}
           </View>
         </View>
+        )}
 
-        {/* ───── Monthly revenue chart ───── */}
+        {/* ───── Monthly revenue chart (hidden in Branch View) ───── */}
+        {branchView ? null : (
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <View style={{ flex: 1 }}>
@@ -491,8 +652,10 @@ export default function AdminDashboardScreen({ navigation }) {
             )}
           </View>
         </View>
+        )}
 
-        {/* ───── Recent activity teaser ───── */}
+        {/* ───── Recent activity teaser (hidden in Branch View) ───── */}
+        {branchView ? null : (
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Recent Activity</Text>
@@ -534,10 +697,14 @@ export default function AdminDashboardScreen({ navigation }) {
             )}
           </View>
         </View>
+        )}
 
         {/* Footer spacer so content clears the floating tab bar + FAB */}
         <View style={{ height: 110 }} />
       </ScrollView>
+
+      {/* Branch picker is now an inline expanding dropdown rendered
+          inside BranchPickerBar above — no bottom-sheet modal. */}
 
       {/* Floating + button hidden — the placeholder "Quick Create" wasn't
           wired to anything useful and was confusing admins. The Quick
@@ -561,6 +728,90 @@ function ActivityRow({ accent, title, meta }) {
         <Text style={styles.activityTitle}>{title}</Text>
         <Text style={styles.activityMeta}>{meta}</Text>
       </View>
+    </View>
+  );
+}
+
+// ── Branch picker (inline dropdown) ─────────────────────────────────
+// Rendered directly below the header. Tapping the trigger toggles an
+// inline expanding panel that lists "All (whole academy)" as the
+// reset row plus one entry per sub-branch. Same shape as the Skills
+// picker on SetupInstitution: no Modal, no bottom sheet — the list
+// simply appears anchored to the trigger and pushes the rest of the
+// dashboard down until the admin picks a branch or taps the trigger
+// again to collapse.
+function BranchPickerBar({ selected, open, branches, onToggle, onClear, onPick }) {
+  const rows = [{ id: null, name: 'All (whole academy)', reset: true }, ...branches];
+  const selectedId = selected?.id ?? null;
+
+  return (
+    <View style={styles.branchBar}>
+      <TouchableOpacity
+        style={[styles.branchTrigger, open && styles.branchTriggerOpen]}
+        activeOpacity={0.85}
+        onPress={onToggle}
+      >
+        <View style={styles.branchIconWrap}>
+          <Building2 size={16} color={palette.purple.vivid} strokeWidth={2.4} />
+        </View>
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text style={styles.branchLabel}>Branch</Text>
+          <Text style={styles.branchValue} numberOfLines={1}>
+            {selected ? selected.name : 'All (whole academy)'}
+          </Text>
+        </View>
+        {selected ? (
+          <TouchableOpacity
+            onPress={onClear}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            style={styles.branchClear}
+          >
+            <XIcon size={14} color={palette.textMuted} strokeWidth={2.4} />
+          </TouchableOpacity>
+        ) : (
+          <ChevronDown
+            size={16}
+            color={palette.textMuted}
+            strokeWidth={2.4}
+            style={{ transform: [{ rotate: open ? '180deg' : '0deg' }] }}
+          />
+        )}
+      </TouchableOpacity>
+
+      {open ? (
+        <View style={styles.branchPanel}>
+          {rows.map((item, idx) => {
+            const isSel = (selectedId ?? null) === (item.id ?? null);
+            return (
+              <React.Fragment key={String(item.id ?? 'all')}>
+                {idx > 0 ? <View style={styles.branchDivider} /> : null}
+                <TouchableOpacity
+                  activeOpacity={0.8}
+                  onPress={() => onPick(item.reset ? null : item)}
+                  style={[styles.branchRow, isSel && styles.branchRowActive]}
+                >
+                  <View style={styles.branchRowIcon}>
+                    <Building2
+                      size={14}
+                      color={item.reset ? palette.textMuted : palette.purple.vivid}
+                      strokeWidth={2.4}
+                    />
+                  </View>
+                  <Text
+                    style={[styles.branchRowName, isSel && styles.branchRowNameActive]}
+                    numberOfLines={1}
+                  >
+                    {item.name}
+                  </Text>
+                  {isSel ? (
+                    <CheckCircle2 size={16} color={palette.green.vivid} strokeWidth={2.4} />
+                  ) : null}
+                </TouchableOpacity>
+              </React.Fragment>
+            );
+          })}
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -888,6 +1139,119 @@ const styles = StyleSheet.create({
   // Stats grid (legacy - kept in case anything else references it)
   statsGrid: { gap: spacing.md, marginBottom: spacing.xxl },
   statsRow: { flexDirection: 'row', gap: spacing.md },
+
+  // ── Branch picker bar ──────────────────────────────────────────
+  branchBar: {
+    marginBottom: spacing.md,
+  },
+  branchTrigger: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 10,
+    backgroundColor: palette.surface,
+    borderWidth: 1,
+    borderColor: palette.borderSoft,
+    borderRadius: radius.md,
+    ...shadows.card,
+  },
+  branchTriggerOpen: {
+    borderBottomLeftRadius: 0,
+    borderBottomRightRadius: 0,
+    borderColor: palette.purple.vivid + '55',
+  },
+  branchPanel: {
+    marginTop: -1,
+    backgroundColor: palette.surface,
+    borderWidth: 1,
+    borderTopWidth: 0,
+    borderColor: palette.purple.vivid + '55',
+    borderBottomLeftRadius: radius.md,
+    borderBottomRightRadius: radius.md,
+    overflow: 'hidden',
+  },
+  branchIconWrap: {
+    width: 30, height: 30, borderRadius: 15,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: (palette.purple?.soft || '#EDE9FE'),
+  },
+  branchLabel: {
+    ...type.micro,
+    color: palette.textMuted,
+    letterSpacing: 1.1,
+    textTransform: 'uppercase',
+    fontWeight: '800',
+  },
+  branchValue: {
+    ...type.body,
+    color: palette.textStrong || palette.text,
+    fontWeight: '800',
+    marginTop: 1,
+  },
+  branchClear: {
+    padding: 4,
+    borderRadius: 999,
+    backgroundColor: palette.borderSoft,
+  },
+
+  // ── Branch picker modal (bottom sheet) ────────────────────────
+  branchModalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.5)',
+    justifyContent: 'flex-end',
+  },
+  branchModalSheet: {
+    backgroundColor: palette.surface,
+    borderTopLeftRadius: radius.lg,
+    borderTopRightRadius: radius.lg,
+    paddingBottom: spacing.xl,
+    maxHeight: '80%',
+  },
+  branchModalHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.lg,
+    paddingBottom: spacing.md,
+  },
+  branchModalTitle: {
+    ...type.h4,
+    fontWeight: '900',
+    color: palette.textStrong || palette.text,
+  },
+  branchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: 12,
+  },
+  branchRowActive: {
+    backgroundColor: (palette.purple?.soft || '#EDE9FE') + '55',
+  },
+  branchRowIcon: {
+    width: 26, height: 26, borderRadius: 13,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: (palette.purple?.soft || '#EDE9FE'),
+  },
+  branchRowName: {
+    ...type.body,
+    color: palette.text,
+    fontWeight: '700',
+    flex: 1,
+    minWidth: 0,
+  },
+  branchRowNameActive: {
+    color: palette.purple.vivid,
+    fontWeight: '900',
+  },
+  branchDivider: {
+    height: 1,
+    backgroundColor: palette.borderSoft,
+    marginHorizontal: spacing.lg,
+  },
 
   // ── Concept D: belt distribution hero ────────────────────────────────
   beltCard: {

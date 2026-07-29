@@ -63,6 +63,43 @@ function fmtINR(n) {
   const v = Number(n) || 0;
   return `₹${v.toLocaleString('en-IN')}`;
 }
+// Two-decimal INR formatter — every GST-inclusive figure on the plan
+// cards uses this so the user sees the same paise-level amount the
+// backend hands to Razorpay.
+function fmtINR2(n) {
+  const v = Number(n) || 0;
+  return `₹${v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+// GST math — half-away-from-zero to two decimals, matching backend
+// utils/gst.js so client-side previews land on the exact same figures
+// as the Razorpay charge.
+function round2(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  return Math.round(n * 100) / 100;
+}
+function computeGstLocal(basePrice, gstPercent) {
+  const base = round2(basePrice);
+  const pct  = Math.max(0, Math.min(50, Number(gstPercent) || 0));
+  const gst  = round2(base * (pct / 100));
+  return { base_price: base, gst_percent: pct, gst_amount: gst, total_payable: round2(base + gst) };
+}
+// Extract GST breakdown from a term row. Prefers the server-computed
+// fields when present (base_price / gst_percent / total_payable) and
+// falls back to local computation using the plan's default rate for
+// older backends.
+function breakdownFor(row, planDefaultPct) {
+  if (!row) return null;
+  const base = Number(row.base_price ?? row.price ?? 0);
+  const pct  = Number.isFinite(Number(row.gst_percent)) ? Number(row.gst_percent) : Number(planDefaultPct) || 0;
+  const gstAmt = Number.isFinite(Number(row.gst_amount))
+    ? Number(row.gst_amount)
+    : round2(base * (pct / 100));
+  const total = Number.isFinite(Number(row.total_payable))
+    ? Number(row.total_payable)
+    : round2(base + gstAmt);
+  return { base_price: base, gst_percent: pct, gst_amount: gstAmt, total_payable: total };
+}
 
 function fmtDate(iso) {
   if (!iso) return '—';
@@ -171,21 +208,37 @@ export default function PricingPlansScreen({ navigation }) {
     const displayPlan = targetPlan || status?.plan || {};
     const displayName = displayPlan.name || 'your plan';
 
-    // Preview amount: prefer the price for the chosen term, fall back to
-    // the plan's legacy singleton price. Server re-computes with
-    // discounts + referral wallet, so this is just a friendly heads-up.
-    let rawPrice = Number(displayPlan.effective_price ?? displayPlan.price ?? 0);
+    // Preview amount: prefer the GST-inclusive total_payable for the
+    // chosen term. Server re-computes with discounts + referral
+    // wallet, so this is just a friendly heads-up — but it uses the
+    // same total_payable the backend charges via Razorpay so users
+    // aren't surprised by the amount on the checkout page.
+    let previewTotal = 0;
+    let previewBreakdown = null;
     if (billingTerm && Array.isArray(displayPlan.pricing_terms)) {
       const t = displayPlan.pricing_terms.find((x) => x.billing_term === billingTerm && x.is_enabled);
-      if (t && Number(t.price) > 0) rawPrice = Number(t.price);
+      previewBreakdown = breakdownFor(t, displayPlan.gst_percent);
+      previewTotal = previewBreakdown?.total_payable || 0;
     }
-    const previewAmount = rawPrice > 0 ? fmtINR(rawPrice) : null;
+    if (!previewTotal) {
+      const legacyBase = Number(displayPlan.effective_price ?? displayPlan.price ?? 0);
+      previewBreakdown = breakdownFor({ price: legacyBase }, displayPlan.gst_percent);
+      previewTotal = previewBreakdown.total_payable;
+    }
+    const previewAmount = previewTotal > 0 ? fmtINR2(previewTotal) : null;
     const termLabel = billingTerm ? TERM_LABEL[billingTerm] || billingTerm : null;
+
+    // Build a compact breakdown line for the confirm body so the user
+    // sees Base / GST / Total Payable inline. Same numbers the
+    // backend uses to mint the Razorpay link.
+    const breakdownLine = previewBreakdown && previewBreakdown.base_price > 0
+      ? `Base ${fmtINR2(previewBreakdown.base_price)} + GST ${previewBreakdown.gst_percent}% (${fmtINR2(previewBreakdown.gst_amount)}) = Total Payable ${fmtINR2(previewBreakdown.total_payable)} (Includes GST)`
+      : null;
 
     confirm({
       title:       `${actionLabel}: ${displayName}${termLabel ? ` · ${termLabel}` : ''}`,
       message:     previewAmount
-        ? `You'll be redirected to Razorpay to pay ${previewAmount} for the ${displayName} plan${termLabel ? ` (${termLabel} billing)` : ''}. Your current subscription stays unchanged until the payment is confirmed.`
+        ? `You'll be redirected to Razorpay to pay ${previewAmount} for the ${displayName} plan${termLabel ? ` (${termLabel} billing)` : ''}.${breakdownLine ? `\n\n${breakdownLine}` : ''}\n\nYour current subscription stays unchanged until the payment is confirmed.`
         : `You'll be redirected to Razorpay for the ${displayName} plan. Your current subscription stays unchanged until the payment is confirmed.`,
       variant:     'info',
       confirmText: 'Continue to payment',
@@ -374,27 +427,38 @@ function BillingTermPicker({ visible, plan, actionLabel, onClose, onPick }) {
             </Text>
           ) : (
             <View style={{ gap: 10 }}>
-              {terms.map((t) => (
-                <TouchableOpacity
-                  key={t.billing_term}
-                  style={styles.termRow}
-                  onPress={() => onPick(t.billing_term)}
-                  activeOpacity={0.85}
-                >
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.termLabel}>
-                      {TERM_LABEL[t.billing_term] || t.billing_term}
-                    </Text>
-                    <Text style={styles.termHint}>
-                      {t.billing_term === 'monthly'     ? 'Billed every month'
-                       : t.billing_term === 'quarterly' ? 'Billed every 3 months'
-                       : t.billing_term === 'half_yearly' ? 'Billed every 6 months'
-                       : 'Billed once per year'}
-                    </Text>
-                  </View>
-                  <Text style={styles.termPrice}>{fmtINR(Number(t.price))}</Text>
-                </TouchableOpacity>
-              ))}
+              {terms.map((t) => {
+                const b = breakdownFor(t, plan.gst_percent);
+                return (
+                  <TouchableOpacity
+                    key={t.billing_term}
+                    style={styles.termRow}
+                    onPress={() => onPick(t.billing_term)}
+                    activeOpacity={0.85}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.termLabel}>
+                        {TERM_LABEL[t.billing_term] || t.billing_term}
+                      </Text>
+                      <Text style={styles.termHint}>
+                        {t.billing_term === 'monthly'     ? 'Billed every month'
+                         : t.billing_term === 'quarterly' ? 'Billed every 3 months'
+                         : t.billing_term === 'half_yearly' ? 'Billed every 6 months'
+                         : 'Billed once per year'}
+                      </Text>
+                      {b ? (
+                        <Text style={styles.termBreakdown}>
+                          Base {fmtINR2(b.base_price)} + GST {b.gst_percent}% ({fmtINR2(b.gst_amount)})
+                        </Text>
+                      ) : null}
+                    </View>
+                    <View style={{ alignItems: 'flex-end' }}>
+                      <Text style={styles.termPrice}>{fmtINR2(b?.total_payable || 0)}</Text>
+                      <Text style={styles.termIncludesGst}>Includes GST</Text>
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
             </View>
           )}
         </View>
@@ -463,6 +527,16 @@ function CurrentPlanCard({ status, onAction }) {
       showAction: paymentReady,
     },
     grace:   { label: 'Pending',      color: AMBER, icon: AlertTriangle, action: 'Pay now',   showAction: true  },
+    // Post-payment grace (migration 075). Subscription expired but
+    // we're still inside the 3-day grace — banner shows the
+    // "Renew within N days" copy and Pay Now stays hot.
+    paid_grace: {
+      label:      'Subscription Expired',
+      color:      BRAND,
+      icon:       AlertTriangle,
+      action:     'Renew now',
+      showAction: true,
+    },
     locked:  { label: 'Pending',      color: BRAND, icon: Lock,         action: 'Pay now',   showAction: true  },
     expired: { label: 'Expired',      color: BRAND, icon: AlertTriangle, action: 'Renew now', showAction: true  },
     pending: { label: 'Awaiting approval', color: SLATE, icon: Clock,   action: '',          showAction: false },
@@ -477,6 +551,11 @@ function CurrentPlanCard({ status, onAction }) {
     daysBadge = `${status.days_left_in_trial} day${status.days_left_in_trial === 1 ? '' : 's'} left in trial`;
   } else if (phase === 'grace' && status?.days_left_in_grace != null) {
     daysBadge = `${status.days_left_in_grace} day${status.days_left_in_grace === 1 ? '' : 's'} left in grace`;
+  } else if (phase === 'paid_grace' && status?.days_left_in_paid_grace != null) {
+    // Post-payment grace countdown per spec: 3 → 2 → 1 → 0.
+    daysBadge = status.days_left_in_paid_grace <= 0
+      ? 'Grace period ended today'
+      : `Renew within ${status.days_left_in_paid_grace} day${status.days_left_in_paid_grace === 1 ? '' : 's'}`;
   } else if (phase === 'paid' && isRenewalDue && daysToRenewal >= 0) {
     daysBadge = daysToRenewal === 0
       ? 'Renews today'
@@ -510,9 +589,32 @@ function CurrentPlanCard({ status, onAction }) {
 
           {/* Price */}
           <View style={styles.priceRow}>
-            <Text style={styles.priceValue}>{fmtINR(price)}</Text>
+            <Text style={styles.priceValue}>{fmtINR2(price)}</Text>
             <Text style={styles.priceCycle}>/{cycle === 'yearly' ? 'year' : 'month'}</Text>
           </View>
+
+          {/* GST breakdown — Base / GST / Total Payable line so the
+              user knows exactly what Razorpay is charging next renewal. */}
+          {price > 0 ? (() => {
+            const gstPct = Number.isFinite(Number(plan.gst_percent)) ? Number(plan.gst_percent) : 18;
+            const gstAmt = Number(plan.gst_amount ?? round2(price * (gstPct / 100)));
+            const total  = Number(plan.total_payable ?? round2(price + gstAmt));
+            return (
+              <View style={styles.gstBox}>
+                <Text style={styles.gstLine}>
+                  <Text style={styles.gstMuted}>Base </Text>
+                  <Text style={styles.gstMono}>{fmtINR2(price)}</Text>
+                  <Text style={styles.gstMuted}>  ·  GST {gstPct}% </Text>
+                  <Text style={styles.gstMono}>{fmtINR2(gstAmt)}</Text>
+                </Text>
+                <View style={styles.gstTotalRow}>
+                  <Text style={styles.gstTotalLabel}>Total Payable</Text>
+                  <Text style={styles.gstTotalValue}>{fmtINR2(total)}</Text>
+                </View>
+                <Text style={styles.gstNote}>Includes GST</Text>
+              </View>
+            );
+          })() : null}
         </View>
 
         {plan.image_url ? (
@@ -627,13 +729,19 @@ function PlanRow({ plan, currentPrice, onPress }) {
     actionColor = SLATE;
   }
 
+  // GST breakdown for the plan row. Prefer server-computed fields;
+  // fall back to computing locally against the plan's default rate.
+  const gstPct   = Number.isFinite(Number(plan.gst_percent)) ? Number(plan.gst_percent) : 18;
+  const gstAmt   = Number(plan.gst_amount ?? round2(price * (gstPct / 100)));
+  const total    = Number(plan.total_payable ?? round2(price + gstAmt));
+
   return (
     <TouchableOpacity style={styles.planRow} onPress={onPress} activeOpacity={0.88}>
       <View style={styles.planLeft}>
         <Text style={styles.planRowName} numberOfLines={1}>{plan.name}</Text>
         <View style={styles.planRowMeta}>
           <Text style={styles.planRowPrice}>
-            {fmtINR(price)}
+            {fmtINR2(price)}
             <Text style={styles.planRowCycle}>
               /{plan.billing_cycle === 'yearly' ? 'yr' : 'mo'}
             </Text>
@@ -641,6 +749,16 @@ function PlanRow({ plan, currentPrice, onPress }) {
           <Text style={styles.planRowCaps}>
             {fmtCap(plan.max_students)} students · {fmtCap(plan.max_trainers)} trainers
           </Text>
+          {price > 0 ? (
+            <View style={styles.planRowGst}>
+              <Text style={styles.planRowGstText}>
+                +GST {gstPct}% ({fmtINR2(gstAmt)})
+              </Text>
+              <Text style={styles.planRowGstTotal}>
+                Total {fmtINR2(total)}
+              </Text>
+            </View>
+          ) : null}
         </View>
         {plan.is_popular ? (
           <View style={styles.popularBadge}>
@@ -966,5 +1084,54 @@ const styles = StyleSheet.create({
   },
   termLabel: { fontSize: 14, fontWeight: '800', color: TEXT },
   termHint:  { fontSize: 11, color: TEXT_MUTED, marginTop: 2, fontWeight: '600' },
+  termBreakdown: {
+    fontSize: 11, color: TEXT_MUTED, marginTop: 4, fontWeight: '600',
+  },
   termPrice: { fontSize: 16, fontWeight: '900', color: BRAND, letterSpacing: -0.2 },
+  termIncludesGst: {
+    fontSize: 9, color: GREEN, fontWeight: '800',
+    letterSpacing: 0.4, marginTop: 2, textTransform: 'uppercase',
+  },
+
+  // GST box on the CurrentPlanCard — thin bordered strip that
+  // shows Base / GST / Total Payable in a single glance.
+  gstBox: {
+    marginTop: 8,
+    backgroundColor: GREEN + '0F',
+    borderColor: GREEN + '33',
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  gstLine: { fontSize: 11, color: TEXT_MUTED, fontWeight: '600' },
+  gstMuted: { color: TEXT_MUTED },
+  gstMono: { color: TEXT, fontWeight: '800', fontVariant: ['tabular-nums'] },
+  gstTotalRow: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline',
+    marginTop: 4,
+  },
+  gstTotalLabel: { fontSize: 11, color: TEXT, fontWeight: '800' },
+  gstTotalValue: {
+    fontSize: 14, color: GREEN, fontWeight: '900',
+    fontVariant: ['tabular-nums'], letterSpacing: -0.2,
+  },
+  gstNote: {
+    fontSize: 9, color: GREEN, fontWeight: '800',
+    letterSpacing: 0.6, marginTop: 2, textTransform: 'uppercase',
+  },
+
+  // Small GST breakdown chip under the PlanRow price.
+  planRowGst: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: 8,
+    marginTop: 4,
+    flexWrap: 'wrap',
+  },
+  planRowGstText: { fontSize: 10, color: TEXT_MUTED, fontWeight: '700' },
+  planRowGstTotal: {
+    fontSize: 11, color: GREEN, fontWeight: '800',
+    fontVariant: ['tabular-nums'],
+  },
 });
