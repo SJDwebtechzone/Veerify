@@ -12,6 +12,15 @@ router.get('/',              verifyToken, notif.list);
 router.get('/unread-count',  verifyToken, notif.unreadCount);
 router.post('/:id/read',     verifyToken, notif.markRead);
 router.post('/read-all',     verifyToken, notif.markAllRead);
+
+// FCM push token lifecycle. MUST be registered BEFORE the generic
+// /:id routes below — Express matches in registration order, so
+// without this the literal "/fcm-token" would fall through to
+// `router.delete('/:id', notif.remove)` and try to cast "fcm-token"
+// to an integer (22P02 on the notifications inbox delete).
+router.post('/fcm-token',    verifyToken, notif.registerFcmToken);
+router.delete('/fcm-token',  verifyToken, notif.revokeFcmToken);
+
 router.delete('/:id',     verifyToken, notif.remove);
 
 // Sent history — what *this* user has dispatched, grouped per send event.
@@ -36,10 +45,8 @@ router.post('/pending/:id/reject',  verifyToken, requireRole('admin'),  notif.re
 // the route itself stays open so existing clients keep working.
 router.post('/announce',  verifyToken, requireRole('trainer', 'admin'), notif.announce);
 
-// FCM push token lifecycle. The mobile posts here right after
-// permission grant + on every onTokenRefresh event. DELETE with
-// no body wipes every token the calling user owns (used on logout).
-router.post('/fcm-token',    verifyToken, notif.registerFcmToken);
-router.delete('/fcm-token',  verifyToken, notif.revokeFcmToken);
+// FCM push token routes moved above router.delete('/:id', ...) — see the
+// literal-before-param note near the top of this file. Duplicate
+// registrations here removed to keep a single source of truth.
 
 module.exports = router;
