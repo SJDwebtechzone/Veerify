@@ -21,9 +21,35 @@
 // bell is unaffected regardless.
 
 import { Alert, PermissionsAndroid, Platform } from 'react-native';
-import messaging from '@react-native-firebase/messaging';
 import apiClient from '../api/client';
 import { navigationRef } from '../navigation/navigationRef';
+
+// Lazy, guarded import of @react-native-firebase/messaging. When the
+// native module hasn't been linked yet (fresh `npm install` without
+// an Android/iOS rebuild), requiring the package throws
+// "Native module RNFBAppModule not found" at eval time and takes the
+// whole app down. Wrapping the require() in a helper lets the rest
+// of the app boot; every public API in this file bails cleanly with
+// a { ok: false, skipped: 'firebase-native-module-missing' } shape.
+let messaging = null;
+let messagingLoaded = false;
+function getMessaging() {
+  if (messagingLoaded) return messaging;
+  messagingLoaded = true;
+  try {
+    // eslint-disable-next-line global-require
+    messaging = require('@react-native-firebase/messaging').default;
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[fcm] native module missing — FCM disabled. Rebuild the app after '
+      + 'installing @react-native-firebase/messaging. Detail:',
+      err && err.message,
+    );
+    messaging = null;
+  }
+  return messaging;
+}
 
 // Map a notification's `data.screen` (set by the backend when it
 // creates the row) to a mobile route. If the target screen doesn't
@@ -42,6 +68,8 @@ function safeParseParams(raw) {
 }
 
 async function ensurePermission() {
+  const m = getMessaging();
+  if (!m) return false;
   try {
     if (Platform.OS === 'android' && Platform.Version >= 33) {
       // Android 13+ needs a runtime permission — silently returning
@@ -58,9 +86,9 @@ async function ensurePermission() {
     // iOS + older Android — @react-native-firebase/messaging handles
     // APNS authorisation. Returns an enum: NOT_DETERMINED (0),
     // DENIED (1), AUTHORIZED (2), PROVISIONAL (3).
-    const status = await messaging().requestPermission();
-    const ok = status === messaging.AuthorizationStatus.AUTHORIZED
-            || status === messaging.AuthorizationStatus.PROVISIONAL;
+    const status = await m().requestPermission();
+    const ok = status === m.AuthorizationStatus.AUTHORIZED
+            || status === m.AuthorizationStatus.PROVISIONAL;
     if (!ok) console.log('[fcm] messaging().requestPermission not granted:', status);
     return ok;
   } catch (err) {
@@ -92,12 +120,14 @@ async function registerTokenWithBackend(token, meta = {}) {
 // pulls the FCM token, ships it to the backend, and subscribes to
 // onTokenRefresh so Firebase-driven rotations land automatically.
 export async function requestPermissionAndRegister() {
+  const m = getMessaging();
+  if (!m) return { ok: false, skipped: 'firebase-native-module-missing' };
   try {
     const granted = await ensurePermission();
     if (!granted) return { ok: false, skipped: 'permission-denied' };
 
     // getToken auto-generates one on first call and caches it.
-    const token = await messaging().getToken();
+    const token = await m().getToken();
     await registerTokenWithBackend(token);
 
     // Detach any previous refresh subscription so we don't stack
@@ -106,7 +136,7 @@ export async function requestPermissionAndRegister() {
       try { unsubscribeTokenRefresh(); } catch {}
       unsubscribeTokenRefresh = null;
     }
-    unsubscribeTokenRefresh = messaging().onTokenRefresh(async (freshToken) => {
+    unsubscribeTokenRefresh = m().onTokenRefresh(async (freshToken) => {
       console.log('[fcm] onTokenRefresh — re-registering');
       await registerTokenWithBackend(freshToken);
     });
@@ -127,7 +157,8 @@ export async function revokeOnLogout() {
     await apiClient.delete('/notifications/fcm-token').catch(() => {});
     // Then wipe the FCM registration locally so a fresh login gets a
     // new token via getToken() (Firebase re-mints on first read).
-    try { await messaging().deleteToken(); } catch {}
+    const m = getMessaging();
+    if (m) { try { await m().deleteToken(); } catch {} }
     if (typeof unsubscribeTokenRefresh === 'function') {
       try { unsubscribeTokenRefresh(); } catch {}
       unsubscribeTokenRefresh = null;
@@ -150,10 +181,17 @@ export async function revokeOnLogout() {
 // same payload; we route via data.screen / data.params.
 export function attachHandlers() {
   if (handlersAttached) return;
+  const m = getMessaging();
+  if (!m) {
+    // Fresh install without a native rebuild — nothing to attach.
+    // Leaves handlersAttached=false so a later reload after the
+    // rebuild wires things up on that mount.
+    return;
+  }
   handlersAttached = true;
 
   // Foreground.
-  messaging().onMessage(async (msg) => {
+  m().onMessage(async (msg) => {
     console.log('[fcm] foreground message', msg?.notification, msg?.data);
     const title = msg?.notification?.title || msg?.data?.title || 'Veerify';
     const body  = msg?.notification?.body  || msg?.data?.body  || '';
@@ -184,14 +222,14 @@ export function attachHandlers() {
   };
 
   // Background → tap.
-  messaging().onNotificationOpenedApp((msg) => {
+  m().onNotificationOpenedApp((msg) => {
     console.log('[fcm] onNotificationOpenedApp', msg?.data);
     navigate(routeFromData(msg?.data));
   });
 
   // Terminated → tap. getInitialNotification only returns the payload
   // once per process — safe to await on every mount.
-  messaging()
+  m()
     .getInitialNotification()
     .then((msg) => {
       if (!msg) return;

@@ -647,7 +647,62 @@ exports.getMyStatus = async (req, res) => {
       });
     }
 
-    const inst = result.rows[0];
+    let inst = result.rows[0];
+
+    // ── Branch admin fix ─────────────────────────────────────────
+    // Sub-branch institutions carry parent_institution_id and their
+    // own onboarding_status is not driven through the approval
+    // pipeline (they inherit whatever the root academy is doing).
+    // Without this, a branch admin's /my-status returned the
+    // sub-branch's raw onboarding_status (often NULL or the pre-
+    // approval placeholder), so the mobile navigator dumped them on
+    // the "Request Submitted" screen instead of the Branch Dashboard.
+    //
+    // For sub-branches we re-fetch the ROOT institution row and use
+    // its onboarding_status + paid_at + trial/grace timestamps for
+    // the trial→active mapping below, while KEEPING the branch's own
+    // row in the response so the mobile still identifies the caller's
+    // branch (branch name, city, etc.).
+    let effectiveOnboardingSource = inst;
+    let isSubBranch = false;
+    if (inst.parent_institution_id) {
+      isSubBranch = true;
+      try {
+        const rootRes = await pool.query(
+          `SELECT i.*, sp.name AS plan_name, sp.price AS plan_price,
+                  sp.features AS plan_features
+             FROM institutions i
+             LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
+            WHERE i.id = $1`,
+          [inst.parent_institution_id],
+        );
+        if (rootRes.rows.length > 0) {
+          effectiveOnboardingSource = rootRes.rows[0];
+          // Merge the plan + lifecycle columns from the root over the
+          // branch row so the mobile's downstream reads (plan name,
+          // trial dates, paid_at, subscription_status) all reflect
+          // the parent academy's subscription, which is what actually
+          // gates branch access.
+          inst = {
+            ...inst,
+            plan_id:            effectiveOnboardingSource.plan_id,
+            plan_name:          effectiveOnboardingSource.plan_name,
+            plan_price:         effectiveOnboardingSource.plan_price,
+            plan_features:      effectiveOnboardingSource.plan_features,
+            onboarding_status:  effectiveOnboardingSource.onboarding_status,
+            paid_at:            effectiveOnboardingSource.paid_at,
+            trial_starts_at:    effectiveOnboardingSource.trial_starts_at,
+            trial_ends_at:      effectiveOnboardingSource.trial_ends_at,
+            grace_ends_at:      effectiveOnboardingSource.grace_ends_at,
+            subscription_status: effectiveOnboardingSource.subscription_status,
+            subscription_start: effectiveOnboardingSource.subscription_start,
+            subscription_end:   effectiveOnboardingSource.subscription_end,
+          };
+        }
+      } catch (err) {
+        console.warn('[my-status] root lookup for sub-branch failed:', err?.message);
+      }
+    }
 
     // ── Map trial lifecycle → navigation status ────────────────────────────
     // The mobile navigator routes by `status`:
