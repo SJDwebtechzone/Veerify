@@ -395,6 +395,39 @@ exports.setupAcademy = async (req, res) => {
       return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
     })();
 
+    // ── Column-length guard ────────────────────────────────────────
+    // Several institutions columns still carry VARCHAR(N) limits from
+    // the original schema (name / brand_name / affiliation / master_*
+    // etc.). A slightly-oversize input from the mobile wizard used to
+    // fail the whole setup with `22001 value too long for type
+    // character varying(150)`. We truncate every string on the way in
+    // so a chatty free-text field can never block the save; the DB
+    // still enforces the limit for anything downstream.
+    const cap = (v, n) => {
+      if (v === null || v === undefined) return v;
+      const s = String(v);
+      return s.length > n ? s.slice(0, n) : s;
+    };
+    const nameCap                   = cap(name, 150);
+    const brandNameCap              = cap(brand_name || null, 150);
+    const primaryTypeCap            = cap(primaryType, 50);
+    const registrationNumberCap     = cap(registration_number, 100);
+    const logoUrlCap                = cap(logo_url || null, 500);
+    const addressStr                = address == null ? null : String(address); // address column is TEXT
+    const cityCap                   = cap(city || null, 80);
+    const pincodeCap                = cap(pincode || null, 10);
+    const emailCap                  = cap(email, 150);
+    const phoneCap                  = cap(phone, 20);
+    const websiteUrlCap             = cap(website_url || null, 500);
+    const affiliationCap            = cap(affiliation_or_board || null, 150);
+    const accreditationBodyCap      = cap(accreditation_body_name || null, 150);
+    const accreditationCertUrlCap   = cap(accreditation_certificate_url || null, 500);
+    const operatingHoursCap         = cap(operating_hours || null, 150);
+    const masterNameCap             = cap(master_name, 100);
+    const masterRoleCap             = cap(master_role || null, 100);
+    const masterEmailCap            = cap(master_email || null, 150);
+    const masterPhoneCap            = cap(master_phone_number || null, 20);
+
     // Update institution with all details. Order of $-params matters; keep
     // grouped by category for sanity when reading SQL. `institution_types`
     // holds the canonical array; `institution_type` mirrors the first entry
@@ -444,42 +477,42 @@ exports.setupAcademy = async (req, res) => {
        WHERE owner_user_id = $33
        RETURNING *`,
       [
-        name,
-        brand_name || null,
-        primaryType,
+        nameCap,
+        brandNameCap,
+        primaryTypeCap,
         typesArr,
-        registration_number,
+        registrationNumberCap,
         date_of_establishment || null,
-        logo_url || null,
+        logoUrlCap,
         safeSkills,
 
-        address,
-        city || null,
-        pincode || null,
+        addressStr,
+        cityCap,
+        pincodeCap,
         no_of_branches != null ? Number(no_of_branches) : 0,
         safeBranches,
-        email,
-        phone,
-        website_url || null,
+        emailCap,
+        phoneCap,
+        websiteUrlCap,
         safeLatitude,
         safeLongitude,
 
-        affiliation_or_board || null,
-        accreditation_body_name || null,
+        affiliationCap,
+        accreditationBodyCap,
         accreditation_expiry_date || null,
-        accreditation_certificate_url || null,
+        accreditationCertUrlCap,
 
         total_student_capacity != null ? Number(total_student_capacity) : null,
         safeCurrentEnrollment,
         safeMedium,
-        operating_hours || null,
+        operatingHoursCap,
         safeHoursWeekday,
         safeHoursWeekend,
 
-        master_name,
-        master_role || null,
-        master_email || null,
-        master_phone_number || null,
+        masterNameCap,
+        masterRoleCap,
+        masterEmailCap,
+        masterPhoneCap,
 
         userId,
       ]
