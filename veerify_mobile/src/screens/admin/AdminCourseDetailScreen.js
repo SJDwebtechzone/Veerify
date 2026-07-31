@@ -36,6 +36,8 @@ import {
 
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
+import { billingCycleLabel } from '../../utils/billingCycle';
+import CourseImage from '../../components/CourseImage';
 
 // ─── Asset host helper ─────────────────────────────────────────────────
 const ASSET_HOST = (apiClient.defaults.baseURL || '').replace(/\/api\/?$/, '');
@@ -209,13 +211,18 @@ export default function AdminCourseDetailScreen({ route, navigation }) {
       >
         {/* ───── Hero ───── */}
         <View style={styles.hero}>
-          {banner ? (
-            <Image source={{ uri: banner }} style={styles.heroImage} />
-          ) : (
-            <View style={[styles.heroImage, styles.heroPlaceholder]}>
-              <BookOpen size={48} color="rgba(255,255,255,0.6)" strokeWidth={1.6} />
-            </View>
-          )}
+          {/* Course cover — contain-fit inside the fixed 220dp band so
+              the full poster shows without cropping. Neutral bg fills
+              any letterboxing when the source is not exactly the
+              hero's aspect ratio. */}
+          <CourseImage
+            uri={course.image_url}
+            width="100%"
+            height={220}
+            radius={0}
+            fit="contain"
+            icon="course"
+          />
           <View style={styles.heroOverlay} />
 
           {/* Top bar — back + edit */}
@@ -354,31 +361,14 @@ export default function AdminCourseDetailScreen({ route, navigation }) {
           </Section>
         )}
 
-        {/* ───── Class details ───── */}
-        <Section title="Class Details" icon={Calendar}>
+        {/* ───── Course Details ───── */}
+        <Section title="Course Details" icon={Calendar}>
           <View style={styles.kvGrid}>
-            <KV label="Duration" value={course.duration_months ? `${course.duration_months} month${course.duration_months === 1 ? '' : 's'}` : '—'} />
+            <KV label="Duration"  value={course.duration_months ? `${course.duration_months} month${course.duration_months === 1 ? '' : 's'}` : '—'} />
             <KV label="Mode"      value={MODE_LABEL[course.mode] || course.mode || '—'} />
             <KV label="Level"     value={course.level || '—'} />
-            <KV label="Age group" value={course.age_group || '—'} />
+            <KV label="Age group" value={course.min_age != null && course.max_age != null ? `${course.min_age} – ${course.max_age} yrs` : (course.age_group || '—')} />
             <KV label="Language"  value={course.language || '—'} />
-            <KV label="Days"      value={course.days_of_week || '—'} />
-            <KV
-              label="Time"
-              value={
-                course.class_start_time || course.class_end_time
-                  ? `${course.class_start_time || ''}${course.class_end_time ? ' – ' + course.class_end_time : ''}`
-                  : '—'
-              }
-            />
-            <KV
-              label="Batch size"
-              value={
-                course.batch_size_min || course.batch_size_max
-                  ? `${course.batch_size_min || '?'} – ${course.batch_size_max || '?'} students`
-                  : '—'
-              }
-            />
           </View>
 
           {(course.belt_system || course.certificate_available) ? (
@@ -403,7 +393,7 @@ export default function AdminCourseDetailScreen({ route, navigation }) {
         <Section title="Pricing" icon={Wallet}>
           <View style={styles.priceCard}>
             <View style={styles.priceRow}>
-              <Text style={styles.priceLabel}>Monthly fee</Text>
+              <Text style={styles.priceLabel}>{billingCycleLabel(course.billing_cycle)}</Text>
               <Text style={styles.priceValue}>{fmtINR(totals.monthlyFee)}</Text>
             </View>
             {Number(course.admission_fee) > 0 ? (
@@ -411,6 +401,19 @@ export default function AdminCourseDetailScreen({ route, navigation }) {
                 <Text style={styles.priceLabel}>One-time admission</Text>
                 <Text style={styles.priceValue}>{fmtINR(course.admission_fee)}</Text>
               </View>
+            ) : null}
+            {Array.isArray(course.additional_fees) && course.additional_fees.length > 0 ? (
+              course.additional_fees.map((fee, idx) => {
+                if (!fee || !fee.amount || Number(fee.amount) <= 0) return null;
+                const feeTitle = fee.title || fee.custom_title || fee.type || 'Fee';
+                if (fee.type === 'Admission Fee' && Number(course.admission_fee) > 0) return null;
+                return (
+                  <View key={idx} style={[styles.priceRow, { marginTop: 6 }]}>
+                    <Text style={styles.priceLabel}>{feeTitle}</Text>
+                    <Text style={styles.priceValue}>{fmtINR(fee.amount)}</Text>
+                  </View>
+                );
+              })
             ) : null}
             <View style={styles.priceDivider} />
             <View style={styles.priceRow}>
@@ -482,7 +485,7 @@ export default function AdminCourseDetailScreen({ route, navigation }) {
                   <View style={styles.batchCountBubble}>
                     <Text style={styles.batchCountText}>{b.enrolled_count || 0}</Text>
                     <Text style={styles.batchCountLabel}>
-                      / {b.capacity || course.batch_size_max || '?'}
+                      / {b.capacity || '—'}
                     </Text>
                   </View>
                 </TouchableOpacity>

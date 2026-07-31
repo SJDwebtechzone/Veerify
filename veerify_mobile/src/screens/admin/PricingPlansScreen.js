@@ -117,6 +117,29 @@ function fmtCap(n) {
   return String(v);
 }
 
+function PlanImage({ url, size, style, placeholderStyle }) {
+  const [failed, setFailed] = useState(false);
+
+  // If the backend didn't provide a URL, or the fetch failed (e.g. broken link),
+  // we gracefully degrade to the local fallback icon.
+  if (!url || failed) {
+    return (
+      <View style={placeholderStyle}>
+        <Sparkles size={size === 'large' ? 26 : 18} color={BRAND} strokeWidth={2.2} />
+      </View>
+    );
+  }
+
+  return (
+    <Image
+      source={{ uri: resolveAssetUrl(url) }}
+      style={style}
+      resizeMode="cover"
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
 export default function PricingPlansScreen({ navigation }) {
   const [loading, setLoading]       = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -160,10 +183,29 @@ export default function PricingPlansScreen({ navigation }) {
   // so a fresh subscription_end / plan_id lands here without a manual
   // pull-to-refresh. Also nudges any still-pending link into 'cancelled'
   // if the webhook hasn't stamped it 'paid'.
+  //
+  // Order of ops when the app foregrounds while a payment is in flight:
+  //   1. POST /onboarding/verify-payment — forces the backend to poll
+  //      Razorpay right now. Covers both initial activation and
+  //      renewal; if paid, the row is flipped before we re-read it.
+  //   2. load() — re-fetch status / plans / history so the CurrentPlanCard
+  //      reflects the new subscription_end + phase.
+  //   3. mark-payment-cancelled — only touches still-pending rows,
+  //      so a successful payment is unaffected. Cleans up the ledger
+  //      when the admin cancelled Razorpay without paying.
   useEffect(() => {
     const sub = AppState.addEventListener('change', (next) => {
       if (next === 'active') {
-        load();
+        // Fire verify-payment first (best-effort), then reload so the
+        // UI shows the freshly-activated state without a manual refresh.
+        (async () => {
+          if (pendingLinkId) {
+            try {
+              await apiClient.post('/onboarding/verify-payment', {});
+            } catch { /* helper is idempotent + best-effort */ }
+          }
+          load();
+        })();
         // Give the webhook a moment; then check whether the link is
         // still pending on the server side.
         if (pendingLinkId) {
@@ -617,17 +659,12 @@ function CurrentPlanCard({ status, onAction }) {
           })() : null}
         </View>
 
-        {plan.image_url ? (
-          <Image
-            source={{ uri: resolveAssetUrl(plan.image_url) }}
-            style={styles.currentHeroThumb}
-            resizeMode="cover"
-          />
-        ) : (
-          <View style={styles.currentHeroThumbPlaceholder}>
-            <Sparkles size={26} color={BRAND} strokeWidth={2.2} />
-          </View>
-        )}
+        <PlanImage
+          url={plan.image_url}
+          size="large"
+          style={styles.currentHeroThumb}
+          placeholderStyle={styles.currentHeroThumbPlaceholder}
+        />
       </View>
 
       {/* Days-left badge */}
@@ -770,17 +807,12 @@ function PlanRow({ plan, currentPrice, onPress }) {
 
       {/* Plan image — sits on the right of the name+meta block, sized to
           visually align with both the plan name and the price line. */}
-      {plan.image_url ? (
-        <Image
-          source={{ uri: resolveAssetUrl(plan.image_url) }}
-          style={styles.planRowThumb}
-          resizeMode="cover"
-        />
-      ) : (
-        <View style={styles.planRowThumbPlaceholder}>
-          <Sparkles size={18} color={BRAND} strokeWidth={2.4} />
-        </View>
-      )}
+      <PlanImage
+        url={plan.image_url}
+        size="small"
+        style={styles.planRowThumb}
+        placeholderStyle={styles.planRowThumbPlaceholder}
+      />
 
       <View style={[styles.actionPill, { backgroundColor: actionColor + '14', borderColor: actionColor + '40' }]}>
         <ActionIcon size={13} color={actionColor} strokeWidth={2.6} />

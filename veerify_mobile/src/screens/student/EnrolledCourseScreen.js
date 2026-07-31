@@ -28,6 +28,7 @@ import {
 
 import apiClient from '../../api/client';
 import { formatBatchTime } from '../../utils/formatTime';
+import CourseImage from '../../components/CourseImage';
 
 // ─── Theme tokens ──────────────────────────────────────────────────────
 const BRAND = '#E63946';
@@ -222,13 +223,14 @@ export default function EnrolledCourseScreen({ route, navigation }) {
       >
         {/* ───── Hero banner ───── */}
         <View style={styles.hero}>
-          {banner ? (
-            <Image source={{ uri: banner }} style={styles.heroImage} />
-          ) : (
-            <View style={[styles.heroImage, styles.heroFallback]}>
-              <BookOpen size={48} color="rgba(255,255,255,0.6)" strokeWidth={1.6} />
-            </View>
-          )}
+          <CourseImage
+            uri={course?.image_url || enrollment.course_image_url}
+            width="100%"
+            height={220}
+            radius={0}
+            fit="contain"
+            icon="course"
+          />
           <View style={styles.heroOverlay} />
           <TouchableOpacity
             onPress={() => navigation.goBack()}

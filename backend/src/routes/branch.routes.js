@@ -24,10 +24,19 @@ router.get('/nearby', ctrl.getNearby);
 router.get('/accessible', verifyToken, ctrl.listAccessibleBranches);
 
 router.get('/',            verifyToken, requireRole('admin'), ctrl.listMine);
+// Super-admin: fetch every branch (sub-branch + satellite) linked to
+// the given institution id. Powers the Branches section on the Web
+// Admin InstitutionDetail page. MUST come before /:id/dashboard so
+// the literal "/institution/…" isn't captured by the /:id param.
+router.get('/institution/:id', verifyToken, requireRole('super_admin', 'admin'), ctrl.listByInstitutionId);
 // Read-only Branch Dashboard — aggregated students / revenue / attendance
 // for a single sub-branch. Powers the "tap a branch card → drill-in"
 // flow on the mobile Branches list.
 router.get('/:id/dashboard', verifyToken, requireRole('admin'), ctrl.getBranchDashboard);
+// Super Admin: send / resend branch credentials. Provisions the owner
+// user, dispatches email + SMS + WhatsApp, and flips the branch to
+// active so the branch admin can log in.
+router.post('/:id/send-credentials', verifyToken, requireRole('super_admin'), ctrl.sendBranchCredentials);
 router.post('/',           verifyToken, requireRole('admin'), ctrl.create);
 router.put('/:id',         verifyToken, requireRole('admin'), ctrl.update);
 router.delete('/:id',      verifyToken, requireRole('admin'), ctrl.remove);

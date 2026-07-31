@@ -15,11 +15,11 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView, Image, Alert,
   ActivityIndicator, StyleSheet, RefreshControl, KeyboardAvoidingView,
-  Platform,
+  Platform, Modal,
 } from 'react-native';
 import {
   ArrowLeft, Image as ImageIcon, Plus, Trash2, Eye, EyeOff, Edit3,
-  Users, GraduationCap, Layers, Save, X as XIcon, Upload,
+  Users, GraduationCap, Layers, Save, X as XIcon, Upload, Camera,
 } from 'lucide-react-native';
 import { launchImageLibrary, launchCamera } from 'react-native-image-picker';
 
@@ -266,12 +266,10 @@ function BannerEditorSheet({ initial, onClose, onSaved }) {
   const [uploading, setUploading] = useState(false);
   const [saving, setSaving]       = useState(false);
 
+  const [pickerVisible, setPickerVisible] = useState(false);
+
   const pickImage = () => {
-    Alert.alert('Upload banner', 'Choose how to add the image:', [
-      { text: isEdit ? 'Gallery' : 'Gallery (pick many)', onPress: () => fromGallery() },
-      { text: 'Camera',  onPress: () => fromCamera() },
-      { text: 'Cancel',  style: 'cancel' },
-    ]);
+    setPickerVisible(true);
   };
 
   // Multi-select gallery — selectionLimit: 0 = unlimited. In edit mode
@@ -447,14 +445,16 @@ function BannerEditorSheet({ initial, onClose, onSaved }) {
                 disabled={uploading}
               >
                 {uploading ? (
-                  <ActivityIndicator color={BRAND} />
+                  <ActivityIndicator color={BRAND} size="large" />
                 ) : (
                   <>
-                    <Upload size={22} color={BRAND} strokeWidth={2.2} />
+                    <View style={styles.iconCircle}>
+                      <ImageIcon size={26} color={BRAND} strokeWidth={2.2} />
+                    </View>
                     <Text style={styles.uploadTitle}>
-                      {isEdit ? 'Tap to pick image' : 'Tap to pick one or many images'}
+                      {isEdit ? 'Tap to pick an image' : 'Tap to pick images'}
                     </Text>
-                    <Text style={styles.uploadHint}>Wide images work best (16:9 / 16:10)</Text>
+                    <Text style={styles.uploadHint}>Wide formats (16:9) look best on the mobile app</Text>
                   </>
                 )}
               </TouchableOpacity>
@@ -489,9 +489,12 @@ function BannerEditorSheet({ initial, onClose, onSaved }) {
                       disabled={uploading}
                     >
                       {uploading ? (
-                        <ActivityIndicator color={BRAND} size="small" />
+                        <ActivityIndicator color={TEXT_MUTED} size="small" />
                       ) : (
-                        <Plus size={20} color={BRAND} strokeWidth={2.4} />
+                        <>
+                          <Plus size={20} color={TEXT_MUTED} strokeWidth={2.4} />
+                          <Text style={{ fontSize: 11, color: TEXT_MUTED, marginTop: 4, fontWeight: '600' }}>Add more</Text>
+                        </>
                       )}
                     </TouchableOpacity>
                   ) : null}
@@ -575,6 +578,49 @@ function BannerEditorSheet({ initial, onClose, onSaved }) {
           </View>
         </View>
       </KeyboardAvoidingView>
+
+      <Modal transparent visible={pickerVisible} animationType="fade" onRequestClose={() => setPickerVisible(false)}>
+        <View style={styles.pickerOverlay}>
+          <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={() => setPickerVisible(false)} />
+          <View style={styles.pickerSheet}>
+            <View style={styles.pickerHeader}>
+              <Text style={styles.pickerTitle}>Upload banner</Text>
+              <Text style={styles.pickerSub}>Choose how to add the image:</Text>
+            </View>
+            <TouchableOpacity
+              style={styles.pickerBtn}
+              activeOpacity={0.8}
+              onPress={() => { setPickerVisible(false); setTimeout(fromGallery, 300); }}
+            >
+              <View style={[styles.pickerIconWrap, { backgroundColor: '#DBEAFE' }]}>
+                <ImageIcon size={20} color="#1E40AF" strokeWidth={2.4} />
+              </View>
+              <View>
+                <Text style={styles.pickerBtnTitle}>Photo Gallery</Text>
+                <Text style={styles.pickerBtnSub}>{isEdit ? 'Choose a photo from your library' : 'Pick one or multiple photos'}</Text>
+              </View>
+            </TouchableOpacity>
+            
+            <TouchableOpacity
+              style={styles.pickerBtn}
+              activeOpacity={0.8}
+              onPress={() => { setPickerVisible(false); setTimeout(fromCamera, 300); }}
+            >
+              <View style={[styles.pickerIconWrap, { backgroundColor: '#DCFCE7' }]}>
+                <Camera size={20} color="#166534" strokeWidth={2.4} />
+              </View>
+              <View>
+                <Text style={styles.pickerBtnTitle}>Camera</Text>
+                <Text style={styles.pickerBtnSub}>Take a new photo</Text>
+              </View>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={styles.pickerCancel} activeOpacity={0.8} onPress={() => setPickerVisible(false)}>
+              <Text style={styles.pickerCancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -666,37 +712,43 @@ const styles = StyleSheet.create({
   sheetTitle: { flex: 1, fontSize: 15, fontWeight: '800', color: TEXT },
 
   uploadCard: {
-    height: 160, borderRadius: 14,
-    backgroundColor: '#FFF5F5',
-    borderWidth: 1, borderColor: '#FECDD3', borderStyle: 'dashed',
+    height: 180, borderRadius: 16,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1.5, borderColor: '#E2E8F0', borderStyle: 'dashed',
     alignItems: 'center', justifyContent: 'center',
-    gap: 4, overflow: 'hidden',
+    padding: 20, overflow: 'hidden',
+  },
+  iconCircle: {
+    width: 56, height: 56, borderRadius: 28,
+    backgroundColor: '#FFE4E6',
+    alignItems: 'center', justifyContent: 'center',
+    marginBottom: 12,
   },
   uploadPreview: { width: '100%', height: '100%' },
-  uploadTitle: { fontSize: 13, fontWeight: '800', color: TEXT, marginTop: 4 },
-  uploadHint:  { fontSize: 11, color: TEXT_MUTED },
+  uploadTitle: { fontSize: 15, fontWeight: '800', color: TEXT, marginBottom: 4 },
+  uploadHint:  { fontSize: 13, color: TEXT_MUTED, textAlign: 'center' },
   replaceLink: { fontSize: 12, color: BRAND, fontWeight: '700' },
 
   // Multi-image thumbnail strip
   thumbWrap: {
-    width: 110, height: 70, borderRadius: 10,
+    width: 120, height: 80, borderRadius: 12,
     overflow: 'hidden',
-    backgroundColor: '#F1F5F9',
-    borderWidth: 1, borderColor: BORDER,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1, borderColor: '#E2E8F0',
     position: 'relative',
   },
   thumb: { width: '100%', height: '100%' },
   thumbRemove: {
     position: 'absolute',
     top: 4, right: 4,
-    width: 18, height: 18, borderRadius: 9,
+    width: 22, height: 22, borderRadius: 11,
     backgroundColor: 'rgba(15,23,42,0.78)',
     alignItems: 'center', justifyContent: 'center',
   },
   thumbAdd: {
     alignItems: 'center', justifyContent: 'center',
-    borderStyle: 'dashed', borderColor: '#FECDD3',
-    backgroundColor: '#FFF5F5',
+    borderStyle: 'dashed', borderColor: '#CBD5E1',
+    backgroundColor: '#F8FAFC',
   },
   thumbCount: {
     marginTop: 6,
@@ -742,4 +794,33 @@ const styles = StyleSheet.create({
   footerBtnGhostText:    { fontSize: 13, fontWeight: '700', color: TEXT_MUTED },
   footerBtnPrimary:      { backgroundColor: BRAND },
   footerBtnPrimaryText:  { fontSize: 13, fontWeight: '800', color: '#fff', letterSpacing: 0.3 },
+
+  // Custom Image Picker Modal
+  pickerOverlay: {
+    flex: 1, backgroundColor: 'rgba(15,23,42,0.4)',
+    justifyContent: 'flex-end',
+  },
+  pickerSheet: {
+    backgroundColor: '#fff',
+    borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    paddingHorizontal: 20, paddingTop: 24, paddingBottom: 36,
+  },
+  pickerHeader: { marginBottom: 20 },
+  pickerTitle: { fontSize: 18, fontWeight: '800', color: TEXT, marginBottom: 4 },
+  pickerSub: { fontSize: 13, color: TEXT_MUTED },
+  pickerBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 14,
+    paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: '#F1F5F9',
+  },
+  pickerIconWrap: {
+    width: 44, height: 44, borderRadius: 22,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  pickerBtnTitle: { fontSize: 15, fontWeight: '700', color: TEXT, marginBottom: 2 },
+  pickerBtnSub: { fontSize: 12, color: TEXT_MUTED },
+  pickerCancel: {
+    marginTop: 16, paddingVertical: 14, borderRadius: 12,
+    backgroundColor: '#F1F5F9', alignItems: 'center',
+  },
+  pickerCancelText: { fontSize: 15, fontWeight: '800', color: TEXT_MUTED },
 });

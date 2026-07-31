@@ -18,6 +18,7 @@ interface CourseRow {
   short_description: string | null;
   image_url: string | null;
   price: string | number | null;
+  billing_cycle?: string | null;
   duration_months: number | null;
   mode: 'online' | 'offline' | 'hybrid' | null;
   category: string | null;
@@ -227,6 +228,11 @@ export function InstitutionDetail() {
   // Courses + staff for this institution, fetched once it loads.
   const [courses, setCourses] = useState<CourseRow[] | null>(null);
   const [staff, setStaff] = useState<StaffRow[] | null>(null);
+  // Branches for this institution — both sub-branch academies (with
+  // their own login) and satellite locations. Rendered as a section
+  // below the identity block so the super admin can verify a fresh
+  // "Add Branch" from the mobile actually landed under this academy.
+  const [branches, setBranches] = useState<any[] | null>(null);
 
   // Super admin "Edit details" drawer (Core / Contact / Accreditation /
   // Operations / Master). Lets us fill in fields on behalf of a branch.
@@ -237,8 +243,12 @@ export function InstitutionDetail() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, navState.refreshedAt]);
 
-  // Side-load the courses + staff for this institution. Independent fetches so
-  // one slow query doesn't block the other section from rendering.
+  // Side-load the courses + staff + branches for this institution.
+  // Independent fetches so one slow query doesn't block the others.
+  // Re-fires on navState.refreshedAt so the same "Refresh" button that
+  // re-hits loadInstitution also refreshes the sub-lists — this is
+  // what makes newly added branches show up immediately after the
+  // mobile Add Branch flow.
   useEffect(() => {
     if (!id) return;
     let cancelled = false;
@@ -250,8 +260,12 @@ export function InstitutionDetail() {
       .get(`/trainers/all?institution_id=${id}`)
       .then((r) => { if (!cancelled) setStaff(r.data?.trainers || []); })
       .catch(() => { if (!cancelled) setStaff([]); });
+    apiClient
+      .get(`/branches/institution/${id}`)
+      .then((r) => { if (!cancelled) setBranches(r.data?.branches || []); })
+      .catch(() => { if (!cancelled) setBranches([]); });
     return () => { cancelled = true; };
-  }, [id]);
+  }, [id, navState.refreshedAt]);
 
   const loadInstitution = async () => {
     try {
@@ -358,6 +372,31 @@ export function InstitutionDetail() {
       // If the backend rotated the password but the email failed, the
       // response payload includes the password so the super admin can
       // share it manually.
+      const tempPw = obj?.response?.data?.temp_password;
+      setError(tempPw ? `${message}\nTemporary password: ${tempPw}` : message);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // Sub-branch credentials sender for post-registration branches (from the
+  // "Branches" list). These are pending activation until sent.
+  const handleSendBranchCredentials = async (branchId: number, targetEmail: string | null) => {
+    const sentTo = targetEmail || 'the branch email';
+    if (!window.confirm(
+      `Send first-time login credentials to ${sentTo}?\n\nThis will create the branch admin's account and activate the branch.`
+    )) return;
+    setActionLoading(true);
+    setError('');
+    try {
+      const res = await apiClient.post(`/onboarding/${branchId}/send-branch-credentials`);
+      setSuccessMessage(res.data?.message || 'Credentials sent.');
+      setTimeout(() => setSuccessMessage(''), 4000);
+      // Wait to ensure DB commit is visible before fetch
+      setTimeout(() => loadInstitution(), 500);
+    } catch (err: unknown) {
+      const obj = err as { response?: { data?: { message?: string; temp_password?: string } } };
+      const message = obj?.response?.data?.message || 'Could not send credentials';
       const tempPw = obj?.response?.data?.temp_password;
       setError(tempPw ? `${message}\nTemporary password: ${tempPw}` : message);
     } finally {
@@ -703,12 +742,130 @@ export function InstitutionDetail() {
                 icon={Building}
                 label="Branches"
                 value={
-                  institution.no_of_branches != null && institution.no_of_branches > 0
-                    ? `${institution.no_of_branches} branch${institution.no_of_branches === 1 ? '' : 'es'}`
-                    : '—'
+                  branches != null
+                    ? `${branches.length} ${branches.length === 1 ? 'branch' : 'branches'}`
+                    : (institution.no_of_branches != null && institution.no_of_branches > 0
+                        ? `${institution.no_of_branches} branch${institution.no_of_branches === 1 ? '' : 'es'}`
+                        : '—')
                 }
               />
             </div>
+
+            {/* ── Branches list ──────────────────────────────────
+                Fetched from GET /branches/institution/:id and refreshed
+                on every navState.refreshedAt tick, so the "Refresh"
+                button (or a fresh navigation) shows newly created
+                branches immediately. Sub-branches (their own login)
+                are tagged distinctly from satellite locations. */}
+            {branches == null ? (
+              <div className="mt-4 text-sm text-gray-500">Loading branches…</div>
+            ) : branches.length === 0 ? (
+              <div className="mt-4 text-sm text-gray-500 italic">
+                No linked branches yet.
+              </div>
+            ) : (
+              <div className="mt-4 border-t border-gray-100 pt-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <Building className="w-4 h-4 text-gray-500" />
+                  <div className="text-xs font-bold uppercase tracking-wider text-gray-500">
+                    Branches
+                  </div>
+                  <div className="ml-auto text-xs text-gray-400">{branches.length}</div>
+                </div>
+                <ul className="space-y-2">
+                  {branches.map((b) => (
+                    <li
+                      key={`${b.branch_kind}-${b.id}`}
+                      className="rounded-lg border border-gray-100 bg-white px-3 py-2.5"
+                    >
+                      <div className="flex items-start gap-2">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <div className="font-semibold text-gray-900 text-sm truncate">
+                              {b.name || '(unnamed branch)'}
+                            </div>
+                            {/* Per spec: no sub-branch hierarchy.
+                                Every entry displays as a plain
+                                "Branch" — the internal branch_kind
+                                still distinguishes storage paths for
+                                the backend but the super admin sees
+                                one uniform label. */}
+                            <span className="inline-block text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-brand-50 text-brand-700">
+                              Branch
+                            </span>
+                            {b.is_primary ? (
+                              <span className="inline-block text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700">
+                                Primary
+                              </span>
+                            ) : null}
+                            {b.status && b.status !== 'active' ? (
+                              <span className="inline-block text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-amber-50 text-amber-700">
+                                {b.status.replace(/_/g, ' ')}
+                              </span>
+                            ) : null}
+                          </div>
+                          <div className="text-xs text-gray-500 mt-1 truncate">
+                            {[b.address_line, b.city, b.pin_code].filter(Boolean).join(', ') || '—'}
+                          </div>
+                          {b.phone || b.email ? (
+                            <div className="text-[11px] text-gray-400 mt-0.5 truncate">
+                              {[b.phone, b.email].filter(Boolean).join(' · ')}
+                            </div>
+                          ) : null}
+                          
+                          {/* Action buttons for sub-branches and wizard branches */}
+                          {b.branch_kind === 'sub_branch' || b.branch_kind === 'wizard' ? (
+                            <div className="mt-2 pt-2 border-t border-gray-100 flex justify-end">
+                              {b.credentials_sent === false ? (
+                                <button
+                                  onClick={() => {
+                                    if (!b.email) {
+                                      alert("Please update the branch details with an email address before sending credentials.");
+                                      return;
+                                    }
+                                    if (b.branch_kind === 'wizard') {
+                                      const idx = parseInt(String(b.id).split('-')[2], 10);
+                                      handleSendOrResendBranch(idx, b.email || '', false);
+                                    } else {
+                                      handleSendBranchCredentials(b.id as number, b.email);
+                                    }
+                                  }}
+                                  disabled={actionLoading}
+                                  className="px-3 py-1.5 w-36 justify-center rounded-md text-xs font-semibold border bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100 inline-flex items-center gap-1.5 disabled:bg-gray-50 disabled:text-gray-400 disabled:border-gray-200 disabled:cursor-not-allowed transition-colors"
+                                  title="Provision this branch admin and email them their login credentials"
+                                >
+                                  <Mail size={12} /> Send Credentials
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={() => {
+                                    if (!b.email) {
+                                      alert("Please update the branch details with an email address before resending credentials.");
+                                      return;
+                                    }
+                                    if (b.branch_kind === 'wizard') {
+                                      const idx = parseInt(String(b.id).split('-')[2], 10);
+                                      handleSendOrResendBranch(idx, b.email || '', true);
+                                    } else {
+                                      handleResendBranchCredentials(b.id as number, b.email);
+                                    }
+                                  }}
+                                  disabled={actionLoading}
+                                  className="px-3 py-1.5 w-36 justify-center rounded-md text-xs font-semibold border bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100 inline-flex items-center gap-1.5 disabled:bg-gray-50 disabled:text-gray-400 disabled:border-gray-200 disabled:cursor-not-allowed transition-colors"
+                                  title="Rotate this branch admin's password and email them new credentials"
+                                >
+                                  <Mail size={12} /> Resend Credentials
+                                </button>
+                              )}
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
 
             {/* Head office address */}
             {(() => {
@@ -818,16 +975,16 @@ export function InstitutionDetail() {
                               <button
                                 onClick={() => handleSendOrResendBranch(i, b.email!, !!childInst)}
                                 disabled={actionLoading}
-                                className={`ml-auto px-2.5 py-1 rounded-md text-[11px] font-semibold border inline-flex items-center gap-1 disabled:opacity-60 ${
+                                className={`ml-auto px-3 py-1.5 w-36 justify-center rounded-md text-xs font-semibold border inline-flex items-center gap-1.5 transition-colors ${
                                   childInst
                                     ? 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'
                                     : 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
-                                }`}
+                                } disabled:bg-gray-50 disabled:text-gray-400 disabled:border-gray-200 disabled:cursor-not-allowed`}
                                 title={childInst
                                   ? "Rotate this branch admin's password and email them new credentials"
                                   : 'Provision this branch admin and email them their login credentials'}
                               >
-                                <Mail size={11} /> {childInst ? 'Resend credentials' : 'Send credentials'}
+                                <Mail size={12} /> {childInst ? 'Resend Credentials' : 'Send Credentials'}
                               </button>
                             ) : null}
                           </div>
@@ -1534,7 +1691,13 @@ function CourseRowItem({ course }: { course: CourseRow }) {
           {course.price != null ? (
             <span className="inline-flex items-center gap-1 text-violet-700 font-semibold">
               <Wallet size={10} />
-              ₹{Number(course.price).toLocaleString('en-IN')}
+              ₹{Number(course.price).toLocaleString('en-IN')} ({
+                course.billing_cycle === 'one_time' ? 'One-Time Fee' :
+                course.billing_cycle === 'quarterly' ? 'Quarterly Fee' :
+                course.billing_cycle === 'half_yearly' ? 'Half-Yearly Fee' :
+                course.billing_cycle === 'annual' || course.billing_cycle === 'yearly' ? 'Annual Fee' :
+                course.billing_cycle === 'custom' ? 'Custom Fee' : 'Monthly Fee'
+              })
             </span>
           ) : null}
           <span className="inline-flex items-center gap-1 text-gray-500">

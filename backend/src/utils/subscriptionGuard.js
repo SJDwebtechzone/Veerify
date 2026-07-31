@@ -24,6 +24,7 @@ async function getCurrentPhase(institutionId) {
   const { rows } = await pool.query(
     `SELECT i.onboarding_status, i.subscription_end,
             i.trial_starts_at, i.trial_ends_at, i.grace_ends_at, i.paid_at,
+            i.parent_institution_id,
             sp.billing_cycle AS plan_billing_cycle
        FROM institutions i
        LEFT JOIN subscription_plans sp ON sp.id = i.plan_id
@@ -34,55 +35,50 @@ async function getCurrentPhase(institutionId) {
   const r = rows[0];
   const now = new Date();
 
-  // ── Paid path ──────────────────────────────────────────────────────────
-  // We pick the latest available "next renewal" timestamp from either
-  // subscription_end (set by approveInstitution / mock-pay) or paid_at +
-  // billing cycle. Whichever is later wins so renewals don't get
-  // false-positive expired flags when one column was missed.
-  //
-  // Post-renewal we layer a 3-day grace window (migration 075) —
-  // premium features are blocked immediately (spec: "disable all
-  // premium features") but the account can still LOG IN so the user
-  // sees the banner and can renew. `paid_grace` is treated identically
-  // to `expired` by the guard for the feature block; the split just
-  // gives observability + a distinct client-side banner state.
-  if (r.paid_at) {
-    const paidAt = new Date(r.paid_at);
-    const cycle  = String(r.plan_billing_cycle || 'monthly').toLowerCase();
-    const fromPaidAt = new Date(paidAt);
-    if (cycle === 'yearly') {
-      fromPaidAt.setFullYear(fromPaidAt.getFullYear() + 1);
-    } else {
-      fromPaidAt.setMonth(fromPaidAt.getMonth() + 1);
+  // ── Helper to evaluate a single row's phase ──────────────────────────
+  const evalRow = (row) => {
+    if (row.paid_at) {
+      const paidAt = new Date(row.paid_at);
+      const cycle  = String(row.plan_billing_cycle || 'monthly').toLowerCase();
+      const fromPaidAt = new Date(paidAt);
+      if (cycle === 'yearly') {
+        fromPaidAt.setFullYear(fromPaidAt.getFullYear() + 1);
+      } else {
+        fromPaidAt.setMonth(fromPaidAt.getMonth() + 1);
+      }
+      const fromSubEnd = row.subscription_end ? new Date(row.subscription_end) : null;
+      const renewalDue = fromSubEnd && fromSubEnd > fromPaidAt ? fromSubEnd : fromPaidAt;
+      if (now <= renewalDue) return 'paid';
+      const graceEnd = new Date(renewalDue);
+      graceEnd.setDate(graceEnd.getDate() + 3);
+      return now <= graceEnd ? 'paid_grace' : 'expired';
     }
-    const fromSubEnd = r.subscription_end ? new Date(r.subscription_end) : null;
-    const renewalDue = fromSubEnd && fromSubEnd > fromPaidAt ? fromSubEnd : fromPaidAt;
-    if (now <= renewalDue) return 'paid';
-    // Past renewal — check grace window.
-    const graceEnd = new Date(renewalDue);
-    graceEnd.setDate(graceEnd.getDate() + 3);
-    return now <= graceEnd ? 'paid_grace' : 'expired';
+
+    if (row.trial_ends_at) {
+      if (now <= new Date(row.trial_ends_at)) return 'trial';
+      if (row.grace_ends_at && now <= new Date(row.grace_ends_at)) return 'grace';
+      return 'locked';
+    }
+
+    if (row.onboarding_status === 'active' || row.onboarding_status === 'approved') {
+      if (row.subscription_end && now > new Date(row.subscription_end)) return 'expired';
+      return 'paid';
+    }
+
+    return 'pending';
+  };
+
+  const selfPhase = evalRow(r);
+  // Sub-branch inheritance: if sub-branch row alone yields non-active state,
+  // evaluate the parent institution so active parent subscription covers child branches.
+  if ((selfPhase === 'pending' || selfPhase === 'locked' || selfPhase === 'expired') && r.parent_institution_id) {
+    const parentPhase = await getCurrentPhase(r.parent_institution_id);
+    if (parentPhase === 'paid' || parentPhase === 'trial' || parentPhase === 'grace') {
+      return parentPhase;
+    }
   }
 
-  // ── Trial / grace path ────────────────────────────────────────────────
-  if (r.trial_ends_at) {
-    if (now <= new Date(r.trial_ends_at)) return 'trial';
-    if (r.grace_ends_at && now <= new Date(r.grace_ends_at)) return 'grace';
-    return 'locked';
-  }
-
-  // ── Legacy approved institutions ───────────────────────────────────────
-  // Pre-trial-system rows: onboarding_status='active' but no paid_at and no
-  // trial_ends_at. Trial-status endpoint treats these as 'active' so they
-  // can keep using the app, and we mirror that here so the guard doesn't
-  // block them. If subscription_end is set and has passed, treat as
-  // expired; otherwise grant access.
-  if (r.onboarding_status === 'active') {
-    if (r.subscription_end && now > new Date(r.subscription_end)) return 'expired';
-    return 'paid';
-  }
-
-  return 'pending';
+  return selfPhase;
 }
 
 // Express middleware. Looks up the admin's institution, derives the phase,
@@ -112,12 +108,24 @@ async function requireActiveSubscription(req, res, next) {
     const phase = await getCurrentPhase(institutionId);
 
     if (phase === 'expired' || phase === 'paid_grace' || phase === 'locked' || phase === 'pending') {
-      // Both paid_grace and expired reject premium features. The
-      // client-side banner reads phase from /onboarding/subscription-
-      // status and shows the countdown for paid_grace (3 → 2 → 1)
-      // or the hard "renew to regain access" copy for expired.
-      const message =
-        phase === 'paid_grace'
+      // Is the caller a branch? A branch inherits its parent's
+      // subscription and CAN'T renew on its own — the mobile modal
+      // must show a passive "your institution's subscription has
+      // expired" message with only OK/Later, no Renew CTA.
+      let isBranch = false;
+      try {
+        const r = await pool.query(
+          `SELECT parent_institution_id FROM institutions WHERE id = $1`,
+          [institutionId],
+        );
+        isBranch = !!(r.rows[0]?.parent_institution_id);
+      } catch (_) { /* fall back to non-branch copy */ }
+
+      const branchMessage =
+        "Your institution's subscription has expired. Access will be restored once the renewal is completed.";
+      const message = isBranch
+        ? branchMessage
+        : phase === 'paid_grace'
           ? 'Your subscription has expired. Renew within 3 days to continue using Veerify.'
         : phase === 'expired'
           ? 'Your subscription has expired. Please renew your plan to regain access.'
@@ -127,6 +135,7 @@ async function requireActiveSubscription(req, res, next) {
       return res.status(402).json({
         code: phase === 'paid_grace' ? 'PLAN_IN_GRACE' : 'PLAN_EXPIRED',
         phase,
+        is_branch: isBranch,
         message,
       });
     }

@@ -12,6 +12,8 @@ const CYCLE_LABELS = {
   quarterly:   'Quarterly Fee',
   half_yearly: 'Half-Yearly Fee',
   annual:      'Annual Fee',
+  yearly:      'Yearly Fee',
+  custom:      'Custom Fee',
 };
 
 const CYCLE_CADENCE = {
@@ -20,16 +22,22 @@ const CYCLE_CADENCE = {
   quarterly:   'per quarter',
   half_yearly: 'per 6 months',
   annual:      'per year',
+  yearly:      'per year',
+  custom:      'custom',
 };
 
 export function billingCycleLabel(cycle) {
-  const k = String(cycle || 'monthly').toLowerCase();
-  return CYCLE_LABELS[k] || CYCLE_LABELS.monthly;
+  if (!cycle) return CYCLE_LABELS.monthly;
+  const k = String(cycle).toLowerCase().trim();
+  if (CYCLE_LABELS[k]) return CYCLE_LABELS[k];
+  return k.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) + (k.includes('fee') ? '' : ' Fee');
 }
 
 export function billingCycleCadence(cycle) {
-  const k = String(cycle || 'monthly').toLowerCase();
-  return CYCLE_CADENCE[k] || CYCLE_CADENCE.monthly;
+  if (!cycle) return CYCLE_CADENCE.monthly;
+  const k = String(cycle).toLowerCase().trim();
+  if (CYCLE_CADENCE[k]) return CYCLE_CADENCE[k];
+  return k.replace(/_/g, ' ');
 }
 
 // Ordered list for admin pickers so the dropdown stays consistent.
@@ -37,8 +45,10 @@ export const BILLING_CYCLE_OPTIONS = [
   { value: 'monthly',     label: 'Monthly Fee' },
   { value: 'quarterly',   label: 'Quarterly Fee' },
   { value: 'half_yearly', label: 'Half-Yearly Fee' },
+  { value: 'yearly',      label: 'Yearly Fee' },
   { value: 'annual',      label: 'Annual Fee' },
   { value: 'one_time',    label: 'One-Time Fee' },
+  { value: 'custom',      label: 'Custom Fee' },
 ];
 
 export default {

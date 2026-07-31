@@ -39,6 +39,7 @@ import { confirm } from '../../../components/ConfirmDialog';
 // the current API base. Same helper used everywhere else so the
 // legacy behavior only lives in one place.
 import resolveAssetUrl from '../../../utils/assetUrl';
+import CourseImage from '../../../components/CourseImage';
 
 const ACCENTS = [palette.purple, palette.blue, palette.green, palette.orange, palette.pink, palette.teal];
 const cycleAccent = (i) => ACCENTS[i % ACCENTS.length];
@@ -527,26 +528,19 @@ function CategoryChip({ label, emoji, imageUrl, active, onPress, accent }) {
 }
 
 function FeaturedProgramCard({ program, accent, onPress, onEnroll }) {
-  // Track image-load failure so a 404 or corrupted URL falls back to
-  // the branded sparkle placeholder instead of leaving a blank tile.
-  const [imgError, setImgError] = React.useState(false);
-  const rawUrl = program.image_url || program.thumbnail_url;
-  const img = rawUrl && !imgError ? resolveAssetUrl(rawUrl) : null;
+  const coverUri = program.image_url || program.thumbnail_url;
   return (
     <TouchableOpacity onPress={onPress} activeOpacity={0.9} style={styles.featuredCard}>
       <View style={[styles.featuredImage, { backgroundColor: accent.soft }]}>
-        {img ? (
-          <Image
-            source={{ uri: img }}
-            style={StyleSheet.absoluteFill}
-            resizeMode="cover"
-            onError={() => setImgError(true)}
-          />
-        ) : (
-          <View style={[styles.center, { flex: 1 }]}>
-            <Sparkles size={36} color={accent.vivid} strokeWidth={2.2} />
-          </View>
-        )}
+        <CourseImage
+          uri={coverUri}
+          width="100%"
+          height="100%"
+          radius={0}
+          fit="contain"
+          icon="course"
+          style={StyleSheet.absoluteFill}
+        />
         <View style={[styles.featuredBadge, { backgroundColor: accent.vivid }]}>
           <Sparkles size={10} color="#fff" strokeWidth={2.6} />
           <Text style={styles.featuredBadgeText}>Featured</Text>
@@ -569,24 +563,19 @@ function FeaturedProgramCard({ program, accent, onPress, onEnroll }) {
 }
 
 function GridProgramCard({ program, accent, onPress, onEnroll }) {
-  const [imgError, setImgError] = React.useState(false);
-  const rawUrl = program.image_url || program.thumbnail_url;
-  const img = rawUrl && !imgError ? resolveAssetUrl(rawUrl) : null;
+  const coverUri = program.image_url || program.thumbnail_url;
   return (
     <TouchableOpacity onPress={onPress} activeOpacity={0.9} style={styles.gridCard}>
       <View style={[styles.gridImage, { backgroundColor: accent.soft }]}>
-        {img ? (
-          <Image
-            source={{ uri: img }}
-            style={StyleSheet.absoluteFill}
-            resizeMode="cover"
-            onError={() => setImgError(true)}
-          />
-        ) : (
-          <View style={[styles.center, { flex: 1 }]}>
-            <GraduationCap size={28} color={accent.vivid} strokeWidth={2.2} />
-          </View>
-        )}
+        <CourseImage
+          uri={coverUri}
+          width="100%"
+          height="100%"
+          radius={0}
+          fit="contain"
+          icon="course"
+          style={StyleSheet.absoluteFill}
+        />
         <TouchableOpacity
           onPress={(e) => { e.stopPropagation?.(); onPress(); }}
           style={styles.previewBtn}

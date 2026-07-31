@@ -280,55 +280,67 @@ exports.listInstitutionAwaitingCertificate = async (req, res) => {
 // `certificates` table so the certificate is discoverable from the
 // student's own belt/certificate history.
 exports.sendCertificate = async (req, res) => {
-  const client = await pool.connect();
+  // ── Ground rules for this handler ─────────────────────────────
+  // Every OPTIONAL read (belt tables, student_profiles, certificate
+  // templates) runs on the shared `pool` — i.e. OUTSIDE any
+  // transaction. A single failed SELECT inside a transaction poisons
+  // the whole txn with 25P02 "current transaction is aborted", and a
+  // catch{} does NOT rehabilitate it. That's the class of bug this
+  // endpoint has been hitting: belt_promotions doesn't exist on this
+  // schema, the try/catch swallowed the 42P01, but the poisoned txn
+  // then failed the certificates INSERT and the course_completions
+  // UPDATE, both of which surfaced as generic "Server error (500)".
+  //
+  // The transactional block below is now tight: SELECT FOR UPDATE +
+  // certificates INSERT (savepoint-protected) + course_completions
+  // UPDATE. Everything else — access check, template lookup, belt
+  // history — is resolved before we ever BEGIN.
+  let client;
   try {
     const adminId = req.user.id;
     const id = parseInt(req.params.id, 10);
     if (!Number.isInteger(id)) return res.status(400).json({ message: 'Invalid id' });
 
-    await client.query('BEGIN');
-
-    const check = await client.query(
+    // ── Pre-transaction reads (all on the pool) ─────────────────
+    // Fetch the completion row first so we can access-check + prepare
+    // template / belt / trainer / institution data without holding a
+    // FOR UPDATE lock during the lookups.
+    const checkPre = await pool.query(
       `SELECT cc.*, c.name AS course_name, u.name AS student_name
          FROM course_completions cc
          JOIN courses c ON c.id = cc.course_id
          JOIN users u   ON u.id = cc.student_id
-        WHERE cc.id = $1
-        FOR UPDATE`,
+        WHERE cc.id = $1`,
       [id],
     );
-    if (check.rows.length === 0) {
-      await client.query('ROLLBACK');
+    if (checkPre.rows.length === 0) {
       return res.status(404).json({ message: 'Not found' });
     }
-    const row = check.rows[0];
+    const rowPre = checkPre.rows[0];
+
+    if (rowPre.status === 'certificate_sent') {
+      return res.status(400).json({ message: 'Certificate already sent' });
+    }
 
     // Institution access check — same rule as the list endpoint.
     const adminInst = await getMyInstitutionId(adminId);
     if (!adminInst) {
-      await client.query('ROLLBACK');
       return res.status(403).json({ message: 'No institution linked' });
     }
-    const parentRes = await client.query(
+    const parentRes = await pool.query(
       `SELECT parent_institution_id FROM institutions WHERE id = $1`,
       [adminInst],
     );
     const isSubBranch = !!parentRes.rows[0]?.parent_institution_id;
     const allowed = isSubBranch
-      ? adminInst === row.institution_id
-      : (adminInst === row.institution_id
-         || (await client.query(
+      ? adminInst === rowPre.institution_id
+      : (adminInst === rowPre.institution_id
+         || (await pool.query(
               `SELECT 1 FROM institutions WHERE id = $1 AND parent_institution_id = $2`,
-              [row.institution_id, adminInst],
+              [rowPre.institution_id, adminInst],
             )).rows.length > 0);
     if (!allowed) {
-      await client.query('ROLLBACK');
       return res.status(403).json({ message: 'Not your student' });
-    }
-
-    if (row.status === 'certificate_sent') {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ message: 'Certificate already sent' });
     }
 
     // Certificate template + merged placeholder payload. Optional
@@ -341,19 +353,20 @@ exports.sendCertificate = async (req, res) => {
     const bodyTemplateId = Number.parseInt(req.body?.template_id, 10);
     let template = null;
     try {
-      const t = await client.query(
+      const t = await pool.query(
         Number.isInteger(bodyTemplateId)
           ? `SELECT * FROM certificate_templates
               WHERE id = $1 AND institution_id = $2`
           : `SELECT * FROM certificate_templates
               WHERE institution_id = $1 AND is_default = TRUE
               ORDER BY updated_at DESC LIMIT 1`,
-        Number.isInteger(bodyTemplateId) ? [bodyTemplateId, row.institution_id]
-                                         : [row.institution_id],
+        Number.isInteger(bodyTemplateId) ? [bodyTemplateId, rowPre.institution_id]
+                                         : [rowPre.institution_id],
       );
       template = t.rows[0] || null;
     } catch (tplErr) {
-      // eslint-disable-next-line no-console
+      // Migration 055 not applied — template rendering falls back to
+      // the default layout. Not fatal.
       console.log('[sendCertificate] template lookup skipped:', tplErr?.message);
     }
 
@@ -364,13 +377,13 @@ exports.sendCertificate = async (req, res) => {
     let currentBelt = req.body?.belt_name || null;
     if (!currentBelt) {
       try {
-        const bRes = await client.query(
+        const bRes = await pool.query(
           `SELECT bl.name
              FROM student_belt_promotions p
              JOIN belt_levels bl ON bl.id = p.belt_level_id
             WHERE p.student_id = $1
             ORDER BY p.promoted_at DESC LIMIT 1`,
-          [row.student_id],
+          [rowPre.student_id],
         );
         currentBelt = bRes.rows[0]?.name || null;
       } catch { /* belt tables optional */ }
@@ -379,9 +392,9 @@ exports.sendCertificate = async (req, res) => {
     // is available — this is what the admin sees in the students list.
     if (!currentBelt) {
       try {
-        const spRes = await client.query(
+        const spRes = await pool.query(
           `SELECT belt_category FROM student_profiles WHERE user_id = $1`,
-          [row.student_id],
+          [rowPre.student_id],
         );
         currentBelt = spRes.rows[0]?.belt_category || null;
       } catch { /* profile table optional */ }
@@ -395,26 +408,24 @@ exports.sendCertificate = async (req, res) => {
       const { checkBeltRange } = require('./certificateTemplate.controller');
       const gate = checkBeltRange(template, currentBelt);
       if (!gate.ok) {
-        await client.query('ROLLBACK');
         return res.status(422).json({
           message: gate.message,
           code: 'BELT_RANGE_BLOCKED',
         });
       }
     } catch (rangeErr) {
-      // eslint-disable-next-line no-console
       console.warn('[sendCertificate] belt-range check skipped:', rangeErr?.message);
     }
-    const iRes = await client.query(
+    const iRes = await pool.query(
       `SELECT name, city FROM institutions WHERE id = $1`,
-      [row.institution_id],
+      [rowPre.institution_id],
     );
-    const trainerRes = row.trainer_id
-      ? await client.query(`SELECT name FROM users WHERE id = $1`, [row.trainer_id])
+    const trainerRes = rowPre.trainer_id
+      ? await pool.query(`SELECT name FROM users WHERE id = $1`, [rowPre.trainer_id])
       : { rows: [] };
 
     const now = new Date();
-    const certNo = `VRF-${row.institution_id}-${now.getFullYear()}-${
+    const certNo = `VRF-${rowPre.institution_id}-${now.getFullYear()}-${
       Math.floor(Math.random() * 90000) + 10000
     }`;
     // Defensive date coercion — pg normally returns TIMESTAMPTZ as
@@ -430,29 +441,64 @@ exports.sendCertificate = async (req, res) => {
     };
     // Belt PROGRESSION — resolve the student's most recent belt_
     // promotions row so the belt_from / belt_to placeholder pins can
-    // render "White Belt → Yellow Belt" on the certificate. If no
-    // promotion exists (e.g. certificate not tied to a grading
-    // event), both fields resolve to '' and the pins render blank
-    // per spec ("If a certificate is not associated with a belt
-    // promotion, the fields should remain blank or be hidden").
+    // render "White Belt → Yellow Belt" on the certificate. Not all
+    // schemas carry this table (some deployments never migrated it),
+    // so we probe information_schema first — that keeps the check
+    // side-effect free and skips a 42P01 on the read path.
     let beltFrom = '';
     let beltTo   = '';
     try {
-      const bp = await client.query(
-        `SELECT previous_belt, new_belt
-           FROM belt_promotions
-          WHERE student_id = $1
-          ORDER BY promoted_at DESC
+      const bpProbe = await pool.query(
+        `SELECT 1 FROM information_schema.tables
+          WHERE table_schema = 'public' AND table_name = 'belt_promotions'
           LIMIT 1`,
-        [row.student_id],
       );
-      if (bp.rows.length > 0) {
-        beltFrom = bp.rows[0].previous_belt || '';
-        beltTo   = bp.rows[0].new_belt      || '';
+      if (bpProbe.rows.length > 0) {
+        const bp = await pool.query(
+          `SELECT previous_belt, new_belt
+             FROM belt_promotions
+            WHERE student_id = $1
+            ORDER BY promoted_at DESC
+            LIMIT 1`,
+          [rowPre.student_id],
+        );
+        if (bp.rows.length > 0) {
+          beltFrom = bp.rows[0].previous_belt || '';
+          beltTo   = bp.rows[0].new_belt      || '';
+        }
       }
     } catch (_) {
-      // Table missing / older schema — leave blank.
+      // Table exists but query failed for some other reason — leave blank.
     }
+
+    // ── Transaction: FOR UPDATE lock + writes only ──────────────
+    // Everything above ran on the pool without a transaction. We now
+    // open a tight transaction, re-fetch the row FOR UPDATE (so a
+    // concurrent Send Certificate can't double-fire), insert the
+    // certificate, and stamp the completion.
+    client = await pool.connect();
+    await client.query('BEGIN');
+
+    const check = await client.query(
+      `SELECT status, institution_id FROM course_completions
+        WHERE id = $1 FOR UPDATE`,
+      [id],
+    );
+    if (check.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Not found' });
+    }
+    if (check.rows[0].status === 'certificate_sent') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Certificate already sent' });
+    }
+    // Access re-check under the lock — defensive: institution could
+    // have flipped hands between the pool read and here.
+    if (check.rows[0].institution_id !== rowPre.institution_id) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: 'Record changed, please retry.' });
+    }
+    const row = rowPre;
 
     const values = {
       student_name:     row.student_name,
@@ -556,10 +602,12 @@ exports.sendCertificate = async (req, res) => {
       completion: upd.rows[0],
     });
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
+    if (client) {
+      try { await client.query('ROLLBACK'); } catch (_) {}
+    }
     console.error('sendCertificate error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
   } finally {
-    client.release();
+    if (client) client.release();
   }
 };

@@ -92,11 +92,10 @@ function sanitizeCoursePayload(body) {
     language:               body.language || 'English',
     price:                  body.price !== undefined ? parseFloat(body.price) : 0,
     // billing_cycle drives the fee label on the payment summary,
-    // Razorpay checkout, and invoice PDF. Whitelist the enum + default
+    // Razorpay checkout, and invoice PDF. Normalize input + default
     // to 'monthly' so anything unrecognised falls back to legacy behaviour.
-    billing_cycle:          (['one_time','monthly','quarterly','half_yearly','annual']
-                              .includes(String(body.billing_cycle || '').toLowerCase()))
-                              ? String(body.billing_cycle).toLowerCase()
+    billing_cycle:          body.billing_cycle
+                              ? String(body.billing_cycle).toLowerCase().trim()
                               : 'monthly',
     admission_fee:          body.admission_fee !== undefined ? parseFloat(body.admission_fee) : 0,
     belt_system:            !!body.belt_system,
@@ -430,14 +429,10 @@ exports.updateCourse = async (req, res) => {
       }
     }
 
-    // Whitelist + normalise billing_cycle so the UPDATE branch keeps
-    // parity with the CREATE branch. Unknown values fall back to null
-    // via COALESCE (which then keeps whatever was already stored).
-    const CYCLES = new Set(['one_time','monthly','quarterly','half_yearly','annual']);
+    // Normalise billing_cycle so the UPDATE branch keeps
+    // parity with the CREATE branch.
     const billingCycleParam = has('billing_cycle')
-      ? (CYCLES.has(String(body.billing_cycle || '').toLowerCase())
-          ? String(body.billing_cycle).toLowerCase()
-          : null)
+      ? (body.billing_cycle ? String(body.billing_cycle).toLowerCase().trim() : 'monthly')
       : null;
 
     // Schema-aware UPDATE — same idea as createCourse. Each field is a

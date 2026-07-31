@@ -28,13 +28,14 @@ import {
 } from 'react-native';
 import {
   ArrowLeft, Search, Check, X as XIcon, Clock, Plane, History,
-  CalendarDays, Users, ChevronDown, ChevronLeft, ChevronRight,
+  CalendarDays, Users, ChevronDown, ChevronLeft, ChevronRight, Download,
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 import { confirm } from '../../components/ConfirmDialog';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import ExportAttendanceModal from '../../components/ExportAttendanceModal';
 
 // ── Status config ─────────────────────────────────────────────────────────
 // Single source of truth — order here drives both the live-counter strip and
@@ -157,6 +158,11 @@ export default function StaffAttendanceScreen({ navigation, route }) {
   const [batches, setBatches] = useState([]);
   const [selectedBatchId, setSelectedBatchId] = useState(preselectBatchId);
   const [students, setStudents] = useState([]);
+  // Export modal — branch admins get an Export chip in the header.
+  // The shared ExportAttendanceModal talks to /attendance/export,
+  // which uses getBranchScope() to restrict rows to the caller's
+  // branch automatically for sub-branch admins.
+  const [exportOpen, setExportOpen] = useState(false);
   const [attendance, setAttendance] = useState({}); // { studentId: 'present'|... }
   const [date, setDate] = useState(preselectDate);
 
@@ -491,6 +497,20 @@ export default function StaffAttendanceScreen({ navigation, route }) {
             </Text>
           ) : null}
         </View>
+        {/* Branch admins get an Export chip alongside History. Trainers
+            don't — they don't own the attendance ledger for a whole
+            branch, and the backend export route requires role='admin'
+            anyway. */}
+        {mode === 'branch' ? (
+          <TouchableOpacity
+            onPress={() => setExportOpen(true)}
+            style={[styles.historyBtn, styles.exportBtn]}
+            activeOpacity={0.85}
+          >
+            <Download size={14} color={palette.green.on} strokeWidth={2.4} />
+            <Text style={[styles.historyBtnText, styles.exportBtnText]}>Export</Text>
+          </TouchableOpacity>
+        ) : null}
         <TouchableOpacity
           onPress={() => {
             // Trainer History sits on the outer stack (parent hop);
@@ -513,6 +533,18 @@ export default function StaffAttendanceScreen({ navigation, route }) {
           <Text style={styles.historyBtnText}>History</Text>
         </TouchableOpacity>
       </View>
+
+      {/* Branch attendance export modal. `isBranchAdmin` hides the
+          branch chip picker (server enforces the scope anyway) and
+          the modal appends the JWT to the URL so Linking.openURL
+          hits the backend authenticated. */}
+      {mode === 'branch' ? (
+        <ExportAttendanceModal
+          visible={exportOpen}
+          onClose={() => setExportOpen(false)}
+          isBranchAdmin
+        />
+      ) : null}
 
       <ScrollView
         style={{ flex: 1 }}
@@ -884,6 +916,13 @@ const styles = StyleSheet.create({
     backgroundColor: palette.purple.soft,
   },
   historyBtnText: { ...type.micro, color: palette.purple.on, fontWeight: '700' },
+  // Export chip — same shape as History, tinted green so the branch
+  // admin's two header actions are visually distinct at a glance.
+  exportBtn: {
+    marginRight: 6,
+    backgroundColor: palette.green.soft,
+  },
+  exportBtnText: { color: palette.green.on },
 
   // Section label
   sectionLabel: {

@@ -107,6 +107,7 @@ router.get('/institution/me',
 router.patch('/student/:userId',
   verifyToken,
   requireRole('admin'),
+  requireActiveSubscription,
   enrollmentController.updateStudentByAdmin);
 
 // Admin-only — soft-delete a student (institution + branch login).
@@ -117,6 +118,7 @@ router.patch('/student/:userId',
 router.delete('/student/:userId',
   verifyToken,
   requireRole('admin'),
+  requireActiveSubscription,
   enrollmentController.deleteStudentByAdmin);
 
 module.exports = router;

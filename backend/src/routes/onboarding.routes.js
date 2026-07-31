@@ -29,6 +29,12 @@ router.get('/pay-approval/:institutionId', onboardingController.startApprovalPay
 // when the frontend isn't deployed yet, and no payer ever lands on a
 // raw 404 after successfully paying.
 router.get('/payment-success', onboardingController.renderPaymentSuccessPage);
+// Active verify path — mobile / web calls this to force the backend
+// to re-check the Razorpay Payment Link status and activate the
+// institution on the spot when it's paid. Belt-and-braces for a
+// lost / delayed webhook. Public + optional-auth so the mobile can
+// call it right after login (before the JWT even lands on the client).
+router.post('/verify-payment', onboardingController.verifyPayment);
 // Admin walks away from Razorpay before paying → mark the still-pending
 // row 'cancelled' so History reflects the truth.
 router.post('/mark-payment-cancelled', verifyToken, requireRole('admin'), onboardingController.markPaymentCancelled);
@@ -83,10 +89,12 @@ router.post('/:id/notify',              verifyToken, onboardingController.notify
 // Operations / Master) — used when filling in fields on behalf of a branch
 // whose parent only provided basic info.
 router.put('/:id/super-admin-edit', verifyToken, onboardingController.superAdminEditInstitution);
+// Super admin: manually provision credentials for post-registration branches
+router.post('/:id/send-branch-credentials', verifyToken, requireRole('super_admin'), onboardingController.sendBranchCredentials);
 // Sub-branch credential recovery — rotates the branch admin's password
 // and re-emails it. Used when the original setup email got lost / went
 // to spam / never arrived.
-router.post('/:id/resend-branch-credentials', verifyToken, onboardingController.resendBranchCredentials);
+router.post('/:id/resend-branch-credentials', verifyToken, requireRole('super_admin'), onboardingController.resendBranchCredentials);
 // Sister of resend-branch-credentials — operates on a branch INDEX inside
 // the parent's JSONB branches[]. Provisions the child institution +
 // user row on first call if it doesn't exist yet, otherwise just rotates

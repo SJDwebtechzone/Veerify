@@ -39,6 +39,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 import resolveAssetUrl from '../../utils/assetUrl';
+import Avatar from '../../components/Avatar';
 
 // ── Belt catalog ──────────────────────────────────────────────────────────
 // Color tokens mirror the literal belt strap colors. We pick one belt per
@@ -692,17 +693,12 @@ function StudentCard({ student, attendancePct, onPress }) {
   return (
     <TouchableOpacity style={styles.card} onPress={onPress} activeOpacity={0.9}>
       <View style={styles.cardTop}>
-        <View style={styles.cardAvatar}>
-          {photoUrl ? (
-            <Image
-              source={{ uri: photoUrl }}
-              style={styles.cardAvatarImg}
-              resizeMode="cover"
-            />
-          ) : (
-            <Text style={styles.cardAvatarText}>{initials}</Text>
-          )}
-        </View>
+        <Avatar
+          uri={student.student_photo_url}
+          name={student.student_name || initials}
+          size={64}
+          tone="purple"
+        />
         <TouchableOpacity
           onPress={(e) => { e.stopPropagation?.(); callStudent(); }}
           style={styles.emergencyBtn}

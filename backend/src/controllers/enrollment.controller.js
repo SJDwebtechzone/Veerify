@@ -476,11 +476,8 @@ exports.enrollInBatch = async (req, res) => {
         const tempPassword = generateTempPassword();
         const hashed = await bcrypt.hash(tempPassword, 10);
         // Find the admin's institution so we link the new student to it.
-        const adminInst = await pool.query(
-          `SELECT institution_id FROM users WHERE id = $1`,
-          [req.user.id],
-        );
-        const institutionId = adminInst.rows[0]?.institution_id || null;
+        const scope = await getBranchScope(req.user.id);
+        const institutionId = scope ? scope.callerInstId : null;
         // status: 'pending' when payment link — the login controller
         //         short-circuits with PAYMENT_PENDING so the student
         //         can't sign in until the webhook activates them.
@@ -531,6 +528,20 @@ exports.enrollInBatch = async (req, res) => {
     }
 
     const batch = batchResult.rows[0];
+
+    // Branch ownership check for admin enrollments
+    if (req.user.role === 'admin') {
+      const scope = await getBranchScope(req.user.id);
+      if (scope) {
+        if (scope.isSubBranchAdmin) {
+          if (batch.branch_id !== scope.callerInstId && batch.institution_id !== scope.callerInstId) {
+            return res.status(403).json({ message: 'Batch does not belong to your branch.' });
+          }
+        } else if (batch.institution_id !== scope.rootId) {
+          return res.status(403).json({ message: 'Batch does not belong to your institution.' });
+        }
+      }
+    }
 
     // Capacity check (batch-level — physical seat count for this batch).
     if (parseInt(batch.enrolled_count) >= batch.capacity) {
@@ -718,6 +729,7 @@ exports.enrollInBatch = async (req, res) => {
       // Fire-and-forget email to the student with the Razorpay link.
       // We build the message inline here rather than adding another
       // mailer helper — the copy is one paragraph and one link.
+      console.log(`[enroll] Created payment link ${link.link.id} for enrollment ${enrollmentId}`);
       try {
         const { sendMail } = require('../utils/mailer');
         if (typeof sendMail === 'function' && stu.rows[0]?.email) {
@@ -732,7 +744,9 @@ exports.enrollInBatch = async (req, res) => {
               `Amount payable: ₹${amount}\n\n` +
               `Once your payment is confirmed we'll email your login credentials + a welcome guide so you can start learning right away. ` +
               `Your enrolment stays in Pending Payment status until then — no account access before payment.`,
-          }).catch((e) => console.warn('[enroll] link email failed:', e?.message));
+          })
+          .then(() => console.log(`[enroll] Sent payment link email to ${stu.rows[0].email}`))
+          .catch((e) => console.warn('[enroll] link email failed:', e?.message));
         }
       } catch (mailErr) {
         console.warn('[enroll] mailer helper unavailable:', mailErr?.message);
@@ -1104,15 +1118,19 @@ exports.activateStudentAfterPayment = async function (enrollmentId) {
     // (that mail was deferred pending payment), so nothing is lost.
     const tempPassword = generateTempPassword();
     const hashed = await bcrypt.hash(tempPassword, 10);
-    await pool.query(
+    const upd = await pool.query(
       `UPDATE users SET
          password             = $1,
          status               = 'active',
          must_change_password = TRUE,
          updated_at           = NOW()
-       WHERE id = $2`,
+       WHERE id = $2 AND status = 'pending'`,
       [hashed, row.student_id],
     );
+    if (upd.rowCount === 0) {
+      // Another concurrent request already activated this user
+      return { ok: true, sent: false, alreadyActive: true };
+    }
     // Resume Registration completion stamp — done separately so a
     // stale schema (missing `registration_completed_at` before
     // migration 077 is applied) doesn't rollback the activation.
@@ -2650,18 +2668,18 @@ exports.updateStudentByAdmin = async (req, res) => {
     }
 
     const studentRow = await pool.query(
-      'SELECT id, institution_id, name, email, phone FROM users WHERE id = $1 AND role = $2',
+      `SELECT u.id, u.institution_id, u.name, u.email, u.phone, i.parent_institution_id
+         FROM users u
+         LEFT JOIN institutions i ON i.id = u.institution_id
+        WHERE u.id = $1 AND u.role = $2`,
       [studentId, 'student'],
     );
     const student = studentRow.rows[0];
     if (!student) {
       return res.status(404).json({ message: 'Student not found' });
     }
-    // Student's users.institution_id is stamped as ROOT — same for the
-    // main admin. We still cross-check by branch via adminCanSeeStudent
-    // so a sub-branch admin can't edit a student whose only enrollments
-    // are at a sibling branch.
-    if (student.institution_id !== scope.rootId) {
+    const studentRootId = student.parent_institution_id || student.institution_id;
+    if (studentRootId !== scope.rootId) {
       return res.status(403).json({ message: 'Student not in your institution' });
     }
     const { adminCanSeeStudent } = require('../utils/branchScope');
@@ -2854,13 +2872,16 @@ exports.deleteStudentByAdmin = async (req, res) => {
       return res.status(403).json({ message: 'Admin not linked to an institution' });
     }
     const studentRow = await pool.query(
-      `SELECT id, name, email, phone, institution_id
-         FROM users WHERE id = $1 AND role = $2`,
+      `SELECT u.id, u.name, u.email, u.phone, u.institution_id, i.parent_institution_id
+         FROM users u
+         LEFT JOIN institutions i ON i.id = u.institution_id
+        WHERE u.id = $1 AND u.role = $2`,
       [studentId, 'student'],
     );
     const student = studentRow.rows[0];
     if (!student) return res.status(404).json({ message: 'Student not found' });
-    if (student.institution_id !== scope.rootId) {
+    const studentRootId = student.parent_institution_id || student.institution_id;
+    if (studentRootId !== scope.rootId) {
       return res.status(403).json({ message: 'Student not in your institution' });
     }
     const canSee = await adminCanSeeStudent(pool, scope, studentId);

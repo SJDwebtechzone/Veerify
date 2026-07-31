@@ -29,6 +29,7 @@ import {
 
 import apiClient from '../../api/client';
 import resolveAssetUrl from '../../utils/assetUrl';
+import Avatar from '../../components/Avatar';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 
 // Turn the trainer.skills JSONB (or legacy specialization) into a
@@ -147,15 +148,13 @@ export default function PublicTrainerProfileScreen({ route, navigation }) {
         >
           {/* Hero — photo + name + headline */}
           <View style={styles.hero}>
-            {photo ? (
-              <Image source={{ uri: photo }} style={styles.heroPhoto} />
-            ) : (
-              <View style={[styles.heroPhoto, styles.heroPhotoFallback]}>
-                <Text style={styles.heroInitials}>
-                  {(trainer.name || 'T').charAt(0).toUpperCase()}
-                </Text>
-              </View>
-            )}
+            <Avatar
+              uri={trainer.photo_url}
+              name={trainer.name}
+              size={112}
+              tone="purple"
+              style={{ marginBottom: 8 }}
+            />
             <Text style={styles.heroName}>{trainer.name}</Text>
             <Text style={styles.heroHeadline}>{headline}</Text>
             {belt ? (

@@ -41,6 +41,7 @@ try {
 } catch (_) { DocPicker = null; }
 
 import apiClient from '../../api/client';
+import resolveAssetUrl from '../../utils/assetUrl';
 import DateField from '../../components/DateField';
 import PasswordInput from '../../components/PasswordInput';
 import { useAuth } from '../../context/AuthContext';
@@ -135,7 +136,7 @@ export default function CreateTrainerScreen({ navigation, route }) {
       ? String(editingTrainer.basic_salary)
       : '',
     // Photo — URL only (no local URI for previously-saved uploads).
-    photo_url:        editingTrainer?.photo_url || '',
+    photo_url:        editingTrainer?.photo_url || editingTrainer?.photo || editingTrainer?.profile_photo || editingTrainer?.user?.photo_url || '',
     photo_uri:        '',
     // Identity
     govt_proof_type:   editingTrainer?.govt_proof_type   || '',
@@ -232,6 +233,39 @@ export default function CreateTrainerScreen({ navigation, route }) {
     })();
     return () => { cancelled = true; };
   }, []);
+
+  const [photoError, setPhotoError] = useState(false);
+
+  // Fetch latest trainer details when editing to ensure photo_url is up to date
+  useEffect(() => {
+    if (!isEditing || !editingTrainer?.id) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiClient.get(`/trainers/${editingTrainer.id}`);
+        const t = res.data?.trainer || res.data;
+        if (!cancelled && t && t.photo_url) {
+          setForm((prev) => ({
+            ...prev,
+            photo_url: t.photo_url || prev.photo_url,
+          }));
+        }
+      } catch (err) {
+        console.warn('[CreateTrainer] trainer details fetch failed:', err?.message);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isEditing, editingTrainer?.id]);
+
+  useEffect(() => {
+    setPhotoError(false);
+  }, [form.photo_uri, form.photo_url]);
+
+  const displayPhotoUri = useMemo(() => {
+    if (form.photo_uri) return form.photo_uri;
+    if (form.photo_url) return resolveAssetUrl(form.photo_url);
+    return null;
+  }, [form.photo_uri, form.photo_url]);
 
   const age = useMemo(() => ageFromDob(form.date_of_birth), [form.date_of_birth]);
 
@@ -675,10 +709,11 @@ export default function CreateTrainerScreen({ navigation, route }) {
               <View style={styles.photoPlaceholder}>
                 <ActivityIndicator color={BRAND} />
               </View>
-            ) : form.photo_uri || form.photo_url ? (
+            ) : displayPhotoUri && !photoError ? (
               <Image
-                source={{ uri: form.photo_uri || form.photo_url }}
+                source={{ uri: displayPhotoUri }}
                 style={styles.photoImage}
+                onError={() => setPhotoError(true)}
               />
             ) : (
               <View style={styles.photoPlaceholder}>

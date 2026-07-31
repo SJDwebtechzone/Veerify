@@ -456,6 +456,13 @@ export default function AdminDashboardScreen({ navigation }) {
         {branchView ? null : (
           <SubscriptionBanner
             subscription={subscription}
+            // Branches inherit the parent institution's subscription
+            // and cannot renew themselves. Passing isBranch flips the
+            // banner into passive-lock mode: an informational card
+            // with the spec's "Subscription Locked" copy and no Pay
+            // Now button. Institution admins keep the actionable
+            // banner (Pay now / View plan CTAs).
+            isBranch={!!data.is_sub_branch}
           />
         )}
 
@@ -483,6 +490,14 @@ export default function AdminDashboardScreen({ navigation }) {
                 accent: palette.purple,
                 icon: Users,
                 onPress: () => navigation.navigate('Students', brRoute),
+              },
+              {
+                label: 'Batches',
+                value: String(counts.total_batches ?? counts.today_classes ?? 0),
+                delta: (counts.total_batches ?? counts.today_classes ?? 0) === 0 ? 'No batches yet' : `In ${b?.name || 'this branch'}`,
+                accent: palette.blue,
+                icon: BookOpen,
+                onPress: () => navigation.navigate('BatchesList', brRoute),
               },
               {
                 label: 'Attendance %',
@@ -828,7 +843,7 @@ function BranchPickerBar({ selected, open, branches, onToggle, onClear, onPick }
  * The discount, if enabled on the plan, is applied server-side and surfaces
  * here as plan.effective_price (the actual amount the academy will pay).
  */
-function SubscriptionBanner({ subscription }) {
+function SubscriptionBanner({ subscription, isBranch = false }) {
   if (!subscription) return null;
   const { phase, days_left_in_trial, days_left_in_grace,
           payment_link_url, plan } = subscription;
@@ -836,6 +851,28 @@ function SubscriptionBanner({ subscription }) {
   // Nothing to show for already-active or not-yet-approved academies.
   if (phase === 'paid' || phase === 'pending' || phase === 'registered') {
     return null;
+  }
+
+  // ── Branch caller: passive locked card ─────────────────────────
+  // Per spec, a branch admin cannot renew — the banner shows a
+  // "Subscription Locked" informational card with no Pay Now button.
+  // The write-side 402 modal (api/client.js) handles restricted
+  // action attempts separately.
+  if (isBranch && (phase === 'grace' || phase === 'paid_grace' || phase === 'expired' || phase === 'locked')) {
+    const toneStyles = subStyles.tones.red;
+    return (
+      <View style={[subStyles.card, toneStyles.card]}>
+        <View style={[subStyles.iconWrap, toneStyles.iconWrap]}>
+          <Lock size={18} color={toneStyles.iconColor} strokeWidth={2.4} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={[subStyles.title, toneStyles.title]}>Subscription Locked</Text>
+          <Text style={[subStyles.subtitle, toneStyles.subtitle]}>
+            {"Your institution's subscription has expired. Access will be automatically unlocked once your institution renews its subscription."}
+          </Text>
+        </View>
+      </View>
+    );
   }
 
   // Open the Razorpay link in the system browser. We don't have a deep

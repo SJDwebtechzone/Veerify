@@ -30,6 +30,7 @@ import { confirm } from '../../components/ConfirmDialog';
 // or localhost from the Android emulator, and prepends the current
 // api host to plain /uploads/... paths. See src/utils/assetUrl.js.
 import resolveAssetUrl from '../../utils/assetUrl';
+import Avatar from '../../components/Avatar';
 
 // MoreVertical not in older lucide versions; MoreHorizontal works the same.
 const MoreVertical = MoreHorizontal;
@@ -340,20 +341,13 @@ function TrainerCard({ trainer, onCall, onMail, onEdit, onDelete, onView }) {
     <View style={styles.card}>
       {/* Top row: avatar + name + kebab */}
       <View style={styles.cardTop}>
-        <View style={[styles.avatar, { borderColor: belt.border }]}>
-          {photoUrl ? (
-            <Image source={{ uri: photoUrl }} style={styles.avatarImg} />
-          ) : (
-            <View style={[styles.avatarFallback, { backgroundColor: belt.bg }]}>
-              <Text style={[
-                styles.avatarText,
-                { color: belt.fg === '#FFFFFF' ? '#111827' : belt.fg },
-              ]}>
-                {initials}
-              </Text>
-            </View>
-          )}
-        </View>
+        <Avatar
+          uri={trainer.photo_url}
+          name={trainer.name || initials}
+          size={56}
+          tone="purple"
+          style={{ borderWidth: 2, borderColor: belt.border }}
+        />
 
         <View style={{ flex: 1, minWidth: 0 }}>
           {/* Name + specialization get the whole header row width now
@@ -499,20 +493,13 @@ function TrainerDetailModal({ trainer, onClose, onCall, onMail, onEdit }) {
         <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: 120 }}>
           {/* Hero — avatar, name, specialization, belt */}
           <View style={styles.modalHero}>
-            <View style={[styles.modalAvatar, { borderColor: belt.border }]}>
-              {photoUrl ? (
-                <Image source={{ uri: photoUrl }} style={styles.modalAvatarImg} />
-              ) : (
-                <View style={[styles.modalAvatarFallback, { backgroundColor: belt.bg }]}>
-                  <Text style={[
-                    styles.modalAvatarText,
-                    { color: belt.fg === '#FFFFFF' ? '#111827' : belt.fg },
-                  ]}>
-                    {initials}
-                  </Text>
-                </View>
-              )}
-            </View>
+            <Avatar
+              uri={trainer.photo_url}
+              name={trainer.name || initials}
+              size={96}
+              tone="purple"
+              style={{ borderWidth: 3, borderColor: belt.border, marginBottom: spacing.sm }}
+            />
             <Text style={styles.modalName}>{trainer.name}</Text>
             {trainer.specialization ? (
               <Text style={styles.modalSubtitle}>{trainer.specialization}</Text>

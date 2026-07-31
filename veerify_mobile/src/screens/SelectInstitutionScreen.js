@@ -10,6 +10,7 @@ import { useInstitution } from '../context/InstitutionContext';
 import apiClient from '../api/client';
 import { palette, spacing, radius, shadows, type } from '../theme';
 import { confirm } from '../components/ConfirmDialog';
+import Avatar from '../components/Avatar';
 
 // Lazy require so the app still boots on a fresh checkout that hasn't
 // linked the native module yet. Same pattern the NearbyLocationPicker
@@ -392,15 +393,13 @@ function InstitutionRow({ item, selected, disabled, onPress }) {
       activeOpacity={0.85}
       style={[styles.row, selected && styles.rowSelected]}
     >
-      {logo ? (
-        <Image source={{ uri: logo }} style={styles.logo} resizeMode="cover" />
-      ) : (
-        <View style={[styles.logo, { backgroundColor: palette.purple.soft, alignItems: 'center', justifyContent: 'center' }]}>
-          <Text style={{ ...type.h2, color: palette.purple.on }}>
-            {item.name?.charAt(0).toUpperCase()}
-          </Text>
-        </View>
-      )}
+      <Avatar
+        uri={item.logo_url}
+        name={item.name}
+        size={50}
+        tone="purple"
+        fit="contain"
+      />
       <View style={{ flex: 1 }}>
         <Text style={styles.name} numberOfLines={1}>{item.name}</Text>
         <View style={styles.metaRow}>

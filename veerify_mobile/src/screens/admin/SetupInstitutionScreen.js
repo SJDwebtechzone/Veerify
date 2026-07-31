@@ -29,6 +29,7 @@ import {
 import {
   ArrowLeft, ChevronRight, ChevronLeft, ChevronDown, Check, Camera, FileText, Plus, Trash2,
   Building2, MapPin, ShieldCheck, BarChart3, UserSquare, Calendar, X, Clock,
+  Images as ImagesIcon,
 } from 'lucide-react-native';
 import { launchImageLibrary, launchCamera, } from 'react-native-image-picker';
 
@@ -173,9 +174,38 @@ const blankBranch = () => ({
 const UNLIMITED_THRESHOLD = 999;
 
 export default function SetupInstitutionScreen({ navigation }) {
-  const [stepIdx, setStepIdx] = useState(0);
+  const [stepIdx, setStepIdxRaw] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [uploading, setUploading] = useState(false);
+  // Branded logo-picker bottom sheet. Replaces the outdated Android
+  // Alert.alert(Gallery/Camera/Cancel) chooser with a bottom-anchored
+  // Modal styled with the app palette. `logoPickerOpen` is only used
+  // for the logo tile — the accreditation cert still opens the
+  // system document picker directly (PDF only, no camera path).
+  const [logoPickerOpen, setLogoPickerOpen] = useState(false);
+
+  // Ref to the wizard body ScrollView so every step change can snap
+  // to y=0. Without this, going Next while the previous step was
+  // scrolled down left the new step's header off-screen at the same
+  // offset — the user had to scroll up manually to see the section
+  // intro. Every setStepIdx() below funnels through the wrapper so
+  // this stays true for Next, Back, and progress-strip taps alike.
+  const bodyScrollRef = useRef(null);
+  const setStepIdx = React.useCallback((next) => {
+    setStepIdxRaw((prev) => {
+      const value = typeof next === 'function' ? next(prev) : next;
+      // Fire the scroll on the next tick so the ScrollView has time to
+      // re-layout with the new step's content before we scroll — some
+      // devices otherwise report contentSize 0 and the scroll no-ops.
+      // requestAnimationFrame beats setTimeout(0) for perceived snappiness.
+      requestAnimationFrame(() => {
+        try {
+          bodyScrollRef.current?.scrollTo({ x: 0, y: 0, animated: false });
+        } catch (_) { /* ref not ready yet — harmless */ }
+      });
+      return value;
+    });
+  }, []);
 
   // Plan ceiling — looked up at mount so the Operations step can disable
   // the capacity field on Unlimited and block over-the-limit values on
@@ -487,15 +517,10 @@ export default function SetupInstitutionScreen({ navigation }) {
       pickCertPdf();
       return;
     }
-    Alert.alert(
-      kind === 'logo' ? 'Upload Brand Logo' : 'Upload Certificate',
-      'Choose how to upload:',
-      [
-        { text: 'Gallery', onPress: () => fromGallery(kind) },
-        { text: 'Camera',  onPress: () => fromCamera(kind) },
-        { text: 'Cancel',  style: 'cancel' },
-      ],
-    );
+    // Logo: open the branded bottom-sheet picker. The sheet renders
+    // two big Camera + Gallery tiles + a Cancel row and calls back
+    // into fromCamera / fromGallery on tap. No more OS Alert prompt.
+    setLogoPickerOpen(true);
   };
 
   // Native document picker — PDF only, max 2 MB. Supports both v9
@@ -788,6 +813,9 @@ export default function SetupInstitutionScreen({ navigation }) {
   };
 
   const goNext = () => {
+    // Pressing Next always dismisses any open dropdown on the current
+    // step so it can't linger across a section transition.
+    closeAllDropdowns();
     // On the Contact step, guard against half-added branches. If the user
     // tapped "Add branch" but didn't fill anything in, ask whether they
     // want to fill the details or drop the empty card (so the live count
@@ -858,6 +886,10 @@ export default function SetupInstitutionScreen({ navigation }) {
   };
 
   const goBack = () => {
+    // Symmetrical with goNext — any dropdown open on the current step
+    // dismisses before the section change so it doesn't leak into
+    // the previous step's layout.
+    closeAllDropdowns();
     if (stepIdx === 0) {
       // First step — leaving here exits the entire registration flow, so
       // confirm before discarding whatever they've typed so far. Branded
@@ -1098,7 +1130,10 @@ export default function SetupInstitutionScreen({ navigation }) {
                 onPress={() => {
                   // Only allow moving back to a completed step. Forward
                   // jumping must go through validation.
-                  if (i < stepIdx) setStepIdx(i);
+                  if (i < stepIdx) {
+                    closeAllDropdowns();
+                    setStepIdx(i);
+                  }
                 }}
                 activeOpacity={i < stepIdx ? 0.7 : 1}
               >
@@ -1126,6 +1161,7 @@ export default function SetupInstitutionScreen({ navigation }) {
       </View>
 
       <ScrollView
+        ref={bodyScrollRef}
         style={{ flex: 1 }}
         contentContainerStyle={styles.body}
         keyboardShouldPersistTaps="handled"
@@ -1183,6 +1219,7 @@ export default function SetupInstitutionScreen({ navigation }) {
             set={set}
             planInfo={planInfo}
             mediumCloseRef={mediumCloseRef}
+            closeAllDropdowns={closeAllDropdowns}
           />
         )}
         {stepIdx === 4 && (
@@ -1224,7 +1261,93 @@ export default function SetupInstitutionScreen({ navigation }) {
           )}
         </TouchableOpacity>
       </View>
+
+      {/* Branded logo picker bottom sheet. Replaces the outdated Android
+          Alert.alert(Gallery / Camera / Cancel) chooser. Two big rounded
+          tiles + a Cancel row anchored to the bottom of the screen. */}
+      <LogoPickerSheet
+        visible={logoPickerOpen}
+        onClose={() => setLogoPickerOpen(false)}
+        onPickCamera={() => {
+          setLogoPickerOpen(false);
+          fromCamera('logo');
+        }}
+        onPickGallery={() => {
+          setLogoPickerOpen(false);
+          fromGallery('logo');
+        }}
+      />
     </KeyboardAvoidingView>
+  );
+}
+
+// ─── Logo picker bottom sheet ───────────────────────────────────────────
+// Modal-based bottom sheet that opens when the admin taps the logo tile
+// on Step 1 (Core Details). Renders two brand-styled action tiles for
+// Camera + Gallery plus a Cancel row. Backdrop tap and Android back
+// button dismiss. The actual capture is delegated to launchCamera /
+// launchImageLibrary via the parent's fromCamera / fromGallery calls,
+// so nothing about the upload path changes — only the picker UI.
+function LogoPickerSheet({ visible, onClose, onPickCamera, onPickGallery }) {
+  return (
+    <Modal
+      visible={visible}
+      animationType="slide"
+      transparent
+      onRequestClose={onClose}
+    >
+      <TouchableOpacity
+        style={styles.pickerBackdrop}
+        activeOpacity={1}
+        onPress={onClose}
+      >
+        {/* Inner touch handler blocks backdrop taps so the sheet only
+            dismisses on the outer overlay press. */}
+        <TouchableOpacity
+          style={styles.pickerSheet}
+          activeOpacity={1}
+          onPress={() => {}}
+        >
+          <View style={styles.pickerGrabber} />
+          <Text style={styles.pickerTitle}>Upload Brand Logo</Text>
+          <Text style={styles.pickerSub}>Choose a source for your logo.</Text>
+
+          <View style={styles.pickerTilesRow}>
+            <TouchableOpacity
+              style={styles.pickerTile}
+              onPress={onPickCamera}
+              activeOpacity={0.85}
+            >
+              <View style={[styles.pickerTileIconWrap, { backgroundColor: BRAND_SOFT }]}>
+                <Camera size={26} color={BRAND} strokeWidth={2.2} />
+              </View>
+              <Text style={styles.pickerTileTitle}>Take Photo</Text>
+              <Text style={styles.pickerTileHint}>Use the camera</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.pickerTile}
+              onPress={onPickGallery}
+              activeOpacity={0.85}
+            >
+              <View style={[styles.pickerTileIconWrap, { backgroundColor: '#EEF2FF' }]}>
+                <ImagesIcon size={26} color="#4F46E5" strokeWidth={2.2} />
+              </View>
+              <Text style={styles.pickerTileTitle}>Choose from Gallery</Text>
+              <Text style={styles.pickerTileHint}>Pick an existing photo</Text>
+            </TouchableOpacity>
+          </View>
+
+          <TouchableOpacity
+            style={styles.pickerCancel}
+            onPress={onClose}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.pickerCancelText}>Cancel</Text>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </TouchableOpacity>
+    </Modal>
   );
 }
 
@@ -1323,6 +1446,10 @@ function StepCore({ form, set, pickLogo, uploading, skillsCloseRef, closeAllDrop
           // input's onFocus can dismiss it when focus moves to the
           // next section.
           closeRef={skillsCloseRef}
+          // Enforces "only one dropdown open at a time" across the
+          // wizard — opening Skills closes every other dropdown
+          // (e.g. Medium of Instruction) automatically.
+          onOpen={closeAllDropdowns}
         />
       </Field>
 
@@ -1638,7 +1765,7 @@ function StepAccreditation({ form, set, pickCert, uploading }) {
 }
 
 // ─── Step 4: Operations ─────────────────────────────────────────────────
-function StepOperations({ form, set, planInfo, mediumCloseRef }) {
+function StepOperations({ form, set, planInfo, mediumCloseRef, closeAllDropdowns }) {
   const toggleMedium = (m) => {
     const cur = new Set(form.medium_of_instruction);
     if (cur.has(m)) cur.delete(m);
@@ -1745,6 +1872,9 @@ function StepOperations({ form, set, planInfo, mediumCloseRef }) {
           values={form.medium_of_instruction}
           onToggle={toggleMedium}
           closeRef={mediumCloseRef}
+          // Opening this dropdown closes every other one on the wizard,
+          // enforcing the "only one dropdown open at a time" rule.
+          onOpen={closeAllDropdowns}
         />
       </Field>
 
@@ -1927,7 +2057,7 @@ function InstitutionTypeSelect({ value, onChange, options }) {
 // expands inline with one tappable row per option + a Check tick for the
 // selected ones. Tapping a row toggles it; the trigger summary updates
 // live and the panel stays open so they can pick several at once.
-function SkillsMultiSelect({ values, onToggle, options, other, onOtherChange, closeRef }) {
+function SkillsMultiSelect({ values, onToggle, options, other, onOtherChange, closeRef, onOpen }) {
   const [open, setOpen] = React.useState(false);
 
   // Bind the imperative close handle to the parent's ref so the
@@ -1952,7 +2082,19 @@ function SkillsMultiSelect({ values, onToggle, options, other, onOtherChange, cl
     <View>
       <TouchableOpacity
         style={[styles.skillsTrigger, open && styles.skillsTriggerOpen]}
-        onPress={() => setOpen((o) => !o)}
+        onPress={() => {
+          // Mutual exclusion: opening this panel closes every other
+          // dropdown on the screen (fired via the parent's
+          // closeAllDropdowns piped through onOpen). Skills remains a
+          // multi-select — the panel stays open after each tap so
+          // the admin can pick several disciplines in one visit
+          // (task #88 preserved).
+          setOpen((o) => {
+            const next = !o;
+            if (next && typeof onOpen === 'function') onOpen();
+            return next;
+          });
+        }}
         activeOpacity={0.85}
       >
         <Text
@@ -2070,7 +2212,7 @@ function SkillsMultiSelect({ values, onToggle, options, other, onOtherChange, cl
 // a close function. When the parent's ScrollView scrolls, it calls
 // closeRef.current?.() to dismiss the panel so the next field underneath
 // becomes the focus.
-function MediumDropdown({ options, values, onToggle, closeRef }) {
+function MediumDropdown({ options, values, onToggle, closeRef, onOpen }) {
   const [open, setOpen] = React.useState(false);
 
   // Bind the imperative close-handle to the parent's ref. The empty cleanup
@@ -2089,7 +2231,17 @@ function MediumDropdown({ options, values, onToggle, closeRef }) {
     <View>
       <TouchableOpacity
         style={[styles.skillsTrigger, open && styles.skillsTriggerOpen]}
-        onPress={() => setOpen((o) => !o)}
+        onPress={() => {
+          // Mutual exclusion: opening this dropdown closes every other
+          // one on the screen via the parent's closeAllDropdowns()
+          // (piped through onOpen). Closing this dropdown is a plain
+          // setOpen(false); nothing else needs to react.
+          setOpen((o) => {
+            const next = !o;
+            if (next && typeof onOpen === 'function') onOpen();
+            return next;
+          });
+        }}
         activeOpacity={0.85}
       >
         <Text
@@ -2117,7 +2269,14 @@ function MediumDropdown({ options, values, onToggle, closeRef }) {
               <TouchableOpacity
                 key={opt}
                 style={[styles.skillsItem, on && styles.skillsItemActive]}
-                onPress={() => onToggle(opt)}
+                onPress={() => {
+                  // Spec: "close immediately after a selection is
+                  // made". Language pick is quick — the panel snaps
+                  // shut the moment the owner taps a value so the
+                  // next form field becomes immediately visible.
+                  onToggle(opt);
+                  setOpen(false);
+                }}
                 activeOpacity={0.7}
               >
                 <Text
@@ -3822,6 +3981,100 @@ const styles = StyleSheet.create({
   btnGhostText: { fontSize: 14, fontWeight: '700', color: TEXT_MUTED },
   btnPrimary: { backgroundColor: BRAND, flex: 1.6 },
   btnPrimaryText: { fontSize: 14, fontWeight: '800', color: '#fff' },
+
+  // ── Logo picker bottom sheet ─────────────────────────────────────
+  // Backdrop covers the whole screen so the outer TouchableOpacity
+  // can catch backdrop taps and dismiss. The sheet itself is a white
+  // rounded card anchored to the bottom, with a small grabber, title,
+  // two tiles laid out side-by-side, and a full-width Cancel row.
+  pickerBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.45)',
+    justifyContent: 'flex-end',
+  },
+  pickerSheet: {
+    backgroundColor: SURFACE,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingHorizontal: 20,
+    paddingTop: 10,
+    paddingBottom: 28,
+    shadowColor: '#000',
+    shadowOpacity: 0.12,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: -6 },
+    elevation: 20,
+  },
+  pickerGrabber: {
+    alignSelf: 'center',
+    width: 40,
+    height: 4,
+    borderRadius: 999,
+    backgroundColor: '#E5E7EB',
+    marginBottom: 14,
+  },
+  pickerTitle: {
+    fontSize: 17,
+    fontWeight: '900',
+    color: '#0F172A',
+    textAlign: 'center',
+  },
+  pickerSub: {
+    fontSize: 12,
+    color: TEXT_MUTED,
+    textAlign: 'center',
+    marginTop: 4,
+    marginBottom: 18,
+    fontWeight: '600',
+  },
+  pickerTilesRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 14,
+  },
+  pickerTile: {
+    flex: 1,
+    backgroundColor: '#F8FAFC',
+    borderRadius: 16,
+    paddingVertical: 18,
+    paddingHorizontal: 12,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  pickerTileIconWrap: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 10,
+  },
+  pickerTileTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#0F172A',
+    textAlign: 'center',
+  },
+  pickerTileHint: {
+    fontSize: 11,
+    color: TEXT_MUTED,
+    marginTop: 2,
+    textAlign: 'center',
+    fontWeight: '600',
+  },
+  pickerCancel: {
+    backgroundColor: '#F1F5F9',
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: 'center',
+    marginTop: 2,
+  },
+  pickerCancelText: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#475569',
+  },
 
   // ── LocationCaptureCard styles ─────────────────────────────────────
   // Were referenced inside LocationCaptureCard but never declared, so

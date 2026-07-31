@@ -39,6 +39,7 @@ import { useAuth } from '../../context/AuthContext';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 import { confirm } from '../../components/ConfirmDialog';
 import resolveAssetUrl from '../../utils/assetUrl';
+import Avatar from '../../components/Avatar';
 import DateField from '../../components/DateField';
 
 const GENDER_OPTIONS = ['Male', 'Female', 'Other', 'Prefer not to say'];
@@ -247,13 +248,12 @@ export default function StudentEditProfileScreen({ navigation }) {
         {/* Avatar block */}
         <View style={styles.avatarBlock}>
           <View style={styles.avatarWrap}>
-            {avatarUri ? (
-              <Image source={{ uri: avatarUri }} style={styles.avatarImg} />
-            ) : (
-              <View style={[styles.avatarImg, styles.avatarFallback]}>
-                <Text style={styles.avatarInitial}>{initials}</Text>
-              </View>
-            )}
+            <Avatar
+              uri={form.photo_url}
+              name={form.name || initials}
+              size={96}
+              tone="purple"
+            />
             <TouchableOpacity onPress={pickPhoto} style={styles.cameraBtn} activeOpacity={0.85}>
               {uploading ? <ActivityIndicator color="#fff" /> : <Camera size={13} color="#fff" strokeWidth={2.6} />}
             </TouchableOpacity>

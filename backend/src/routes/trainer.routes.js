@@ -22,7 +22,7 @@ router.get('/:id/public', trainerController.getPublicTrainerById);
 router.post('/', verifyToken, requireRole('admin'), requireActiveSubscription, trainerController.createTrainer);
 router.get('/', verifyToken, requireRole('admin'), trainerController.getMyTrainers);
 router.get('/:id', verifyToken, requireRole('admin'), trainerController.getTrainerById);
-router.put('/:id', verifyToken, requireRole('admin'), trainerController.updateTrainer);
-router.delete('/:id', verifyToken, requireRole('admin'), trainerController.deleteTrainer);
+router.put('/:id', verifyToken, requireRole('admin'), requireActiveSubscription, trainerController.updateTrainer);
+router.delete('/:id', verifyToken, requireRole('admin'), requireActiveSubscription, trainerController.deleteTrainer);
 
 module.exports = router;

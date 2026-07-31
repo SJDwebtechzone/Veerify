@@ -24,6 +24,8 @@ import {
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 import { useBellScrollHandler } from '../../components/bellScrollBus';
+import CourseImage from '../../components/CourseImage';
+import { billingCycleLabel } from '../../utils/billingCycle';
 
 const ASSET_HOST = (apiClient.defaults.baseURL || '').replace(/\/api\/?$/, '');
 function resolveAssetUrl(src) {
@@ -186,13 +188,11 @@ function CourseRow({ course, onView, onEdit, onDelete, readOnly }) {
   return (
     <View style={styles.card}>
       <View style={styles.cardTop}>
-        {course.image_url ? (
-          <Image source={{ uri: resolveAssetUrl(course.image_url) }} style={styles.thumb} />
-        ) : (
-          <View style={[styles.thumb, styles.thumbPlaceholder]}>
-            <GraduationCap size={26} color={palette.purple.vivid} strokeWidth={1.8} />
-          </View>
-        )}
+        <CourseImage
+          uri={course.image_url}
+          size={64}
+          radius={radius.md}
+        />
 
         <View style={{ flex: 1 }}>
           <View style={styles.titleRow}>
@@ -237,7 +237,7 @@ function CourseRow({ course, onView, onEdit, onDelete, readOnly }) {
       ) : null}
 
       <View style={styles.priceRow}>
-        <Text style={styles.priceLabel}>Monthly fee</Text>
+        <Text style={styles.priceLabel}>{billingCycleLabel(course.billing_cycle)}</Text>
         <Text style={styles.priceValue}>
           {course.price ? `₹${Number(course.price).toLocaleString('en-IN')}` : 'Free'}
         </Text>

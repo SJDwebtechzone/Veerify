@@ -12,10 +12,10 @@ router.get('/trainer/my', verifyToken, requireRole('trainer'), batchController.g
 router.get('/course/:id', batchController.getBatchesByCourse);
 router.get('/:id', batchController.getBatchById);
 
-// Admin-only routes
+// Admin-only routes. Every write path is gated by requireActiveSubscription.
 router.post('/', verifyToken, requireRole('admin'), requireActiveSubscription, batchController.createBatch);
 router.get('/', verifyToken, requireRole('admin'), batchController.getMyBatches);
-router.put('/:id', verifyToken, requireRole('admin'), batchController.updateBatch);
-router.delete('/:id', verifyToken, requireRole('admin'), batchController.deleteBatch);
+router.put('/:id', verifyToken, requireRole('admin'), requireActiveSubscription, batchController.updateBatch);
+router.delete('/:id', verifyToken, requireRole('admin'), requireActiveSubscription, batchController.deleteBatch);
 
 module.exports = router;

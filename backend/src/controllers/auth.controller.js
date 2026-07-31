@@ -355,6 +355,21 @@ const result = await pool.query(
       });
     }
 
+    // Block sign-in for sub-branches whose credentials haven't been formally sent yet.
+    if (user.institution_id) {
+      const instRow = await pool.query(
+        `SELECT parent_institution_id, credentials_sent
+           FROM institutions WHERE id = $1`, [user.institution_id]
+      );
+      const inst = instRow.rows[0];
+      if (inst?.parent_institution_id && inst?.credentials_sent === false) {
+        return res.status(403).json({
+          code: 'BRANCH_PENDING_ACTIVATION',
+          message: 'This branch has not been activated yet. Please contact your institution admin.',
+        });
+      }
+    }
+
     // ── Post-grace lock (migration 075 + subscriptionExpiry.service) ──
     // Two distinct rules apply here:
     //
@@ -378,6 +393,26 @@ const result = await pool.query(
     // (payment link, webhook).
     if (user.institution_id && user.role !== 'super_admin') {
       try {
+        // Branch activation gate — a branch created post-registration
+        // stays credentials_sent=FALSE until the Super Admin dispatches
+        // credentials. Even if a race handed out a JWT earlier, refuse
+        // login here so the branch admin can't sneak in ahead of the
+        // dispatch.
+        try {
+          const gateRow = await pool.query(
+            `SELECT credentials_sent, parent_institution_id
+               FROM institutions WHERE id = $1`,
+            [user.institution_id],
+          );
+          const gate = gateRow.rows[0];
+          if (gate && gate.parent_institution_id && gate.credentials_sent === false) {
+            return res.status(403).json({
+              code:    'BRANCH_PENDING_ACTIVATION',
+              message: 'Your branch is pending activation by the Super Admin. Please wait for your credentials to be sent.',
+            });
+          }
+        } catch (_) { /* pre-081 schema — allow through */ }
+
         const instState = await pool.query(
           `SELECT subscription_status, status FROM institutions WHERE id = $1`,
           [user.institution_id],
@@ -400,19 +435,23 @@ const result = await pool.query(
           });
         }
 
-        // Rule 1 — institution admin path: only the full lock (post
-        // grace) blocks them. Existing behaviour is preserved so
-        // admins can still sign in during trial / expired-grace and
-        // click "Renew".
-        if (
-          !isEndUserRole
-          && (inst.subscription_status === 'inactive' || inst.status === 'inactive')
-        ) {
-          return res.status(403).json({
-            code:    'SUBSCRIPTION_INACTIVE',
-            message: 'Your subscription has expired. Please renew your plan to regain access.',
-          });
-        }
+        // Rule 1 — institution / branch admin path: ALWAYS let them
+        // log in. Per spec, an expired-plan admin needs a way into
+        // the app so they can navigate to More → Pricing & Plans
+        // and renew. The subscription phase (paid / expired /
+        // inactive) is still enforced downstream by
+        // requireActiveSubscription on every write route, so an
+        // expired admin can view their data + tap Renew but can't
+        // create, edit, or delete anything until the renewal
+        // completes. Branch admins get an "ask your institution to
+        // renew" modal on the same 402; institution admins get
+        // Renew Now.
+        //
+        // The previous hard-lock on `subscription_status='inactive'`
+        // is intentionally removed here so an academy that missed
+        // its grace window doesn't get locked out of the app
+        // entirely — they still need a login to reach the payment
+        // flow.
       } catch (_) { /* if the column doesn't exist yet, allow login */ }
     }
 

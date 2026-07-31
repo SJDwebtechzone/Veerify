@@ -33,6 +33,8 @@ import {
 import apiClient from '../../api/client';
 import { useAuth } from '../../context/AuthContext';
 import { palette, spacing, radius, shadows, type } from '../../theme';
+import CourseImage from '../../components/CourseImage';
+import Avatar from '../../components/Avatar';
 import YouTubeThumbPlayer from '../../components/YouTubeThumbPlayer';
 import { confirm } from '../../components/ConfirmDialog';
 import { formatBatchTimeRange } from '../../utils/formatTime';
@@ -268,10 +270,19 @@ export default function CourseDetailScreen({ navigation, route }) {
   };
 
   const handleShare = async () => {
+    if (!program) return;
     try {
-      const link = `https://veerify.app/programs/${courseId}`;
+      const link = `https://veerifyapp.com/programs/${courseId}`;
+      const courseName = program.title || program.name || 'this program';
+      const instName = program.institution_name || 'Veerify';
+      const desc = program.description ? `\n\n${program.description.substring(0, 120).trim()}...` : '';
+      
+      const message = `Check out "${courseName}" by ${instName}!${desc}\n\nView program: ${link}`;
+      
       await Share.share({
-        message: `Check out "${program?.title || 'this program'}" on Veerify: ${link}`,
+        message: message,
+        title: courseName,
+        url: link, // Primarily used by iOS
       });
     } catch (err) { /* user cancelled */ }
   };
@@ -327,14 +338,28 @@ export default function CourseDetailScreen({ navigation, route }) {
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 120 }}>
         {/* ── Hero ─────────────────────────────────────────── */}
         <View style={styles.hero}>
-          {bannerImg ? (
-            <Image source={{ uri: bannerImg }} style={StyleSheet.absoluteFill} resizeMode="cover" />
-          ) : (
-            <View style={[StyleSheet.absoluteFill, { backgroundColor: palette.purple.vivid }]} />
-          )}
+          {/* Course cover — contain-fit so the entire poster is
+              visible inside the hero band, matching the admin course
+              detail. Neutral bg fills any letterboxing so tall
+              portrait or wide banner uploads both read as intentional. */}
+          <CourseImage
+            uri={program.image_url || program.thumbnail_url || program.banner_url}
+            width="100%"
+            height={HERO_HEIGHT}
+            radius={0}
+            fit="contain"
+            icon="course"
+            style={StyleSheet.absoluteFill}
+          />
           <View style={styles.heroOverlay} />
           <View style={styles.heroTopBar}>
-            <RoundIconBtn icon={ArrowLeft} onPress={() => navigation.goBack()} />
+            <RoundIconBtn icon={ArrowLeft} onPress={() => {
+              if (navigation.canGoBack()) {
+                navigation.goBack();
+              } else {
+                navigation.navigate('Home');
+              }
+            }} />
             <View style={{ flexDirection: 'row', gap: spacing.sm }}>
               <RoundIconBtn icon={Heart} onPress={() => Alert.alert('Saved', 'Wishlist coming soon.')} />
               <RoundIconBtn icon={Share2} onPress={handleShare} />
@@ -417,15 +442,12 @@ export default function CourseDetailScreen({ navigation, route }) {
             activeOpacity={0.85}
             style={styles.trainerCard}
           >
-            {trainerAvatar ? (
-              <Image source={{ uri: trainerAvatar }} style={styles.trainerAvatar} />
-            ) : (
-              <View style={[styles.trainerAvatar, { backgroundColor: palette.purple.vivid, alignItems: 'center', justifyContent: 'center' }]}>
-                <Text style={styles.trainerInitial}>
-                  {(program.trainer_name || program.trainer || 'V').charAt(0).toUpperCase()}
-                </Text>
-              </View>
-            )}
+            <Avatar
+              uri={program.trainer_image || program.trainer_avatar}
+              name={program.trainer_name || program.trainer || 'Veerify Trainer'}
+              size={56}
+              tone="purple"
+            />
             <View style={{ flex: 1 }}>
               <Text style={styles.trainerName}>
                 {program.trainer_name || program.trainer || 'Veerify Trainer'}

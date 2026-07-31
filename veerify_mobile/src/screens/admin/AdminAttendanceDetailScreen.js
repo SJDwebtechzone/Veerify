@@ -51,19 +51,6 @@ function fmtDate(iso) {
   });
 }
 
-function fmtCheckIn(v) {
-  // The attendance schema currently stores only date. If a future
-  // migration adds a check_in_time column the API will start
-  // surfacing it; until then the value is null → render "—".
-  if (!v) return '—';
-  const d = new Date(v);
-  if (!Number.isNaN(d.getTime())) {
-    return d.toLocaleTimeString('en-IN', {
-      hour: 'numeric', minute: '2-digit', hour12: true,
-    });
-  }
-  return String(v);
-}
 
 export default function AdminAttendanceDetailScreen({ route, navigation }) {
   const {
@@ -114,7 +101,6 @@ export default function AdminAttendanceDetailScreen({ route, navigation }) {
         name:         s.student_name || s.name || `#${s.student_id}`,
         email:        s.student_email || s.email || '',
         status:       mk?.status || null,
-        check_in:     mk?.check_in_time || mk?.checked_in_at || null,
         remarks:      mk?.remarks || mk?.notes || '',
         updated_at:   mk?.updated_at || null,
       };
@@ -292,23 +278,17 @@ function StudentRow({ row }) {
         )}
       </View>
 
-      {/* Check-in + remarks — surfaced when the row carries them.
-          The schema currently stores date only, so check-in reads
-          "—" until a future migration adds a timestamp column. */}
-      <View style={styles.rowFoot}>
-        <View style={styles.footChip}>
-          <Clock size={11} color={palette.textMuted} strokeWidth={2.4} />
-          <Text style={styles.footChipText}>Check-in {fmtCheckIn(row.check_in)}</Text>
-        </View>
-        {row.remarks ? (
+      {/* Remarks — surfaced when the row carries them. */}
+      {row.remarks ? (
+        <View style={styles.rowFoot}>
           <View style={[styles.footChip, { flex: 1 }]}>
             <MessageSquare size={11} color={palette.textMuted} strokeWidth={2.4} />
             <Text style={[styles.footChipText, { flex: 1 }]} numberOfLines={2}>
               {row.remarks}
             </Text>
           </View>
-        ) : null}
-      </View>
+        </View>
+      ) : null}
     </View>
   );
 }

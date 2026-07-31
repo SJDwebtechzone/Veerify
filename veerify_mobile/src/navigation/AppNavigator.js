@@ -225,7 +225,7 @@ export default function AppNavigator() {
           <Stack.Screen name="CategoryAcademies" component={CategoryAcademiesScreen}
             options={{ headerShown: false }} />
           <Stack.Screen name="CourseDetail" component={CourseDetailScreen}
-            options={{ headerShown: true, title: '' }} />
+            options={{ headerShown: false }} />
           {/* Public trainer profile — reached from CourseDetail's
               Trainer card. Renders its own header. */}
           <Stack.Screen name="PublicTrainerProfile" component={PublicTrainerProfileScreen}
@@ -557,7 +557,7 @@ export default function AppNavigator() {
           <Stack.Screen name="CategoryAcademies" component={CategoryAcademiesScreen}
             options={{ headerShown: false }} />
           <Stack.Screen name="CourseDetail" component={CourseDetailScreen}
-            options={{ headerShown: true, title: '' }} />
+            options={{ headerShown: false }} />
           {/* Public trainer profile — reached from CourseDetail's
               Trainer card by both students and admin-preview flows. */}
           <Stack.Screen name="PublicTrainerProfile" component={PublicTrainerProfileScreen}

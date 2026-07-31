@@ -32,6 +32,7 @@ import { palette, spacing, radius, shadows, type } from '../../../theme';
 import { useBellScrollHandler } from '../../../components/bellScrollBus';
 import { confirm } from '../../../components/ConfirmDialog';
 import resolveAssetUrl from '../../../utils/assetUrl';
+import Avatar from '../../../components/Avatar';
 
 // ─── Menu definition ─────────────────────────────────────────────────────────
 const MENU = [
@@ -260,21 +261,15 @@ export default function MoreTabScreen({ navigation }) {
         onPress={() => navigation.navigate('AcademyProfile')}
         activeOpacity={0.9}
       >
-        <View style={styles.profileAvatar}>
-          {showLogo ? (
-            <Image
-              source={{ uri: logoUrl }}
-              style={styles.profileLogo}
-              resizeMode="cover"
-              // Broken URL / 404 / network error → drop to initials
-              // silently. Kept as component-level state so the same
-              // URL doesn't retry-and-fail every render.
-              onError={() => setLogoError(true)}
-            />
-          ) : (
-            <Text style={styles.profileInitials}>{initials}</Text>
-          )}
-        </View>
+        <Avatar
+          uri={logoUrl}
+          name={displayName || initials}
+          size={56}
+          tone="purple"
+          // Institution logos are usually padded, transparent-bg marks —
+          // contain shows the whole logo without cropping the wordmark.
+          fit="contain"
+        />
         <View style={{ flex: 1 }}>
           <Text style={styles.profileName} numberOfLines={1}>
             {displayName}

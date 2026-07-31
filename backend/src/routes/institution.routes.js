@@ -3,6 +3,7 @@ const router = express.Router();
 const institutionController = require('../controllers/institution.controller');
 const { verifyToken } = require('../middleware/auth.middleware');
 const { requireRole } = require('../middleware/role.middleware');
+const { requireActiveSubscription } = require('../utils/subscriptionGuard');
 
 // ─────────────────────────────────────────────────────────────────────────
 // ROUTE ORDERING — READ THIS BEFORE ADDING NEW ROUTES.
@@ -27,7 +28,7 @@ router.get('/me/events',           verifyToken, institutionController.getMyEvent
 // /me/events/all: admin-only history view (past + upcoming).
 router.get('/me/events/all',       verifyToken, requireRole('admin'), institutionController.listMyInstitutionEvents);
 // /me/events (POST): admin creates an event for their own institution.
-router.post('/me/events',          verifyToken, requireRole('admin'), institutionController.createInstitutionEvent);
+router.post('/me/events',          verifyToken, requireRole('admin'), requireActiveSubscription, institutionController.createInstitutionEvent);
 // /events/:eventId/pay — student / trainer taps Pay Now; server mints a
 // Razorpay Payment Link and returns short_url for the app to open. Sits
 // as a literal /events/... path so it doesn't collide with /:id/events.
@@ -63,13 +64,13 @@ router.get('/me/support-email',    verifyToken, institutionController.getMySuppo
 
 // /me/details + /me/update — admin's own institution.
 router.get('/me/details',          verifyToken, requireRole('admin'), institutionController.getMyInstitution);
-router.put('/me/update',           verifyToken, requireRole('admin'), institutionController.updateInstitution);
+router.put('/me/update',           verifyToken, requireRole('admin'), requireActiveSubscription, institutionController.updateInstitution);
 // /me/location — sub-branch admins (and main-branch admins) update just
 // the location fields on their own institution row.
-router.patch('/me/location',       verifyToken, requireRole('admin'), institutionController.updateMyLocation);
+router.patch('/me/location',       verifyToken, requireRole('admin'), requireActiveSubscription, institutionController.updateMyLocation);
 // /sub-branches/:id — main-branch admin edits a sub-branch's location
 // + contact fields from their Branches list on the mobile app.
-router.patch('/sub-branches/:id',  verifyToken, requireRole('admin'), institutionController.updateSubBranch);
+router.patch('/sub-branches/:id',  verifyToken, requireRole('admin'), requireActiveSubscription, institutionController.updateSubBranch);
 
 // ── Student-facing institution-scoped browse endpoints (public — guests
 //    can browse without an account). These come AFTER the /me/... routes

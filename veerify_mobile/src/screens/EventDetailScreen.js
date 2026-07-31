@@ -30,6 +30,7 @@ import {
 import apiClient from '../api/client';
 import resolveAssetUrl from '../utils/assetUrl';
 import { confirm } from '../components/ConfirmDialog';
+import CourseImage from '../components/CourseImage';
 
 // Polling budget after the payer returns from the Razorpay browser.
 // The webhook usually lands in 3-5s; 30s gives slow networks room
@@ -249,18 +250,17 @@ export default function EventDetailScreen({ route, navigation }) {
         contentContainerStyle={{ paddingBottom: 40 }}
         showsVerticalScrollIndicator={false}
       >
-        {/* Hero banner */}
-        {event.image_url ? (
-          <Image
-            source={{ uri: resolveAssetUrl(event.image_url) }}
-            style={styles.banner}
-            resizeMode="cover"
-          />
-        ) : (
-          <View style={[styles.banner, styles.bannerEmpty]}>
-            <Calendar size={56} color={BRAND} strokeWidth={1.8} />
-          </View>
-        )}
+        {/* Hero banner — contain-fit so the full event poster shows
+            without cropping (e.g. tall Instagram-format flyers). */}
+        <CourseImage
+          uri={event.image_url}
+          width="100%"
+          height={200}
+          radius={0}
+          fit="contain"
+          icon="image"
+          style={{ backgroundColor: BRAND_SOFT }}
+        />
 
         {/* Title block — overlaps the banner with a card lift */}
         <View style={styles.titleCard}>

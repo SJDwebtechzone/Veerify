@@ -30,11 +30,12 @@ import {
 import { useFocusEffect } from '@react-navigation/native';
 import {
   ArrowLeft, Calendar, ChevronRight, Search, User, GraduationCap,
-  ClipboardCheck, Percent, Users,
+  ClipboardCheck, Percent, Users, Download,
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
 import DateField from '../../components/DateField';
+import ExportAttendanceModal from '../../components/ExportAttendanceModal';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 
 function todayIso() {
@@ -67,6 +68,7 @@ export default function AdminAttendanceOverviewScreen({ navigation, route }) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError]     = useState('');
+  const [exportModalOpen, setExportModalOpen] = useState(false);
 
   // Filters
   const [courseFilter,  setCourseFilter]  = useState(null); // course_id or null
@@ -164,6 +166,14 @@ export default function AdminAttendanceOverviewScreen({ navigation, route }) {
           </Text>
           <Text style={styles.subtitle}>Batch-wise summary · {fmtDate(date)}</Text>
         </View>
+        <TouchableOpacity
+          onPress={() => setExportModalOpen(true)}
+          style={styles.exportHeaderBtn}
+          activeOpacity={0.85}
+        >
+          <Download size={13} color="#fff" strokeWidth={2.4} />
+          <Text style={styles.exportHeaderBtnText}>Export</Text>
+        </TouchableOpacity>
         <View style={styles.headerBadge}>
           <ClipboardCheck size={14} color={palette.teal.on} strokeWidth={2.4} />
           <Text style={styles.headerBadgeText}>{rollup.pct}%</Text>
@@ -300,6 +310,11 @@ export default function AdminAttendanceOverviewScreen({ navigation, route }) {
             </View>
           )
         }
+      />
+      <ExportAttendanceModal
+        visible={exportModalOpen}
+        onClose={() => setExportModalOpen(false)}
+        initialBranchId={branchIdParam}
       />
     </View>
   );
@@ -525,4 +540,12 @@ const styles = StyleSheet.create({
   },
   emptyTitle: { ...type.bodyBold, color: palette.text, marginTop: 4 },
   emptySub:   { ...type.caption, color: palette.textMuted, textAlign: 'center' },
+
+  exportHeaderBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: palette.purple.vivid,
+    paddingHorizontal: 10, paddingVertical: 6,
+    borderRadius: radius.md, marginRight: spacing.xs,
+  },
+  exportHeaderBtnText: { fontSize: 11, fontWeight: '800', color: '#fff' },
 });

@@ -25,6 +25,7 @@ import {
   StyleSheet, Linking, TextInput, Image, Alert,
 } from 'react-native';
 import resolveAssetUrl from '../../utils/assetUrl';
+import Avatar from '../../components/Avatar';
 import {
   ArrowLeft, Phone, Mail, Award, TrendingUp, TrendingDown, Minus,
   Calendar, Users, ClipboardList, FileText, Pencil,
@@ -464,17 +465,13 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
         </View>
 
         <View style={styles.heroBody}>
-          <View style={styles.heroAvatar}>
-            {photoUrl ? (
-              <Image
-                source={{ uri: photoUrl }}
-                style={styles.heroAvatarImg}
-                resizeMode="cover"
-              />
-            ) : (
-              <Text style={styles.heroAvatarText}>{initials}</Text>
-            )}
-          </View>
+          <Avatar
+            uri={passedStudent?.student_photo_url}
+            name={name || initials}
+            size={96}
+            tone="purple"
+            style={{ borderWidth: 3, borderColor: 'rgba(255,255,255,0.9)', marginBottom: 8 }}
+          />
           <Text style={styles.heroName} numberOfLines={1}>{name}</Text>
 
           {/* Meta row — only render each chunk when we actually have the

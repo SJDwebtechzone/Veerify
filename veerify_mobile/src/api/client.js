@@ -86,34 +86,51 @@ apiClient.interceptors.response.use(
           // a circular dep with the ConfirmDialog → navigation imports.
           const { confirm } = require('../components/ConfirmDialog');
           const { navigate } = require('../navigation/navigationRef');
-          confirm({
-            title: data.phase === 'expired'
-              ? 'Subscription expired'
-              : data.phase === 'locked'
-                ? 'Trial ended'
-                : 'Action unavailable',
-            message: data.message || 'Renew your plan to continue managing your academy.',
-            variant: 'warning',
-            confirmText: 'Renew now',
-            cancelText: 'Later',
-            onConfirm: async () => {
-              // Generate a fresh Razorpay payment link on the backend, then
-              // hand off to the system browser. If anything errors, fall back
-              // to the PricingPlans screen so the admin still has a path.
-              try {
-                const res = await apiClient.post('/onboarding/renew');
-                const url = res.data?.payment_link_url;
-                if (url) {
-                  await Linking.openURL(url);
-                  return;
+
+          // Branch caller: subscription is inherited from the parent
+          // institution. Branches CAN'T renew — show the passive
+          // "wait for renewal" copy per spec, with just OK/Later
+          // (no Renew CTA).
+          if (data.is_branch) {
+            confirm({
+              title:       'Subscription Expired',
+              message:     data.message
+                || "Your institution's subscription has expired. Access will be restored once the renewal is completed.",
+              variant:     'warning',
+              confirmText: 'OK',
+              hideCancel:  true,
+            });
+            error.handledByInterceptor = true;
+          } else {
+            confirm({
+              title: data.phase === 'expired'
+                ? 'Subscription expired'
+                : data.phase === 'locked'
+                  ? 'Trial ended'
+                  : 'Action unavailable',
+              message: data.message || 'Renew your plan to continue managing your academy.',
+              variant: 'warning',
+              confirmText: 'Renew now',
+              cancelText: 'Later',
+              onConfirm: async () => {
+                // Generate a fresh Razorpay payment link on the backend, then
+                // hand off to the system browser. If anything errors, fall back
+                // to the PricingPlans screen so the admin still has a path.
+                try {
+                  const res = await apiClient.post('/onboarding/renew');
+                  const url = res.data?.payment_link_url;
+                  if (url) {
+                    await Linking.openURL(url);
+                    return;
+                  }
+                } catch (e) {
+                  console.log('[API] renew link failed:', e?.response?.data || e?.message);
                 }
-              } catch (e) {
-                console.log('[API] renew link failed:', e?.response?.data || e?.message);
-              }
-              try { navigate('PricingPlans'); } catch (_) {}
-            },
-          });
-          error.handledByInterceptor = true;
+                try { navigate('PricingPlans'); } catch (_) {}
+              },
+            });
+            error.handledByInterceptor = true;
+          }
         } catch (e) {
           // ConfirmDialog or navigationRef not available — caller will
           // fall back to its own error handling.

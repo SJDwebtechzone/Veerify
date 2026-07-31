@@ -762,3 +762,193 @@ exports.getMyAttendance = async (req, res) => {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
+
+// Export attendance report (PDF & Excel)
+const { generateAttendanceExcel, generateAttendancePdf } = require('../services/attendanceExport.service');
+
+exports.exportAttendance = async (req, res) => {
+  try {
+    const scope = await getBranchScope(req.user.id);
+    if (!scope) {
+      return res.status(403).json({ message: 'No institution linked to your account' });
+    }
+
+    const {
+      format = 'excel',       // 'excel' | 'pdf'
+      filter_type = 'month',   // 'date' | 'date_range' | 'month'
+      month,                  // e.g. '2026-07'
+      date,                    // single-date export — e.g. '2026-07-31'
+      start_date,
+      end_date,
+      batch_id,               // 'all' or numeric ID
+      branch_id,              // 'all', 'main', or numeric ID
+    } = req.query;
+
+    const params = [scope.rootId];
+
+    // Date range clause construction — three modes:
+    //   • 'date'        : single day (start=end=<date>)
+    //   • 'date_range'  : from/to picker
+    //   • 'month'       : entire calendar month (default)
+    let dateWhere = '';
+    let filterDesc = '';
+
+    if (filter_type === 'date' && date) {
+      params.push(date, date);
+      dateWhere = `a.date >= $${params.length - 1} AND a.date <= $${params.length}`;
+      filterDesc = `Date: ${date}`;
+    } else if (filter_type === 'date_range' && start_date && end_date) {
+      params.push(start_date, end_date);
+      dateWhere = `a.date >= $${params.length - 1} AND a.date <= $${params.length}`;
+      filterDesc = `${start_date} to ${end_date}`;
+    } else {
+      // Month mode (default to current month if omitted)
+      const mStr = (month || new Date().toISOString().slice(0, 7)).trim();
+      const mStart = `${mStr}-01`;
+      params.push(mStart);
+      dateWhere = `a.date >= $${params.length}::date AND a.date < ($${params.length}::date + INTERVAL '1 month')`;
+      filterDesc = `Month: ${mStr}`;
+    }
+
+    // Branch clause construction
+    let branchWhere = '';
+    let branchLabel = 'All Branches';
+
+    if (scope.isSubBranchAdmin) {
+      // Sub-branch admins locked to their own branch — look up name
+      params.push(scope.callerInstId);
+      branchWhere = `b.branch_id = $${params.length}`;
+      const callerInstRes = await pool.query('SELECT name FROM institutions WHERE id = $1', [scope.callerInstId]);
+      branchLabel = callerInstRes.rows[0]?.name || 'Branch';
+    } else if (branch_id && branch_id !== 'all') {
+      if (branch_id === 'main' || branch_id === '0') {
+        branchWhere = `b.branch_id IS NULL`;
+        branchLabel = 'Main Institution';
+      } else {
+        const bId = parseInt(branch_id, 10);
+        if (Number.isFinite(bId)) {
+          params.push(bId);
+          branchWhere = `b.branch_id = $${params.length}`;
+          // Get branch name
+          const bNameRes = await pool.query('SELECT name FROM institutions WHERE id = $1', [bId]);
+          if (bNameRes.rows[0]?.name) branchLabel = bNameRes.rows[0].name;
+        }
+      }
+    }
+
+    // Batch clause construction
+    let batchWhere = '';
+    if (batch_id && batch_id !== 'all') {
+      const bId = parseInt(batch_id, 10);
+      if (Number.isFinite(bId)) {
+        params.push(bId);
+        batchWhere = `b.id = $${params.length}`;
+        const bNameRes = await pool.query('SELECT name FROM batches WHERE id = $1', [bId]);
+        if (bNameRes.rows[0]?.name) {
+          filterDesc += `, Batch: ${bNameRes.rows[0].name}`;
+        }
+      }
+    }
+
+    // Base tree clause (caller's academy tree)
+    const treeWhere = `(b.institution_id = $1 OR b.institution_id IN (SELECT id FROM institutions WHERE parent_institution_id = $1))`;
+
+    const whereClause = [treeWhere, dateWhere, branchWhere, batchWhere].filter(Boolean).join(' AND ');
+
+    // Fetch records. We select the student's system id (u.id) as
+    // student_id — the schema doesn't carry a separate display code —
+    // and defer per-student attendance percentage to a JS reduce pass
+    // below so the SQL stays a straight scan (efficient at scale).
+    const sql = `
+      SELECT
+        a.date,
+        a.status,
+        u.id   AS student_id,
+        u.name AS student_name,
+        b.id   AS batch_id,
+        b.name AS batch_name,
+        c.name AS course_name,
+        COALESCE(bi.name, 'Main Institution') AS branch_name
+      FROM attendance a
+      JOIN users u ON u.id = a.student_id
+      JOIN batches b ON b.id = a.batch_id
+      JOIN courses c ON c.id = b.course_id
+      LEFT JOIN institutions bi ON bi.id = b.branch_id
+      WHERE ${whereClause}
+      ORDER BY a.date DESC, b.name ASC, u.name ASC
+    `;
+
+    const result = await pool.query(sql, params);
+    const records = result.rows;
+
+    // ── Per-student attendance percentage ─────────────────────────
+    // Compute within the filter window: (present + late * 0.5) / total,
+    // matching the definition used across the rest of the app so an
+    // exported report doesn't disagree with the on-screen dashboard.
+    // Absent and Leave count against attendance; Late counts as half.
+    // O(records) — one pass, no extra query, fine for millions of rows.
+    const perStudent = new Map();
+    for (const r of records) {
+      const key = r.student_id;
+      const bucket = perStudent.get(key) || { total: 0, present: 0, late: 0 };
+      bucket.total += 1;
+      if (r.status === 'present') bucket.present += 1;
+      else if (r.status === 'late') bucket.late += 1;
+      perStudent.set(key, bucket);
+    }
+    const pctForStudent = (id) => {
+      const b = perStudent.get(id);
+      if (!b || b.total === 0) return null;
+      const pct = ((b.present + b.late * 0.5) / b.total) * 100;
+      return Math.round(pct);
+    };
+    // Decorate each record with its student's percentage so the excel
+    // + pdf generators can render the column without knowing the math.
+    for (const r of records) {
+      r.attendance_percent = pctForStudent(r.student_id);
+    }
+
+    // Institution Name lookup
+    const instRes = await pool.query('SELECT name FROM institutions WHERE id = $1', [scope.rootId]);
+    const institutionName = instRes.rows[0]?.name || 'Veerify Academy';
+
+    // Summary Stats
+    const total = records.length;
+    const present = records.filter((r) => r.status === 'present').length;
+    const absent = records.filter((r) => r.status === 'absent').length;
+    const late = records.filter((r) => r.status === 'late').length;
+    const leave = records.filter((r) => r.status === 'leave').length;
+    const stats = { total, present, absent, late, leave };
+
+    const cleanFormat = String(format).toLowerCase();
+    if (cleanFormat === 'pdf') {
+      const pdfBuffer = await generateAttendancePdf({
+        institutionName,
+        branchName: branchLabel,
+        filterDescription: filterDesc,
+        records,
+        stats,
+      });
+
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="Attendance_Report_${Date.now()}.pdf"`);
+      return res.send(pdfBuffer);
+    } else {
+      const excelBuffer = await generateAttendanceExcel({
+        institutionName,
+        branchName: branchLabel,
+        filterDescription: filterDesc,
+        records,
+        stats,
+      });
+
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="Attendance_Report_${Date.now()}.xlsx"`);
+      return res.send(excelBuffer);
+    }
+  } catch (err) {
+    console.error('Export attendance error:', err);
+    res.status(500).json({ message: 'Server error exporting attendance', error: err.message });
+  }
+};
+

@@ -682,6 +682,41 @@ exports.getMyStatus = async (req, res) => {
 
     let inst = result.rows[0];
 
+    // ── Self-healing payment activation ─────────────────────────────
+    // Two triggers, both handled by the same helper:
+    //   1. First-time activation — approved row, no paid_at yet, has a
+    //      payment_link_id. Webhook may be lost / delayed.
+    //   2. Renewal — row is already active + paid_at set, but a NEW
+    //      payment_link_status='pending' means the admin just hit
+    //      Renew Now. If the webhook is late, poll Razorpay so the
+    //      mobile doesn't keep showing "expired" after a paid renewal.
+    // Silent no-op on any other state or when the helper degrades
+    // (razorpay creds missing, network hiccup, …).
+    const needsInitialActivation =
+      inst.onboarding_status === 'approved'
+      && !inst.paid_at
+      && inst.payment_link_id;
+    const needsRenewalCheck =
+      !!inst.paid_at
+      && inst.payment_link_id
+      && inst.payment_link_status === 'pending';
+    const needsPaymentCheck = needsInitialActivation || needsRenewalCheck;
+    if (needsPaymentCheck) {
+      const outcome = await activateInstitutionIfPaid(inst.id);
+      if (outcome?.activated || outcome?.renewed || outcome?.alreadyActive) {
+        // Re-read the row so the response reflects the freshly-activated state.
+        const refetch = await pool.query(
+          `SELECT i.*, sp.name AS plan_name, sp.price AS plan_price,
+                  sp.features AS plan_features
+             FROM institutions i
+             LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
+            WHERE i.id = $1`,
+          [inst.id],
+        );
+        if (refetch.rows[0]) inst = refetch.rows[0];
+      }
+    }
+
     // ── Branch admin fix ─────────────────────────────────────────
     // Sub-branch institutions carry parent_institution_id and their
     // own onboarding_status is not driven through the approval
@@ -810,10 +845,11 @@ exports.getSubscriptionStatus = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    const result = await pool.query(
+    const runStatusQuery = () => pool.query(
       `SELECT i.id, i.name, i.onboarding_status, i.paid_at,
               i.trial_starts_at, i.trial_ends_at, i.grace_ends_at,
-              i.payment_link_url, i.payment_link_status,
+              i.payment_link_url, i.payment_link_status, i.payment_link_id,
+              i.subscription_end,
               sp.id    AS plan_id,
               sp.name  AS plan_name,
               sp.price AS plan_price,
@@ -829,14 +865,30 @@ exports.getSubscriptionStatus = async (req, res) => {
        FROM institutions i
        LEFT JOIN subscription_plans sp ON i.plan_id = sp.id
        WHERE i.owner_user_id = $1`,
-      [userId]
+      [userId],
     );
 
+    let result = await runStatusQuery();
     if (result.rows.length === 0) {
       return res.json({ phase: 'registered', institution: null });
     }
+    let r = result.rows[0];
 
-    const r = result.rows[0];
+    // ── Self-healing payment activation ─────────────────────────────
+    // Mobile PricingPlansScreen calls this endpoint on focus + after
+    // returning from Razorpay. If the webhook is delayed we poll
+    // Razorpay ourselves — covers both first-time activation and
+    // renewal. The helper is idempotent and cheap on the happy path.
+    const needsCheck =
+      !!r.payment_link_id
+      && r.payment_link_status === 'pending';
+    if (needsCheck) {
+      const outcome = await activateInstitutionIfPaid(r.id);
+      if (outcome?.activated || outcome?.renewed) {
+        result = await runStatusQuery();
+        if (result.rows[0]) r = result.rows[0];
+      }
+    }
     const now = new Date();
 
     // ── Post-payment grace window ─────────────────────────────────
@@ -2530,10 +2582,14 @@ exports.handlePaymentWebhook = async (req, res) => {
       }
       updated = await pool.query(
         `UPDATE institutions SET
-           subscription_end     = ${extendClause},
-           payment_link_status  = 'paid',
-           payment_reference    = $2,
-           paid_at              = NOW()
+           subscription_end        = ${extendClause},
+           payment_link_status     = 'paid',
+           payment_reference       = $2,
+           paid_at                 = NOW(),
+           subscription_status     = 'active',
+           subscription_expired_at = NULL,
+           is_active               = TRUE,
+           status                  = CASE WHEN status = 'inactive' THEN 'approved' ELSE status END
            ${planSet}
          WHERE id = $1
          RETURNING *`,
@@ -2552,13 +2608,16 @@ exports.handlePaymentWebhook = async (req, res) => {
     // note defaults to 30 days.
     updated = await pool.query(
       `UPDATE institutions SET
-         onboarding_status    = 'active',
-         status               = 'approved',
-         subscription_start   = NOW(),
-         subscription_end     = NOW() + INTERVAL '${extendDays} days',
-         payment_link_status  = 'paid',
-         payment_reference    = $2,
-         paid_at              = NOW()
+         onboarding_status       = 'active',
+         status                  = 'approved',
+         is_active               = TRUE,
+         subscription_start      = NOW(),
+         subscription_end        = NOW() + INTERVAL '${extendDays} days',
+         subscription_status     = 'active',
+         subscription_expired_at = NULL,
+         payment_link_status     = 'paid',
+         payment_reference       = $2,
+         paid_at                 = NOW()
        WHERE id = $1
        RETURNING *`,
       [institution.id, paymentId || null]
@@ -3791,10 +3850,211 @@ exports.startApprovalPayment = async (req, res) => {
 //
 // Public — no auth. Safe because we only surface the institution
 // name; no PII beyond what the payer already knew.
+// Internal helper — verify + activate an institution against
+// Razorpay's live Payment Link status. Returns { ok, activated,
+// alreadyActive, reason }. Never throws.
+async function activateInstitutionIfPaid(institutionId) {
+  try {
+    if (!Number.isFinite(institutionId)) {
+      return { ok: false, reason: 'invalid-id' };
+    }
+    const instRes = await pool.query(
+      `SELECT id, name, onboarding_status, payment_link_id, payment_link_status,
+              plan_id, paid_at, subscription_end, subscription_status
+         FROM institutions
+        WHERE id = $1 AND deleted_at IS NULL
+        LIMIT 1`,
+      [institutionId],
+    );
+    const inst = instRes.rows[0];
+    if (!inst) return { ok: false, reason: 'not-found' };
+
+    // Nothing more to reconcile — the local row is already stamped
+    // as paid for this exact link AND the subscription window is
+    // healthy. The webhook / earlier verify already did the work.
+    if (
+      inst.payment_link_status === 'paid'
+      && inst.paid_at
+      && inst.subscription_status === 'active'
+    ) {
+      return { ok: true, alreadyActive: true };
+    }
+    if (!inst.payment_link_id) {
+      return { ok: false, reason: 'no-payment-link' };
+    }
+    // Verify via Razorpay REST — belt-and-braces so a lost/delayed
+    // webhook can't leave the mobile stuck on "waiting for payment"
+    // for either the initial activation OR a subscription renewal.
+    const { fetchPaymentLinkStatus } = require('../utils/razorpay');
+    const status = await fetchPaymentLinkStatus(inst.payment_link_id);
+    if (!status.ok) return { ok: false, reason: 'razorpay-fetch-failed' };
+    if (status.status !== 'paid') {
+      return { ok: false, reason: `link-status-${status.status || 'unknown'}` };
+    }
+
+    // Discover renewal vs first-time activation. A row that already
+    // carries a paid_at from an earlier successful charge is renewing
+    // its subscription — extend the window instead of stamping a
+    // fresh start / end. Consult the pending subscription_transaction
+    // to learn the target plan + billing_term so an upgrade / switch
+    // is also honoured on the self-heal path.
+    const isRenewal = !!inst.paid_at;
+    const TERM_DAYS = { monthly: 30, quarterly: 90, half_yearly: 180, annual: 365 };
+
+    let txPlanId = null;
+    let txAction = null;
+    let extendDays = 30;
+    try {
+      const tx = await pool.query(
+        `SELECT plan_id, action, billing_cycle
+           FROM subscription_transactions
+          WHERE razorpay_link_id = $1
+            AND status = 'pending'
+          ORDER BY created_at DESC
+          LIMIT 1`,
+        [inst.payment_link_id],
+      );
+      if (tx.rows[0]) {
+        txPlanId = tx.rows[0].plan_id || null;
+        txAction = tx.rows[0].action || null;
+        const cycle = String(tx.rows[0].billing_cycle || '').toLowerCase();
+        if (TERM_DAYS[cycle]) extendDays = TERM_DAYS[cycle];
+      }
+    } catch (e) {
+      // pre-063 schema (no subscription_transactions) — fall back to 30 days.
+    }
+
+    let activated;
+    if (isRenewal) {
+      // Renewal path — mirror handlePaymentWebhook's renew/change_plan
+      // branch. Extends subscription_end from later-of NOW / current
+      // end so a mid-cycle renewal stacks. Also clears the expired
+      // flags right here (subscription_status='active',
+      // subscription_expired_at=NULL, status='approved', is_active=TRUE)
+      // so the guard / mobile don't wait for the hourly scheduler.
+      const params = [inst.id, status.paymentId || null];
+      let planSet = '';
+      if (txAction === 'change_plan' && txPlanId && txPlanId !== inst.plan_id) {
+        params.push(txPlanId);
+        planSet = `, plan_id = $${params.length}`;
+      }
+      activated = await pool.query(
+        `UPDATE institutions SET
+           subscription_end        = GREATEST(NOW(), COALESCE(subscription_end, NOW())) + INTERVAL '${extendDays} days',
+           payment_link_status     = 'paid',
+           payment_reference       = COALESCE(payment_reference, $2),
+           paid_at                 = NOW(),
+           subscription_status     = 'active',
+           subscription_expired_at = NULL,
+           is_active               = TRUE,
+           status                  = CASE WHEN status = 'inactive' THEN 'approved' ELSE status END
+           ${planSet}
+         WHERE id = $1
+         RETURNING *`,
+        params,
+      );
+    } else {
+      // First-time activation path — matches the webhook's onboarding
+      // branch. subscription_end defaults to a safe 30-day window
+      // (or whatever billing_term the pending tx points at); the
+      // scheduler refines this on renewal.
+      activated = await pool.query(
+        `UPDATE institutions SET
+           onboarding_status       = 'active',
+           status                  = 'approved',
+           is_active               = TRUE,
+           subscription_start      = COALESCE(subscription_start, NOW()),
+           subscription_end        = COALESCE(subscription_end,   NOW() + INTERVAL '${extendDays} days'),
+           subscription_status     = 'active',
+           subscription_expired_at = NULL,
+           payment_link_status     = 'paid',
+           payment_reference       = COALESCE(payment_reference, $2),
+           paid_at                 = COALESCE(paid_at, NOW())
+         WHERE id = $1
+         RETURNING *`,
+        [institutionId, status.paymentId || null],
+      );
+      // Owner user flip only fires on first-time activation. Renewals
+      // must never demote / re-activate an existing owner row.
+      await pool.query(
+        `UPDATE users SET status = 'active'
+           WHERE id = (SELECT owner_user_id FROM institutions WHERE id = $1)`,
+        [institutionId],
+      ).catch(() => {});
+    }
+
+    // Ledger flip — shared across both branches.
+    await pool.query(
+      `UPDATE subscription_transactions
+          SET status              = 'paid',
+              razorpay_payment_id = $2,
+              paid_at             = COALESCE(paid_at, NOW()),
+              new_subscription_end = $3
+        WHERE razorpay_link_id = $4
+          AND status = 'pending'`,
+      [
+        institutionId,
+        status.paymentId || null,
+        activated.rows[0]?.subscription_end || null,
+        inst.payment_link_id,
+      ],
+    ).catch(() => {});
+
+    console.log(
+      `[payment] institution ${institutionId} ${isRenewal ? 'renewed' : 'activated'} via self-heal (payment=${status.paymentId || 'n/a'})`,
+    );
+    return { ok: true, activated: !isRenewal, renewed: isRenewal };
+  } catch (err) {
+    console.warn('[payment] activateInstitutionIfPaid failed:', err?.message);
+    return { ok: false, reason: err?.message || 'unknown' };
+  }
+}
+
+// POST /api/onboarding/verify-payment — mobile / web callable.
+// Same handler as the callback URL but returns JSON. Mobile hits
+// this on login when the local status is still 'payment_pending' so
+// a lost webhook doesn't strand the account on the waiting screen.
+exports.verifyPayment = async (req, res) => {
+  try {
+    const q = req.body?.institution_id ?? req.query?.institution_id;
+    let instId = q != null ? parseInt(q, 10) : null;
+    // Fall back to the caller's own institution when no id supplied.
+    if ((!instId || !Number.isFinite(instId)) && req.user?.id) {
+      const own = await pool.query(
+        `SELECT id FROM institutions
+          WHERE owner_user_id = $1 AND deleted_at IS NULL
+          ORDER BY created_at DESC LIMIT 1`,
+        [req.user.id],
+      );
+      instId = own.rows[0]?.id || null;
+    }
+    if (!Number.isFinite(instId)) {
+      return res.status(400).json({ ok: false, message: 'institution_id required' });
+    }
+    const result = await activateInstitutionIfPaid(instId);
+    return res.json(result);
+  } catch (err) {
+    console.error('verifyPayment error:', err);
+    return res.status(500).json({ ok: false, message: 'Server error' });
+  }
+};
+
 exports.renderPaymentSuccessPage = async (req, res) => {
   try {
     const instId  = parseInt(req.query.institution_id, 10);
     const already = req.query.already === '1';
+    // ── Active verification & activation ────────────────────────────
+    // The webhook is the primary path but can be delayed / lost. As
+    // long as we're on this page the user's browser HAS completed
+    // the Razorpay flow — hit Razorpay to confirm and flip the
+    // institution to active right here. Safe to run on every hit
+    // (idempotent), so a refresh of the success page just no-ops for
+    // an already-active row.
+    let activationOutcome = null;
+    if (Number.isFinite(instId) && !already) {
+      activationOutcome = await activateInstitutionIfPaid(instId);
+    }
+
     let institution = null;
     if (Number.isFinite(instId)) {
       const q = await pool.query(
@@ -3806,6 +4066,8 @@ exports.renderPaymentSuccessPage = async (req, res) => {
       );
       institution = q.rows[0] || null;
     }
+    // Suppress unused-var lint (activationOutcome logged inside the helper).
+    void activationOutcome;
 
     const title = already
       ? 'Subscription already active'
@@ -3912,6 +4174,17 @@ exports.createRenewalPaymentLink = async (req, res) => {
     const institution = rows[0];
     if (!institution) {
       return res.status(404).json({ message: 'Institution not found for this account' });
+    }
+
+    // Branch admins cannot renew — the parent institution owns the
+    // subscription. Refuse loudly so a spoofed API call can't sneak
+    // an unauthorised charge through, and the mobile modal (which
+    // never offers a Renew button for branches) stays truthful.
+    if (institution.parent_institution_id) {
+      return res.status(403).json({
+        code:    'BRANCH_CANNOT_RENEW',
+        message: "Only the parent institution can renew this subscription. Please contact your head office.",
+      });
     }
 
     // Resolve target plan. When plan_id is provided we validate + fetch
@@ -4705,6 +4978,147 @@ exports.superAdminEditInstitution = async (req, res) => {
     res.json({ message: 'Institution updated', institution: result.rows[0] });
   } catch (err) {
     console.error('superAdminEditInstitution error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// POST /api/onboarding/:id/send-branch-credentials
+//
+// Provisions credentials for a sub-branch created post-registration
+// (from the mobile Add Branch screen). It checks that the branch is
+// currently pending_activation and credentials_sent is false.
+exports.sendBranchCredentials = async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ message: 'Invalid institution id' });
+    }
+
+    const r = await pool.query(
+      `SELECT
+         child.id            AS branch_id,
+         child.name          AS branch_name,
+         child.address       AS branch_address,
+         child.city          AS branch_city,
+         child.pincode       AS branch_pincode,
+         child.email         AS branch_email,
+         child.phone         AS branch_phone,
+         child.parent_institution_id,
+         child.credentials_sent,
+         parent.name         AS parent_name,
+         parent.owner_user_id AS parent_owner_id,
+         parent_owner.name   AS parent_owner_name
+       FROM institutions child
+       LEFT JOIN institutions parent
+              ON parent.id = child.parent_institution_id
+       LEFT JOIN users parent_owner
+              ON parent_owner.id = parent.owner_user_id
+       WHERE child.id = $1`,
+      [id],
+    );
+
+    if (r.rows.length === 0) {
+      return res.status(404).json({ message: 'Institution not found' });
+    }
+    const row = r.rows[0];
+
+    if (!row.parent_institution_id) {
+      return res.status(400).json({
+        message: 'This is a main-branch institution. Cannot provision credentials via this endpoint.',
+      });
+    }
+
+    if (row.credentials_sent) {
+      return res.status(409).json({
+        message: 'Credentials have already been sent for this branch. Use the resend endpoint instead.',
+      });
+    }
+
+    const branchEmail = (row.branch_email || '').trim().toLowerCase();
+    if (!branchEmail) {
+      return res.status(400).json({
+        message: 'This sub-branch has no email on file. Update the branch details with an email first.',
+      });
+    }
+
+    // Check if email already taken
+    const dup = await pool.query(
+      `SELECT id FROM users WHERE LOWER(email) = $1 LIMIT 1`,
+      [branchEmail],
+    );
+    if (dup.rows.length > 0) {
+      return res.status(409).json({
+        message: 'A user with this email already exists. Update the branch email to a unique address.',
+      });
+    }
+
+    const newPassword = generateTempPassword();
+    const hashed = await bcrypt.hash(newPassword, 10);
+    const adminName = `${row.branch_name || 'Branch'} Admin`;
+
+    // Use transaction
+    const client = await pool.connect();
+    let branchUserId;
+    try {
+      await client.query('BEGIN');
+
+      const newUser = await client.query(
+        `INSERT INTO users (name, email, phone, password, role, status, must_change_password)
+         VALUES ($1, $2, $3, $4, 'admin', 'active', TRUE)
+         RETURNING id`,
+        [adminName, branchEmail, row.branch_phone || null, hashed],
+      );
+      branchUserId = newUser.rows[0].id;
+
+      await client.query(
+        `UPDATE users SET institution_id = $1 WHERE id = $2`,
+        [row.branch_id, branchUserId],
+      );
+
+      await client.query(
+        `UPDATE institutions
+            SET owner_user_id = $1,
+                credentials_sent = TRUE,
+                is_active = TRUE,
+                onboarding_status = 'active',
+                updated_at = NOW()
+          WHERE id = $2`,
+        [branchUserId, row.branch_id],
+      );
+
+      await client.query('COMMIT');
+    } catch (txErr) {
+      await client.query('ROLLBACK').catch(() => {});
+      client.release();
+      throw txErr;
+    }
+    client.release();
+
+    const branchAddress = [row.branch_address, row.branch_city, row.branch_pincode].filter(Boolean).join(', ');
+    const mailResult = await sendBranchSetupEmail({
+      to:              branchEmail,
+      branchName:      row.branch_name,
+      branchAddress,
+      institutionName: row.parent_name || '',
+      ownerName:       row.parent_owner_name || '',
+      loginEmail:      branchEmail,
+      loginPassword:   newPassword,
+    });
+
+    if (!mailResult.ok) {
+      return res.status(502).json({
+        message: 'Branch provisioned but email send failed. You can share the temp password manually.',
+        temp_password: newPassword,
+        smtp_error:    mailResult.error,
+      });
+    }
+
+    res.json({
+      message: `Login credentials generated and sent to ${branchEmail}.`,
+      sent_to: branchEmail,
+    });
+  } catch (err) {
+    console.error('[sendBranchCredentials] error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };

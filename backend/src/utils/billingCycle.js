@@ -19,6 +19,8 @@ const CYCLE_LABELS = {
   quarterly:   'Quarterly Fee',
   half_yearly: 'Half-Yearly Fee',
   annual:      'Annual Fee',
+  yearly:      'Yearly Fee',
+  custom:      'Custom Fee',
 };
 
 const CYCLE_CADENCE = {
@@ -27,6 +29,8 @@ const CYCLE_CADENCE = {
   quarterly:   'per quarter',
   half_yearly: 'per 6 months',
   annual:      'per year',
+  yearly:      'per year',
+  custom:      'custom',
 };
 
 /**
@@ -35,8 +39,10 @@ const CYCLE_CADENCE = {
  * that predates the migration renders sensibly.
  */
 function billingCycleLabel(cycle) {
-  const k = String(cycle || 'monthly').toLowerCase();
-  return CYCLE_LABELS[k] || CYCLE_LABELS.monthly;
+  if (!cycle) return CYCLE_LABELS.monthly;
+  const k = String(cycle).toLowerCase().trim();
+  if (CYCLE_LABELS[k]) return CYCLE_LABELS[k];
+  return k.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) + (k.includes('fee') ? '' : ' Fee');
 }
 
 /**
@@ -44,8 +50,10 @@ function billingCycleLabel(cycle) {
  * "₹1,500 per month". Same fallback rules as billingCycleLabel.
  */
 function billingCycleCadence(cycle) {
-  const k = String(cycle || 'monthly').toLowerCase();
-  return CYCLE_CADENCE[k] || CYCLE_CADENCE.monthly;
+  if (!cycle) return CYCLE_CADENCE.monthly;
+  const k = String(cycle).toLowerCase().trim();
+  if (CYCLE_CADENCE[k]) return CYCLE_CADENCE[k];
+  return k.replace(/_/g, ' ');
 }
 
 module.exports = {

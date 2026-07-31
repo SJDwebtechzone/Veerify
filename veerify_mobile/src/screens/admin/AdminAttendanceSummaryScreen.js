@@ -21,10 +21,11 @@ import {
 } from 'react-native';
 import Svg, { Circle } from 'react-native-svg';
 import {
-  ArrowLeft, ClipboardCheck, Calendar, Users, Info,
+  ArrowLeft, ClipboardCheck, Calendar, Users, Info, Download,
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
+import ExportAttendanceModal from '../../components/ExportAttendanceModal';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 
 // Animated version of react-native-svg's Circle so we can animate the
@@ -37,6 +38,7 @@ export default function AdminAttendanceSummaryScreen({ route, navigation }) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
+  const [exportOpen, setExportOpen] = useState(false);
 
   const load = useCallback(async () => {
     if (!batchId) { setLoading(false); return; }
@@ -70,6 +72,14 @@ export default function AdminAttendanceSummaryScreen({ route, navigation }) {
             {batchName || 'Batch'} · Read-only
           </Text>
         </View>
+        <TouchableOpacity
+          onPress={() => setExportOpen(true)}
+          style={styles.exportHeaderBtn}
+          activeOpacity={0.85}
+        >
+          <Download size={13} color="#fff" strokeWidth={2.4} />
+          <Text style={styles.exportHeaderBtnText}>Export</Text>
+        </TouchableOpacity>
       </View>
 
       {loading ? (
@@ -130,6 +140,11 @@ export default function AdminAttendanceSummaryScreen({ route, navigation }) {
           </View>
         </ScrollView>
       )}
+      <ExportAttendanceModal
+        visible={exportOpen}
+        onClose={() => setExportOpen(false)}
+        initialBranchId={null}
+      />
     </View>
   );
 }
@@ -352,4 +367,12 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     lineHeight: 15,
   },
+
+  exportHeaderBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: palette.purple.vivid,
+    paddingHorizontal: 10, paddingVertical: 6,
+    borderRadius: radius.md,
+  },
+  exportHeaderBtnText: { fontSize: 11, fontWeight: '800', color: '#fff' },
 });

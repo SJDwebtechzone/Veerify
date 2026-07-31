@@ -142,6 +142,7 @@ exports.getDashboardStats = async (req, res) => {
       unreadRes,
       recentEnrollRes,
       recentNotifRes,
+      totalBatchesRes,
     ] = await Promise.all([
       // Total distinct students enrolled in any batch under the caller's
       // branch scope. Filters via batch.branch_id so the number matches
@@ -301,6 +302,13 @@ exports.getDashboardStats = async (req, res) => {
          LIMIT 5`,
         [req.user.id],
       ),
+
+      // Total batches under the caller's branch scope
+      pool.query(
+        `SELECT COUNT(*)::int AS n
+           FROM batches b
+          WHERE ${batchScope}`,
+      ),
     ]);
 
     const presentCount = attendanceRes.rows[0]?.present || 0;
@@ -374,6 +382,7 @@ exports.getDashboardStats = async (req, res) => {
         students:             studentsRes.rows[0]?.n || 0,
         trainers:             trainersRes.rows[0]?.n || 0,
         today_classes:        batchesRes.rows[0]?.n  || 0,
+        total_batches:        totalBatchesRes.rows[0]?.n || 0,
         pending_fees_count:   pendingCount,
         pending_fees_total:   pendingTotal,
         revenue_this_month:   revenueMonth,

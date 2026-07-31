@@ -178,16 +178,13 @@ export default function BranchesListScreen({ navigation }) {
           <BranchCard
             branch={item}
             onEdit={() => openEdit(item)}
-            onDelete={() => {
-              if (item.branch_kind === 'sub_branch') {
-                Alert.alert(
-                  'Sub-branch',
-                  'This is a full academy with its own login credentials, students, and trainers. Deleting it must be done from the super admin dashboard.',
-                );
-                return;
-              }
-              onDelete(item);
-            }}
+            // Per spec: every branch — sub-branch, satellite, or
+            // wizard entry — is deletable from the institution portal.
+            // The backend picks up the right paired rows and cleans
+            // both institutions + institution_branches so the Web
+            // Admin's Linked Branches section reflects it after
+            // refresh.
+            onDelete={() => onDelete(item)}
             onMap={() => openMaps(item)}
             // Tapping a sub-branch card opens the read-only Branch
             // Dashboard (students / revenue / attendance). Satellite
@@ -244,11 +241,11 @@ function BranchCard({ branch, onEdit, onDelete, onMap, onOpen }) {
                 <Text style={styles.primaryBadgeText}>Primary</Text>
               </View>
             ) : null}
-            {isSubBranch ? (
-              <View style={styles.kindBadge}>
-                <Text style={styles.kindBadgeText}>SUB-BRANCH</Text>
-              </View>
-            ) : null}
+            {/* Per spec: no sub-branch hierarchy — every card just
+                reads as a plain Branch. The old SUB-BRANCH badge was
+                removed here; the internal branch_kind flag is still
+                used for delete plumbing but the UI never surfaces
+                the sub-branch/satellite distinction anymore. */}
           </View>
           <Text style={styles.cardCity} numberOfLines={1}>
             {branch.city || '—'}{branch.state ? `, ${branch.state}` : ''}

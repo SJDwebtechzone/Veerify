@@ -27,6 +27,7 @@ import { useInstitution } from '../../../context/InstitutionContext';
 import { palette, spacing, radius, shadows, type } from '../../../theme';
 import { useBellScrollHandler } from '../../../components/bellScrollBus';
 import { confirm } from '../../../components/ConfirmDialog';
+import Avatar from '../../../components/Avatar';
 
 export default function ProfileTabScreen({ navigation }) {
   const { user, logout } = useAuth();
@@ -194,13 +195,12 @@ function LoggedInView({ user, subscription, selectedInstitution, onLogout, navig
       {/* Profile card */}
       <View style={styles.profileCard}>
         <View style={styles.avatarWrap}>
-          {user?.profile_image ? (
-            <Image source={{ uri: user.profile_image }} style={styles.avatar} />
-          ) : (
-            <View style={[styles.avatar, { backgroundColor: palette.purple.vivid }]}>
-              <Text style={styles.avatarInitial}>{initials}</Text>
-            </View>
-          )}
+          <Avatar
+            uri={user?.profile_image}
+            name={user?.name || initials}
+            size={72}
+            tone="purple"
+          />
           {/* Small pencil overlay on the avatar — one-tap shortcut into
               the Edit Profile screen. Both this and the "Edit Profile"
               button below route to the same StudentEditProfile screen. */}

@@ -34,6 +34,7 @@ import { palette, spacing, radius, shadows, type } from '../../theme';
 import resolveAssetUrl from '../../utils/assetUrl';
 import DownloadInvoiceButton from '../../components/DownloadInvoiceButton';
 import { confirm } from '../../components/ConfirmDialog';
+import CourseImage from '../../components/CourseImage';
 
 function fmtDate(iso) {
   if (!iso) return '—';
@@ -303,43 +304,21 @@ function PendingCard({ row, onPayNow }) {
 // A tiny spinner shows while the image is loading so a slow network
 // doesn't leave the card looking blank.
 function CourseThumb({ courseImage, institutionLogo }) {
-  const [loading, setLoading] = React.useState(true);
-  const [courseErr, setCourseErr] = React.useState(false);
-  const [logoErr,   setLogoErr]   = React.useState(false);
-
-  const courseUrl = courseImage && !courseErr ? resolveAssetUrl(courseImage) : null;
-  const logoUrl   = institutionLogo && !logoErr ? resolveAssetUrl(institutionLogo) : null;
-  const src = courseUrl || logoUrl || null;
-
-  if (!src) {
-    return (
-      <View style={styles.thumbPlaceholder}>
-        <BookOpen size={18} color={palette.purple.vivid} strokeWidth={2.4} />
-      </View>
-    );
-  }
-
+  // Prefer the course cover; fall back to the institution logo. The
+  // shared CourseImage handles the resolve + contain-fit + placeholder
+  // for us, so the ladder here is just "which source do we hand off".
+  const primary = courseImage || institutionLogo || null;
   return (
     <View style={styles.thumbWrap}>
-      <Image
-        source={{ uri: src }}
-        style={styles.thumb}
-        resizeMode="cover"
-        onLoadStart={() => setLoading(true)}
-        onLoadEnd={()   => setLoading(false)}
-        onError={() => {
-          setLoading(false);
-          // Downgrade: fail the current step in the ladder so the
-          // next render tries the next source.
-          if (src === courseUrl) setCourseErr(true);
-          else                    setLogoErr(true);
-        }}
+      <CourseImage
+        uri={primary}
+        width="100%"
+        height="100%"
+        radius={0}
+        fit="contain"
+        icon="course"
+        style={StyleSheet.absoluteFill}
       />
-      {loading ? (
-        <View style={styles.thumbSpinner}>
-          <ActivityIndicator size="small" color={palette.purple.vivid} />
-        </View>
-      ) : null}
     </View>
   );
 }

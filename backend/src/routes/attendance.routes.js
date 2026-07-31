@@ -3,6 +3,7 @@ const router = express.Router();
 const attendanceController = require('../controllers/attendance.controller');
 const { verifyToken } = require('../middleware/auth.middleware');
 const { requireRole } = require('../middleware/role.middleware');
+const { requireActiveSubscription } = require('../utils/subscriptionGuard');
 
 // Mark / bulk-mark attendance. Both roles allowed:
 //   • Trainer  → their own assigned batches only.
@@ -11,8 +12,8 @@ const { requireRole } = require('../middleware/role.middleware');
 //                their own branch's). The controller enforces the
 //                boundary via getBranchScope().
 // Every write is audited into attendance_history.
-router.post('/',     verifyToken, requireRole('admin', 'trainer'), attendanceController.markAttendance);
-router.post('/bulk', verifyToken, requireRole('admin', 'trainer'), attendanceController.markBulkAttendance);
+router.post('/',     verifyToken, requireRole('admin', 'trainer'), requireActiveSubscription, attendanceController.markAttendance);
+router.post('/bulk', verifyToken, requireRole('admin', 'trainer'), requireActiveSubscription, attendanceController.markBulkAttendance);
 
 // Trainer/admin — read the roster for a batch. Response now includes
 // creator + updater name / role, and the last-updated timestamp.
@@ -44,6 +45,9 @@ router.get('/institution/today',
 router.get('/institution/by-batch',
   verifyToken, requireRole('admin'),
   attendanceController.getInstitutionByBatch);
+
+// Export attendance report (PDF / Excel)
+router.get('/export', verifyToken, requireRole('admin'), attendanceController.exportAttendance);
 
 // Student route
 router.get('/my', verifyToken, requireRole('student'), attendanceController.getMyAttendance);

@@ -178,14 +178,18 @@ function NotificationBell({
     if (d.kind === 'institution_profile_updated' && d.institution_id) {
       return `/institutions/${d.institution_id}`;
     }
-    // Branch add / update — the row whose fields actually changed is the
-    // branch's own institutions row (sub-branch) or its institution_branches
-    // row (satellite). Both live under /institutions/:branch_id when the
-    // branch is a sub-branch. For satellite locations we fall back to the
-    // parent since there's no separate detail page for them.
+    // Branch add / update — route to the PARENT institution's detail
+    // page. Its Linked Branches section already lists every child
+    // (sub-branch + satellite + wizard), so the super admin sees the
+    // change in context. This also gracefully handles stale
+    // notifications whose data.branch_id pointed at an old
+    // institution_branches row id (a different id sequence that
+    // could collide with an unrelated institutions.id — the previous
+    // /institutions/${branch_id} link resolved to phantom or wrong
+    // academies and 404'd).
     if ((d.kind === 'branch_added' || d.kind === 'branch_updated')
-        && d.branch_id) {
-      return `/institutions/${d.branch_id}`;
+        && d.institution_id) {
+      return `/institutions/${d.institution_id}`;
     }
     // Event approval flow — the branch's admin is the audience for
     // approve/reject; the parent's admin is the audience for pending.

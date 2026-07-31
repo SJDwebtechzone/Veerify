@@ -43,6 +43,7 @@ const { width: SCREEN_WIDTH } = Dimensions.get('window');
 // /uploads/ paths. Keeping the legacy behavior in one place means old
 // course rows still render correctly.
 import resolveAssetUrl from '../../../utils/assetUrl';
+import CourseImage from '../../../components/CourseImage';
 
 const MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
 function formatEventDate(iso) {
@@ -707,26 +708,19 @@ function CategoryChip({ category, accent, onPress }) {
 }
 
 function ProgramCard({ program, accent, onPress }) {
-  // Track load failure so a bad URL falls back to the branded sparkle
-  // placeholder rather than leaving a blank tile.
-  const [imgError, setImgError] = React.useState(false);
-  const rawUrl = program.image_url || program.thumbnail_url;
-  const img = rawUrl && !imgError ? resolveAssetUrl(rawUrl) : null;
+  const coverUri = program.image_url || program.thumbnail_url;
   return (
     <TouchableOpacity onPress={onPress} activeOpacity={0.9} style={styles.programCard}>
       <View style={[styles.programImage, { backgroundColor: accent.soft }]}>
-        {img ? (
-          <Image
-            source={{ uri: img }}
-            style={StyleSheet.absoluteFill}
-            resizeMode="cover"
-            onError={() => setImgError(true)}
-          />
-        ) : (
-          <View style={[styles.center, { flex: 1 }]}>
-            <Sparkles size={28} color={accent.vivid} strokeWidth={2.2} />
-          </View>
-        )}
+        <CourseImage
+          uri={coverUri}
+          width="100%"
+          height="100%"
+          radius={0}
+          fit="contain"
+          icon="course"
+          style={StyleSheet.absoluteFill}
+        />
         {program.is_featured ? (
           <View style={styles.featuredTag}>
             <Sparkles size={10} color="#fff" strokeWidth={2.6} />
@@ -1018,13 +1012,13 @@ function AcademyCourseCard({ course, onPress }) {
 
   return (
     <TouchableOpacity onPress={onPress} activeOpacity={0.9} style={styles.acadCourseCard}>
-      {img ? (
-        <Image source={{ uri: img }} style={styles.acadCourseImage} />
-      ) : (
-        <View style={[styles.acadCourseImage, styles.acadCourseImageEmpty]}>
-          <GraduationCap size={30} color={palette.purple.vivid} strokeWidth={1.8} />
-        </View>
-      )}
+      <CourseImage
+        uri={course.image_url}
+        width="100%"
+        height={130}
+        radius={0}
+        fit="contain"
+      />
       <View style={styles.acadCourseBody}>
         <View style={styles.acadCourseTitleRow}>
           <View style={{ flex: 1 }}>

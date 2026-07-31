@@ -33,6 +33,7 @@ import {
 
 import { palette, spacing, radius, shadows, type } from '../../theme';
 import { confirm } from '../../components/ConfirmDialog';
+import Avatar from '../../components/Avatar';
 
 // ─── Placeholder timeline / payments — replaced when wired to backend ────────
 // Placeholder rows have been removed. Until the real
@@ -229,18 +230,13 @@ export default function StudentDetailScreen({ navigation, route }) {
         {/* ───── Profile section ───── */}
         <View style={styles.profileSection}>
           <View style={styles.avatarWrap}>
-            {student.avatar || student.photo_url ? (
-              <Image
-                source={{ uri: student.avatar || student.photo_url }}
-                style={styles.avatar}
-              />
-            ) : (
-              <View style={[styles.avatar, { backgroundColor: accent.vivid }]}>
-                <Text style={styles.avatarInitial}>
-                  {student.name?.charAt(0).toUpperCase()}
-                </Text>
-              </View>
-            )}
+            <Avatar
+              uri={student.avatar || student.photo_url}
+              name={student.name}
+              size={96}
+              tone="purple"
+              style={{ borderWidth: 4, borderColor: '#FFFFFF' }}
+            />
           </View>
           <Text style={styles.name}>{student.name}</Text>
           {student.course ? (
