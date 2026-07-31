@@ -13,12 +13,12 @@
 import React, { useCallback, useState } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, ActivityIndicator,
-  StyleSheet, RefreshControl, Modal, Image, Dimensions, Share, Alert,
+  StyleSheet, RefreshControl, Alert, Linking, Share,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import {
-  ArrowLeft, Award, Clock, Eye, Download, Share2,
-  ShieldCheck, X as XIcon,
+  ArrowLeft, Award, Clock,
+  ShieldCheck,
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
@@ -39,7 +39,6 @@ export default function StudentCertificatesScreen({ navigation }) {
   const [awaits, setAwaits]   = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [viewer, setViewer]   = useState(null);
 
   const load = useCallback(async () => {
     try {
@@ -58,25 +57,34 @@ export default function StudentCertificatesScreen({ navigation }) {
 
   const shareCert = async (cert) => {
     try {
-      await Share.share({
-        title: cert.title,
-        message: `My certificate: ${cert.title} (No. ${cert.certificate_no || ''})`,
-      });
+      const base = (apiClient?.defaults?.baseURL || '').replace(/\/api\/?$/, '');
+      const verifyUrl = cert.qr_token
+        ? `${base}/api/certificates/verify/${cert.qr_token}`
+        : null;
+      const courseName = cert.title || 'Certificate';
+      const instName = cert.institution_name || 'Academy';
+      let msg = `🎓 ${courseName}\nIssued by: ${instName}\nDate: ${fmtDate(cert.issue_date)}`;
+      if (cert.certificate_no) msg += `\nCertificate No: ${cert.certificate_no}`;
+      if (verifyUrl) msg += `\n\nVerify: ${verifyUrl}`;
+      await Share.share({ title: courseName, message: msg, url: verifyUrl });
     } catch (err) {
-      Alert.alert('Could not share', err?.message || 'Try again.');
+      // User cancelled — ignore
     }
   };
 
-  const download = (cert) => {
-    // Real download requires the render_url. Fallback: tell the
-    // student where to look. If a real render_url is later populated,
-    // this becomes a Linking.openURL(render_url).
-    if (cert.render_url) {
-      const url = resolveAssetUrl(cert.render_url);
-      Alert.alert('Download', `Open ${url}`);
+  const openDownload = async (cert) => {
+    const url = cert.render_url ? resolveAssetUrl(cert.render_url) : null;
+    if (url) {
+      try { await Linking.openURL(url); } catch {
+        Alert.alert('Error', 'Could not open the certificate file.');
+      }
     } else {
       Alert.alert('Not yet available', 'Your academy is still preparing the file. Try again in a moment.');
     }
+  };
+
+  const openDetail = (cert) => {
+    navigation.navigate('CertificateDetail', { certificate: cert });
   };
 
   return (
@@ -166,163 +174,27 @@ export default function StudentCertificatesScreen({ navigation }) {
                   </View>
                 </View>
                 <View style={styles.actionRow}>
-                  <ActionBtn icon={Eye}      label="View"     onPress={() => setViewer(c)}         accent={palette.purple} />
-                  <ActionBtn icon={Download} label="Download" onPress={() => download(c)}         accent={palette.blue} />
-                  <ActionBtn icon={Share2}   label="Share"    onPress={() => shareCert(c)}        accent={palette.green} />
+                  <ActionBtn label="View"     onPress={() => openDetail(c)}      accent={palette.purple} />
+                  <ActionBtn label="Download" onPress={() => openDownload(c)}    accent={palette.blue} />
+                  <ActionBtn label="Share"    onPress={() => shareCert(c)}       accent={palette.green} />
                 </View>
               </View>
             ))
           )}
         </ScrollView>
       )}
-
-      {/* Full-screen viewer */}
-      <Modal visible={!!viewer} animationType="fade" onRequestClose={() => setViewer(null)} transparent>
-        <View style={styles.viewer}>
-          <TouchableOpacity onPress={() => setViewer(null)} style={styles.viewerClose} hitSlop={8}>
-            <XIcon size={22} color="#fff" strokeWidth={2.4} />
-          </TouchableOpacity>
-          {viewer ? <CertViewer cert={viewer} /> : null}
-        </View>
-      </Modal>
     </View>
   );
 }
 
-// Full-fidelity renderer for a dispatched certificate. Reads the same
-// data the admin PreviewModal uses:
-//   • template_background_url — the artwork the admin uploaded
-//   • template_canvas_width/height — sets the canvas ratio so pin (x,y)
-//     positions align across devices
-//   • placeholder_data — snapshot of the pins WITH resolved values +
-//     image_url for the digital_signature / seal pins
-// so what the student sees matches what the admin dispatched.
-function CertViewer({ cert }) {
-  const SCREEN_W = Dimensions.get('window').width;
-  const CANVAS_W = SCREEN_W - spacing.lg * 2;
-  const pins = Array.isArray(cert.placeholder_data) ? cert.placeholder_data : [];
 
-  // Prefer the finalised render_url (a real PNG/PDF) when the backend
-  // has one; otherwise fall back to rendering placeholders onto the
-  // raw template background. Both paths use the same canvas ratio so
-  // the student's view is stable regardless of which one wins.
-  const canvasW = Number(cert.template_canvas_width)  || 1000;
-  const canvasH = Number(cert.template_canvas_height) || 700;
-  const ratio   = canvasH / (canvasW || 1);
-  const CANVAS_H = Math.min(CANVAS_W * ratio, SCREEN_W * 1.2);
-
-  const bg = cert.render_url
-    ? resolveAssetUrl(cert.render_url)
-    : cert.template_background_url
-      ? resolveAssetUrl(cert.template_background_url)
-      : null;
-
-  return (
-    <View style={{
-      width: CANVAS_W, height: CANVAS_H,
-      borderRadius: radius.lg, overflow: 'hidden',
-      backgroundColor: '#fff',
-      alignSelf: 'center',
-    }}>
-      {bg ? (
-        <Image
-          source={{ uri: bg }}
-          style={StyleSheet.absoluteFill}
-          resizeMode={cert.render_url ? 'contain' : 'cover'}
-        />
-      ) : (
-        <View style={[StyleSheet.absoluteFill, { backgroundColor: '#FFF8E7' }]} />
-      )}
-
-      {/* Placeholder-layer render — only when we're painting on top of
-          the raw background (not the finalised render_url which is an
-          already-baked image). Same layout math the admin preview modal
-          uses so what the student sees matches the dispatch preview. */}
-      {!cert.render_url ? pins.map((pin, i) => {
-        if (pin.active === false) return null;
-        const isImage = pin.key === 'digital_signature' || pin.key === 'seal';
-        if (isImage) {
-          const url = pin.image_url
-            || (pin.key === 'digital_signature' ? cert.template_signature_url : cert.template_seal_url);
-          if (!url) return null;
-          const w = Math.max(40, (pin.width  || 0.20) * CANVAS_W);
-          const h = Math.max(24, (pin.height || 0.10) * CANVAS_H);
-          return (
-            <Image
-              key={i}
-              source={{ uri: resolveAssetUrl(url) }}
-              style={{
-                position: 'absolute',
-                left: pin.x * CANVAS_W - w / 2,
-                top:  pin.y * CANVAS_H - h / 2,
-                width: w, height: h,
-              }}
-              resizeMode="contain"
-            />
-          );
-        }
-        const est = Math.max(60, String(pin.value || pin.label || '').length * (pin.font_size || 16) * 0.55);
-        return (
-          <View
-            key={i}
-            style={{
-              position: 'absolute',
-              left: pin.x * CANVAS_W - est / 2,
-              top:  pin.y * CANVAS_H - (pin.font_size || 16),
-              width: est,
-            }}
-          >
-            <Text style={{
-              fontSize: Math.max(9, (pin.font_size || 16) * 0.6),
-              color: pin.color || '#111827',
-              fontWeight: pin.bold ? '800' : '600',
-              fontStyle: pin.italic ? 'italic' : 'normal',
-              textAlign: pin.align || 'center',
-            }}>
-              {String(pin.value ?? '')}
-            </Text>
-          </View>
-        );
-      }) : null}
-
-      {/* Legacy fallback — no template artwork AND no render_url (the
-          admin dispatched from a very old certificate row). Show a
-          text-only summary so the student still sees something useful. */}
-      {!bg ? (
-        <View style={[StyleSheet.absoluteFill, { padding: spacing.lg }]}>
-          <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-            <Award size={40} color="#B45309" strokeWidth={2} />
-            <Text style={{ ...type.h1, color: '#111827', marginTop: 10, textAlign: 'center' }}>
-              {cert.title}
-            </Text>
-            <Text style={{ marginTop: 6, color: '#78350F', fontWeight: '700' }}>
-              Awarded on {new Date(cert.issue_date).toLocaleDateString('en-IN', {
-                day: '2-digit', month: 'long', year: 'numeric',
-              })}
-            </Text>
-            {cert.certificate_no ? (
-              <Text style={{ marginTop: 4, color: '#78350F' }}>No. {cert.certificate_no}</Text>
-            ) : null}
-            {pins.filter((p) => p.value).slice(0, 4).map((p, i) => (
-              <Text key={i} style={{ marginTop: 4, color: '#111827', fontWeight: '700' }}>
-                {p.label}: <Text style={{ fontWeight: '900' }}>{String(p.value)}</Text>
-              </Text>
-            ))}
-          </View>
-        </View>
-      ) : null}
-    </View>
-  );
-}
-
-function ActionBtn({ icon: Icon, label, onPress, accent }) {
+function ActionBtn({ label, onPress, accent }) {
   return (
     <TouchableOpacity
       onPress={onPress}
       activeOpacity={0.85}
       style={[styles.actionBtn, { backgroundColor: accent.soft }]}
     >
-      <Icon size={13} color={accent.on} strokeWidth={2.4} />
       <Text style={[styles.actionBtnText, { color: accent.on }]}>{label}</Text>
     </TouchableOpacity>
   );

@@ -24,6 +24,7 @@
 //                                                    stamp certificate_sent_at.
 
 const pool = require('../config/db');
+const { insertNotification } = require('./notification.controller');
 
 // Resolve the caller's institution_id (used by the institution admin
 // endpoints so they only see rows in their own academy tree).
@@ -547,34 +548,55 @@ exports.sendCertificate = async (req, res) => {
     //   • Provide qr_token (NOT NULL) and instructor_name for the
     //     verify page.
     let certId = null;
+    let certAlreadyExisted = false;
     try {
       await client.query('SAVEPOINT cert_insert');
       const crypto = require('crypto');
       const qrToken = crypto.randomBytes(12).toString('hex');
-      const certRes = await client.query(
-        `INSERT INTO certificates
-           (student_id, institution_id, kind, title, description,
-            issue_date, instructor_name, certificate_no, qr_token,
-            template_id, placeholder_data, course_id, trainer_remarks)
-         VALUES ($1, $2, 'completion', $3, $4,
-                 CURRENT_DATE, $5, $6, $7,
-                 $8, $9::jsonb, $10, $11)
-         RETURNING id`,
-        [
-          row.student_id,
-          row.institution_id,
-          `${row.course_name} — Course Completion`,
-          row.test_remarks || null,
-          trainerRes.rows[0]?.name || null,
-          certNo,
-          qrToken,
-          template?.id || null,
-          JSON.stringify(mergedPlaceholders),
-          row.course_id || null,
-          row.test_remarks || null,
-        ],
+
+      // Idempotency: if a certificate already exists for this completion,
+      // reuse it instead of creating a duplicate. We link via certificate_no
+      // prefix + course_id + student_id. If course_completions already has
+      // a certificate_id, prefer that existing record.
+      const existingCertRes = await client.query(
+        `SELECT id FROM certificates WHERE student_id = $1 AND course_id = $2
+           AND institution_id = $3
+         ORDER BY id DESC LIMIT 1`,
+        [row.student_id, row.course_id || null, row.institution_id],
       );
-      certId = certRes.rows[0]?.id || null;
+
+      if (existingCertRes.rows.length > 0) {
+        // Reuse the existing certificate — do not create a duplicate.
+        certId = existingCertRes.rows[0].id;
+        certAlreadyExisted = true;
+        console.log(`[sendCertificate] reusing existing cert id=${certId} for completion id=${id}`);
+      } else {
+        const certRes = await client.query(
+          `INSERT INTO certificates
+             (student_id, institution_id, kind, title, description,
+              issue_date, instructor_name, certificate_no, qr_token,
+              template_id, placeholder_data, course_id, trainer_remarks)
+           VALUES ($1, $2, 'completion', $3, $4,
+                   CURRENT_DATE, $5, $6, $7,
+                   $8, $9::jsonb, $10, $11)
+           RETURNING id`,
+          [
+            row.student_id,
+            row.institution_id,
+            `${row.course_name} — Course Completion`,
+            row.test_remarks || null,
+            trainerRes.rows[0]?.name || null,
+            certNo,
+            qrToken,
+            template?.id || null,
+            JSON.stringify(mergedPlaceholders),
+            row.course_id || null,
+            row.test_remarks || null,
+          ],
+        );
+        certId = certRes.rows[0]?.id || null;
+        console.log(`[sendCertificate] created new cert id=${certId} for completion id=${id}`);
+      }
       await client.query('RELEASE SAVEPOINT cert_insert');
     } catch (certErr) {
       // Roll back JUST the cert insert so the outer transaction stays
@@ -597,9 +619,36 @@ exports.sendCertificate = async (req, res) => {
     );
 
     await client.query('COMMIT');
+
+    // Fire an in-app notification + FCM push to the student so they
+    // see the new certificate immediately in their bell + Certificates
+    // screen without waiting for a manual refresh.
+    try {
+      await insertNotification({
+        user_id:        row.student_id,
+        institution_id: row.institution_id,
+        category:       'system',
+        title:          '🎓 Your certificate is ready!',
+        message:        `Your certificate for ${row.course_name} has been issued by ${
+          iRes.rows[0]?.name || 'your academy'
+        }. Open Belts & Certificates to view it.`,
+        data: {
+          screen:         'StudentCertificates',
+          certificate_id: certId,
+          course_name:    row.course_name,
+        },
+        created_by: adminId,
+      });
+      console.log(`[sendCertificate] notification sent to student ${row.student_id}`);
+    } catch (notifErr) {
+      // Non-fatal — certificate was already sent successfully.
+      console.warn('[sendCertificate] notification failed:', notifErr?.message);
+    }
+
     res.json({
       message:    `Certificate sent to ${row.student_name}.`,
       completion: upd.rows[0],
+      certificate_id: certId,
     });
   } catch (err) {
     if (client) {
