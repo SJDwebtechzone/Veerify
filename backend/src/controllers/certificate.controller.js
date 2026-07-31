@@ -27,7 +27,12 @@ async function getInstitutionId(userId) {
 // GET /api/certificates/verify/:token  (no auth)
 exports.verify = async (req, res) => {
   try {
-    const token = String(req.params.token || '').trim().toUpperCase();
+    // Tokens are minted by sendCertificate via `crypto.randomBytes(12)
+    // .toString('hex')` — lowercase hex. Uppercasing here (which the
+    // previous version did) guaranteed the lookup missed EVERY new
+    // certificate. Match case-insensitively so both a QR scan and a
+    // hand-typed uppercase link resolve to the same row.
+    const token = String(req.params.token || '').trim();
     if (!token) return res.status(400).json({ message: 'Token required' });
 
     const r = await pool.query(
@@ -38,7 +43,7 @@ exports.verify = async (req, res) => {
          FROM certificates c
          JOIN users u ON c.student_id = u.id
          JOIN institutions i ON c.institution_id = i.id
-        WHERE c.qr_token = $1
+        WHERE LOWER(c.qr_token) = LOWER($1)
         LIMIT 1`,
       [token],
     );
