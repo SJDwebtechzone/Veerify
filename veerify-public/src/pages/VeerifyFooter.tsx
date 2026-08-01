@@ -65,7 +65,7 @@ export default function VeerifyFooter({ lastUpdated }) {
       {/* Bottom strip — copyright + last-updated */}
       <div style={styles.stripWrap}>
         <div style={styles.strip}>
-          <span>© {year} Veerify. All rights reserved.</span>
+          <span>© {year} DevSpectra. All rights reserved.</span>
           {lastUpdated ? (
             <span style={styles.stripMeta}>Last updated: {lastUpdated}</span>
           ) : null}
@@ -128,7 +128,7 @@ const styles = {
     margin: '0 auto',
     padding: '16px 20px',
     display: 'flex',
-    justifyContent: 'space-between',
+    justifyContent:'space-between',
     alignItems: 'center',
     flexWrap: 'wrap',
     gap: 10,

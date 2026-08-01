@@ -85,7 +85,7 @@ export default function TermsAndConditions() {
             <li><strong>Institution / Branch Admin</strong> — an academy that has completed onboarding and paid its subscription. Responsible for the accuracy of student records, attendance, batch schedules, and any content it publishes.</li>
             <li><strong>Trainer</strong> — an account created by an academy admin to record attendance, evaluate belts, and post class videos. Responsible for the professional conduct of every class taught through the app.</li>
             <li><strong>Student</strong> — an account either self-registered or created by an academy at enrolment. Responsible for the accuracy of profile information and for payment obligations to the academy.</li>
-            <li><strong>Parent</strong> — a linked account that can view a child student's progress, attendance, and certificates. Consent given by the parent extends to the child's use of the Service.</li>
+            {/* <li><strong>Parent</strong> — a linked account that can view a child student's progress, attendance, and certificates. Consent given by the parent extends to the child's use of the Service.</li> */}
             <li><strong>Guest</strong> — an unauthenticated visitor browsing academies. Limited to public content (course previews capped at 60 seconds, academy discovery, categories).</li>
           </ul>
         </Section>
@@ -162,7 +162,9 @@ export default function TermsAndConditions() {
           <p>The Service integrates the following third parties. Your use of them is subject to their own terms, which we encourage you to review:</p>
           <ul style={styles.ul}>
             <li><strong>Razorpay</strong> — payment processing.</li>
-            <li><strong>MSG91</strong> — SMS and email delivery for transactional notifications.</li>
+            <li><strong>WhatsApp Cloud API (Meta)</strong> — Sending transactional WhatsApp notifications, login credentials, enrollment confirmations, payment updates, and other service-related communications (where enabled).</li>
+            <li><strong>Firebase Cloud Messaging (Google Firebase)</strong> — Delivery of push notifications for announcements, attendance, certificates, payments, reminders, and other app-related events.</li>
+          
             <li><strong>Google Play</strong> — app distribution, in-app purchases (where applicable), and platform-level policies.</li>
           </ul>
           <p>

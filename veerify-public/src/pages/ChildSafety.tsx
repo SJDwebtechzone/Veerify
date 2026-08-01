@@ -61,16 +61,16 @@ export default function ChildSafety() {
           </ul>
         </Section>
 
-        <Section title="4. Parental Controls">
+        {/* <Section title="4. Parental Controls">
           <ul style={styles.ul}>
             <li>A parent can link to their child's account via the app and see everything the child sees — attendance, schedule, certificates, fee dues.</li>
             <li>A parent can pay fees on the child's behalf directly through the app.</li>
             <li>A parent can request account deletion for the child at any time by writing to <a href="mailto:support@veerifyapp.com" style={styles.link}>support@veerifyapp.com</a>. See <a href="/account-deletion" style={styles.link}>Account Deletion</a>.</li>
             <li>A parent can revoke consent to their child's use of the Service in writing. The account is anonymised within 7 business days of the request.</li>
           </ul>
-        </Section>
+        </Section> */}
 
-        <Section title="5. Content Standards">
+        <Section title="4. Content Standards">
           <p>All content published through Veerify by trainers and academies (course videos, certificates, event announcements) must:</p>
           <ul style={styles.ul}>
             <li>Be strictly related to martial-arts instruction, safety, or academy administration.</li>
@@ -81,7 +81,7 @@ export default function ChildSafety() {
           <p>Content violating these standards is removed and the publishing account is investigated.</p>
         </Section>
 
-        <Section title="6. Trainer Vetting">
+        <Section title="5. Trainer Vetting">
           <p>Trainer accounts are created by institution admins, not self-registered. Every academy admin agrees under our Terms to:</p>
           <ul style={styles.ul}>
             <li>Vet trainers before adding them to Veerify.</li>
@@ -90,7 +90,7 @@ export default function ChildSafety() {
           </ul>
         </Section>
 
-        <Section title="7. Reporting a Concern">
+        <Section title="6. Reporting a Concern">
           <p>If you believe a child is at risk through their use of Veerify, or you have observed content, communication, or behaviour that raises a safeguarding concern:</p>
           <ol style={styles.ol}>
             <li>Email <a href="mailto:support@veerifyapp.com" style={styles.link}>support@veerifyapp.com</a> with the subject line <strong>CHILD SAFETY</strong>.</li>
@@ -100,7 +100,7 @@ export default function ChildSafety() {
           </ol>
         </Section>
 
-        <Section title="8. Zero Tolerance">
+        <Section title="7. Zero Tolerance">
           <p>The following are zero-tolerance offences on Veerify:</p>
           <ul style={styles.ul}>
             <li>Any content that sexualises, exploits, or endangers a child.</li>
@@ -110,7 +110,7 @@ export default function ChildSafety() {
           <p>Accounts implicated in any of the above are suspended immediately pending investigation, evidence is preserved, and appropriate authorities are notified.</p>
         </Section>
 
-        <Section title="9. Our Team">
+        <Section title="8. Our Team">
           <p>
             Child-safety reports are handled by our senior operations team. Contact:
           </p>
