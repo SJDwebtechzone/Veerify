@@ -73,12 +73,33 @@ async function pruneInvalidTokens(tokens) {
   }
 }
 
+// Roles eligible to receive FCM push notifications.
+//
+//   ✅ admin    — institution admin + sub-branch admin (same role,
+//                 role gated by users.institution_id → parent hierarchy)
+//   ✅ trainer
+//   ✅ student
+//   ❌ parent      — bell only (product decision — the parent flow uses
+//                    its own summary emails, not real-time push)
+//   ❌ super_admin — web-only, doesn't run the mobile app
+//
+// The filter lives inside tokensForUsers so EVERY push path — the
+// insertNotification fan-out, direct sendToUsers calls, admin
+// broadcasts — inherits the gate automatically. Adding a new role
+// later is one line here instead of every controller.
+const PUSH_ELIGIBLE_ROLES = ['admin', 'trainer', 'student'];
+
 async function tokensForUsers(userIds) {
   if (!Array.isArray(userIds) || userIds.length === 0) return [];
   try {
     const r = await pool.query(
-      `SELECT DISTINCT token FROM fcm_tokens WHERE user_id = ANY($1::int[])`,
-      [userIds],
+      `SELECT DISTINCT ft.token
+         FROM fcm_tokens ft
+         JOIN users u ON u.id = ft.user_id
+        WHERE ft.user_id = ANY($1::int[])
+          AND u.role = ANY($2::text[])
+          AND COALESCE(u.is_deleted, FALSE) = FALSE`,
+      [userIds, PUSH_ELIGIBLE_ROLES],
     );
     return r.rows.map((row) => row.token).filter(Boolean);
   } catch (err) {
@@ -174,11 +195,31 @@ async function sendToUsers({ userIds, title, body, data }) {
 // notification row shape ({ user_id, title, message, data, category,
 // id }) and pushes it to the row's owner. Fire-and-forget from the
 // caller; the promise resolution is logged for observability.
+//
+// Deep-link contract with the mobile FCM handler
+// (veerify_mobile/src/services/fcm.service.js#attachHandlers):
+//   data.screen         — target route name (e.g. 'StudentDetail')
+//   data.params         — route params (auto-JSON-stringified)
+//   data.category       — original bell category
+//   data.reference_type — 'attendance' | 'payment' | 'certificate' | …
+//   data.reference_id   — id of the referenced entity
+//   data.notification_id — id of the notifications row
+//   data.title / data.body — mirror of notification block (foreground
+//                          handler falls back to these if the OS
+//                          strips the notification payload).
+// Every caller that goes through insertNotification gets this shape
+// for free — set `data.screen` + `data.params` on the row and both
+// the bell and the push open the correct detail screen.
 function fanOutFromNotificationRow(row) {
   if (!row || !row.user_id) return Promise.resolve({ ok: false, skipped: 'no-row' });
   const dataMap = { ...(row.data || {}) };
   if (row.category && !dataMap.category) dataMap.category = row.category;
   if (row.id && !dataMap.notification_id) dataMap.notification_id = row.id;
+  // Mirror title/body into the data map so the mobile foreground
+  // handler can render the toast even when the OS strips the
+  // notification block (iOS 15+ silent path).
+  if (row.title   && !dataMap.title) dataMap.title = row.title;
+  if (row.message && !dataMap.body)  dataMap.body  = row.message;
   return sendToUsers({
     userIds: [row.user_id],
     title:   row.title,

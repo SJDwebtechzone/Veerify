@@ -80,9 +80,35 @@ function fmtRelative(iso) {
   return new Date(iso).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' });
 }
 
+// Compact currency formatter used by the Monthly Revenue chart's
+// Y-axis. Follows the Indian numbering convention the rest of the app
+// uses everywhere else — ₹1K / ₹10K / ₹1L / ₹1.2Cr — so the axis
+// stays legible at any scale from ₹500 to ₹5,00,00,000.
+//
+// react-native-chart-kit hands us a stringified number from its own
+// interpolator; we parse, format, and return a string. Empty / NaN
+// falls back to '₹0' so a corrupt tick never renders blank.
+function fmtCompactINR(rawValue) {
+  const n = Math.round(Number(rawValue) || 0);
+  if (n === 0) return '₹0';
+  const abs = Math.abs(n);
+  const sign = n < 0 ? '-' : '';
+  // Trim to at most 1 decimal so "₹1.2K" not "₹1.234K".
+  const trim = (v) => {
+    const s = v.toFixed(1);
+    return s.endsWith('.0') ? s.slice(0, -2) : s;
+  };
+  if (abs >= 1_00_00_000) return `${sign}₹${trim(abs / 1_00_00_000)}Cr`;
+  if (abs >= 1_00_000)    return `${sign}₹${trim(abs / 1_00_000)}L`;
+  if (abs >= 1_000)       return `${sign}₹${trim(abs / 1_000)}K`;
+  return `${sign}₹${abs}`;
+}
+
 const CHART_CONFIG = {
   backgroundGradientFrom: palette.surface,
   backgroundGradientTo: palette.surface,
+  // 0 decimal places on the rendered number — the formatter below
+  // handles unit suffixes, so we don't want ".00" showing through.
   decimalPlaces: 0,
   color: (opacity = 1) => `rgba(139, 92, 246, ${opacity})`,
   labelColor: () => palette.textMuted,
@@ -92,6 +118,11 @@ const CHART_CONFIG = {
   fillShadowGradientFromOpacity: 0.2,
   fillShadowGradientTo: palette.purple.soft,
   fillShadowGradientToOpacity: 0.02,
+  // Compact ₹ formatter for the Y-axis. Without this the axis
+  // rendered raw numbers (₹123456) that either overflowed the gutter
+  // or, in the previous divide-by-1000 hack, collapsed to '0, 0, 0,
+  // 0, 0' when values were under ₹500.
+  formatYLabel: fmtCompactINR,
 };
 
 export default function AdminDashboardScreen({ navigation }) {
@@ -330,25 +361,47 @@ export default function AdminDashboardScreen({ navigation }) {
     },
   ]), [counts, navigation, todayAtt, data.is_sub_branch]);
 
-  // Revenue chart from the rolling 6-month series. The chart kit needs at
-  // least one non-zero datum or it draws a flat line; if every month is 0
-  // we still pass through to render the empty grid (which reads as a "no
-  // revenue yet" state to the user).
+  // Revenue chart from the rolling 6-month series. Backend
+  // (admin.controller#getDashboardStats) returns exactly 6 rows using
+  // generate_series + LEFT JOIN, so every month is present — zero-
+  // revenue months come through as { total: 0 } instead of missing
+  // entries. That means the X-axis stays chronologically ordered and
+  // gaps read as flat sections instead of the previous / next month's
+  // value repeating.
   const revenueChartData = useMemo(() => {
     const series = (data.monthly_revenue || []).slice(-6);
     if (series.length === 0) {
       return null;
     }
+    // Feed RAW rupee values — the axis formatter (fmtCompactINR)
+    // handles unit suffixes. The previous "divide by 1000" trick
+    // rounded every month under ₹500 to 0, so segments produced
+    // duplicated "0" labels on the Y-axis.
     return {
       labels: series.map((m) => m.label),
-      // Divide by 1000 since the section title says "₹ in thousands".
       datasets: [{
-        data: series.map((m) => Math.round((Number(m.total) || 0) / 1000)),
+        data: series.map((m) => Math.round(Number(m.total) || 0)),
         color: () => palette.purple.vivid,
         strokeWidth: 3,
       }],
     };
   }, [data.monthly_revenue]);
+
+  // Pick a segment count that keeps every Y-axis tick distinct. When
+  // the whole series is 0 (fresh academy), chart-kit still needs
+  // >=1 segment or it renders nothing; we clamp to 1 so the axis
+  // shows a single "₹0" label instead of five duplicates.
+  const revenueChartSegments = useMemo(() => {
+    if (!revenueChartData) return 4;
+    const vals = revenueChartData.datasets[0].data;
+    const max  = Math.max(0, ...vals);
+    if (max === 0) return 1;
+    // Cap at 4 for small ranges so the compact formatter has enough
+    // "space" between ticks that consecutive labels don't collapse
+    // to the same suffix (e.g. two "₹1K" rows).
+    if (max < 4) return Math.min(max, 4);
+    return 4;
+  }, [revenueChartData]);
 
   const placeholder = (name) =>
     Alert.alert(name, 'We\'ll wire this up as we build out the related screen.');
@@ -633,7 +686,7 @@ export default function AdminDashboardScreen({ navigation }) {
           <View style={styles.sectionHeader}>
             <View style={{ flex: 1 }}>
               <Text style={styles.sectionTitle}>Monthly Revenue</Text>
-              <Text style={styles.sectionSubtitle}>Last 6 months • ₹ in thousands</Text>
+              <Text style={styles.sectionSubtitle}>Last 6 months</Text>
             </View>
             <TouchableOpacity onPress={() => placeholder('Revenue Details')} style={styles.linkRow}>
               <Text style={styles.linkText}>Details</Text>
@@ -657,8 +710,14 @@ export default function AdminDashboardScreen({ navigation }) {
                 withVerticalLines={false}
                 withDots
                 fromZero
-                segments={4}
-                style={{ marginLeft: -spacing.md }}
+                // segments = number of horizontal grid lines. Derived
+                // from the data range so a flat "all zeros" chart
+                // renders a single "₹0" tick instead of 4 duplicates.
+                segments={revenueChartSegments}
+                // Slightly wider gutter so the compact ₹K / ₹L / ₹Cr
+                // labels don't clip against the left edge.
+                yAxisInterval={1}
+                style={{ marginLeft: -spacing.md, borderRadius: 8 }}
               />
             ) : (
               <Text style={styles.chartEmpty}>

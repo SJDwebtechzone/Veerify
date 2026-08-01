@@ -10,6 +10,15 @@ import {
   revokeOnLogout as fcmRevoke,
 } from '../services/fcm.service';
 
+// Roles that receive FCM push. Parents get the in-app bell only
+// (product decision), and super_admin only runs on the web dashboard.
+// Gating registration here means parents don't get the OS permission
+// prompt AND no token ever lands on the backend for their account.
+// Backend also enforces this (services/notification.service.js) as a
+// belt-and-suspenders check for stale mobile builds.
+const PUSH_ROLES = new Set(['admin', 'trainer', 'student']);
+const shouldRegisterPush = (u) => !!u && PUSH_ROLES.has(u.role);
+
 const AuthContext = createContext();
 
 export const AuthProvider = ({ children }) => {
@@ -74,7 +83,7 @@ useEffect(() => {
           // Re-register the FCM token on session resume so a token
           // that rotated while the app was closed still lands on the
           // backend against the correct user.
-          if (userData) {
+          if (shouldRegisterPush(userData)) {
             fcmRegister().catch((e) => console.log('[AUTH] fcm resume register threw:', e?.message));
           }
         }
@@ -148,8 +157,10 @@ useEffect(() => {
 
       // FCM registration — fire-and-forget. Delayed so setUser has
       // flushed and the navigator mounted before the OS prompt (on
-      // Android 13+ / iOS) pops.
-      fcmRegister().catch((e) => console.log('[AUTH] fcm register threw:', e?.message));
+      // Android 13+ / iOS) pops. Parents are excluded (bell only).
+      if (shouldRegisterPush(userData)) {
+        fcmRegister().catch((e) => console.log('[AUTH] fcm register threw:', e?.message));
+      }
 
       return { success: true, user: userData, onboardingStatus: status, institution: inst };
     } catch (err) {
@@ -183,8 +194,10 @@ useEffect(() => {
         }
         setUser(userData);
         // FCM registration on register/resume — same fire-and-forget
-        // pattern as login().
-        fcmRegister().catch((e) => console.log('[AUTH] fcm register threw:', e?.message));
+        // pattern as login(). Parents don't get push.
+        if (shouldRegisterPush(userData)) {
+          fcmRegister().catch((e) => console.log('[AUTH] fcm register threw:', e?.message));
+        }
 
         return {
           success:          true,

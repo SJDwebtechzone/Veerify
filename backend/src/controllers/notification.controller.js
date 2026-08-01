@@ -19,9 +19,39 @@ const VALID_CATEGORIES = new Set([
   'class_cancelled', 'leave', 'attendance', 'announcement', 'emergency', 'system',
 ]);
 
-// Shared insert helper — used both from the HTTP layer and from other
-// controllers that need to "fan out" a notification (e.g. when a leave
-// request gets submitted, we drop one in the trainer's inbox).
+// ── NotificationService.send() — CENTRALISED entry point ───────────
+//
+// One helper that does all three things per notification:
+//   1. Persist a row in `notifications` (the in-app bell reads this).
+//   2. Emit an FCM push to every eligible device of the user
+//      (auto-filtered by role: admin/trainer/student ✅,
+//       parent/super_admin ❌ — see services/notification.service.js).
+//   3. Fire-and-forget: any push failure NEVER blocks the DB insert.
+//
+// Every controller across the app should call THIS instead of
+// hand-rolling FCM code. Modules already wired up include:
+//   • students, trainers, branches                 (branch.controller)
+//   • enrolments + credentials + payment reminders (enrollment.controller)
+//   • attendance / performance reports             (performanceReport.controller)
+//   • certificates + course completions            (courseCompletion.controller,
+//                                                   belt.controller)
+//   • announcements (institution + branch + trainer approval flow)
+//                                                   (notification.controller
+//                                                    #announce, #approvePending)
+//   • events + institution events + RSVPs          (institution.controller)
+//   • leave / trainer leave / feedback             (leave.controller,
+//                                                   trainerLeave.controller)
+//   • payments + subscriptions + renewals          (onboarding.controller)
+//   • referrals                                    (referral.controller)
+//   • parent linking (targets the STUDENT, never the parent)
+//                                                   (parent.controller)
+//
+// data-map convention (matches the mobile FCM handler):
+//   { screen, params, category, reference_type, reference_id, ... }
+// Setting `screen` + `params` on the row makes both the bell tap
+// and the push tap navigate to the same detail screen with no extra
+// mobile changes. reference_type + reference_id give future
+// notification types a stable deep-link contract.
 async function insertNotification({
   user_id, institution_id = null, category = 'system',
   title, message = null, data = {}, created_by = null,
@@ -389,6 +419,29 @@ exports.announce = async (req, res) => {
       flatParams2,
     );
 
+    // FCM fan-out — this endpoint uses a single bulk INSERT for
+    // performance and therefore skips the per-row insertNotification
+    // helper (which auto-fans push for the callers that use it). We
+    // call sendToUsers ourselves so admin/trainer-approved
+    // announcements reach eligible devices as push in parallel with
+    // the bell update. tokensForUsers already filters out parents +
+    // super_admin server-side, so we can safely pass every recipient.
+    sendToUsers({
+      userIds: recipients.rows.map((r) => r.user_id),
+      title,
+      body:   message || '',
+      data: {
+        category,
+        // Deep-link contract used across the mobile bell + FCM
+        // handlers: reference_type + reference_id let the tap
+        // handler pick the right detail screen without every
+        // controller reinventing the shape.
+        reference_type: 'announcement',
+        screen: 'Notifications',
+        ...(data || {}),
+      },
+    }).catch((err) => console.warn('[announce] push fan-out threw:', err?.message));
+
     res.status(201).json({ message: `Announcement sent`, sent: recipients.rows.length });
   } catch (err) {
     console.error('Announce error:', err);
@@ -680,6 +733,23 @@ exports.approvePending = async (req, res) => {
          VALUES ${valueRows}`,
         flat,
       );
+
+      // Same push fan-out as the direct announce path — the bulk
+      // INSERT above bypasses insertNotification's per-row auto-fan,
+      // so we push here explicitly. Role-eligibility is enforced
+      // inside sendToUsers → tokensForUsers.
+      sendToUsers({
+        userIds: recipients.rows.map((r) => r.user_id),
+        title:   draft.title,
+        body:    draft.message || '',
+        data: {
+          category: draft.category,
+          reference_type: 'announcement',
+          reference_id:   draft.id,
+          screen: 'Notifications',
+          ...(draft.data || {}),
+        },
+      }).catch((err) => console.warn('[approvePending] push fan-out threw:', err?.message));
     }
 
     // Flip the draft to approved.
