@@ -574,16 +574,20 @@ exports.create = async (req, res) => {
           ? 'active'
           : (parent.onboarding_status || 'active');
 
-      // onboarding_status = 'pending' — the branch is awaiting the
-      // super/institution admin to send credentials. Deliberately NOT
-      // 'pending_activation'; some deployments carry a CHECK
-      // constraint on institutions.onboarding_status that pre-dates
-      // that value and rejects the INSERT with 23514
-      // (institutions_onboarding_status_check). 'pending' is present
-      // in every historical version of the CHECK. The real "not yet
-      // usable" gate is credentials_sent=FALSE + is_active=FALSE;
-      // sendBranchCredentials flips this row to onboarding_status =
-      // 'active' when the admin dispatches credentials.
+      // onboarding_status = 'approved' — the parent already vouched
+      // for this branch (institution admin creates it), so it's
+      // functionally provisioned. We deliberately do NOT use
+      // 'pending', 'pending_activation', or anything else custom:
+      // the CHECK constraint that ships on some deployments allows
+      // only the values used elsewhere in the codebase (registered /
+      // plan_selected / pending_approval / approved / active /
+      // rejected / deleted). Any other value triggers 23514
+      // "institutions_onboarding_status_check". 'approved' is
+      // universally accepted AND matches the parent's own state
+      // between super-admin approval and payment. The real
+      // "not-yet-usable" gate is is_active=FALSE + credentials_sent
+      // =FALSE; sendBranchCredentials flips this row to 'active'
+      // + is_active=TRUE the moment credentials are dispatched.
       const subIns = await client.query(
         `INSERT INTO institutions
            (name, brand_name, address, city, pincode, phone, email,
@@ -595,7 +599,7 @@ exports.create = async (req, res) => {
          VALUES ($1, $1, $2, $3, $4, $5, $6,
                  $7, $8,
                  $9, $10,
-                 'pending', 'pending', FALSE, FALSE,
+                 'approved', 'approved', FALSE, FALSE,
                  $11, $12, $13, $14,
                  $15, $16, $17)
          RETURNING *`,

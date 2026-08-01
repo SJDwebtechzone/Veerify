@@ -33,12 +33,21 @@ async function _waitForNominatimSlot() {
 }
 
 // Generic Nominatim search. Returns { lat, lng, district, state } or null.
+//
+// IMPORTANT — Nominatim treats `q=` (free-form) and structured filters
+// (postalcode / city / county / state / country) as MUTUALLY EXCLUSIVE.
+// Mixing them returns HTTP 400. So we only append &country=India when
+// the caller's qs is structured; for a free-form q=… lookup, the
+// caller must include "India" in the query string itself. Callers of
+// geocodeAddress already do this.
 async function _nominatimSearch(qs) {
   try {
     await _waitForNominatimSlot();
+    const isFreeForm = /(^|&)q=/.test(qs);
+    const filters = isFreeForm ? '' : '&country=India';
     const url =
-      `https://nominatim.openstreetmap.org/search?${qs}` +
-      `&country=India&format=json&addressdetails=1&limit=1`;
+      `https://nominatim.openstreetmap.org/search?${qs}${filters}` +
+      `&format=json&addressdetails=1&limit=1`;
     // Cap the outbound Nominatim call at 3s so a slow / unreachable
     // upstream can't stall the whole /academies/nearby endpoint. On
     // timeout we fall back to the local prefix average.
