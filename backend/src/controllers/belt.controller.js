@@ -207,11 +207,20 @@ exports.getJourney = async (req, res) => {
     const current = belts.find((b) => b.status === 'current') || null;
 
     const certsRes = await pool.query(
-      `SELECT id, kind, title, issue_date, certificate_no, qr_token, status,
-              instructor_name, signature_url, academy_seal_url, promotion_id
-         FROM certificates
-        WHERE student_id = $1
-        ORDER BY issue_date DESC, id DESC`,
+      `SELECT c.*, i.name AS institution_name, u.name AS student_name,
+              t.name             AS template_name,
+              t.background_url   AS template_background_url,
+              t.background_kind  AS template_background_kind,
+              t.canvas_width     AS template_canvas_width,
+              t.canvas_height    AS template_canvas_height,
+              t.signature_url    AS template_signature_url,
+              t.seal_url         AS template_seal_url
+         FROM certificates c
+         JOIN institutions i ON c.institution_id = i.id
+         JOIN users u ON c.student_id = u.id
+         LEFT JOIN certificate_templates t ON t.id = c.template_id
+        WHERE c.student_id = $1
+        ORDER BY c.issue_date DESC, c.id DESC`,
       [studentId],
     );
 

@@ -57,7 +57,13 @@ async function _nominatimSearch(qs) {
       clearTimeout(timer);
     }
     if (!r.ok) {
-      console.warn('[geocoder] nominatim http', r.status, 'for', qs);
+      // 400 usually means the free-form query contained a token
+      // Nominatim couldn't parse (e.g. a 2-letter state abbreviation
+      // like "Tn"). Not an operational error — the caller retries
+      // with a smaller query — so log at info instead of warn to
+      // avoid falsely flagging the branch-create pipeline as broken.
+      const level = r.status === 400 ? 'log' : 'warn';
+      console[level]('[geocoder] nominatim http', r.status, 'for', qs);
       return null;
     }
     const arr = await r.json();
@@ -137,14 +143,34 @@ async function resolvePincode(rawPin) {
 async function geocodeAddress({ address_line, city, state, pincode, country = 'India' }) {
   const pin = String(pincode || '').replace(/[^0-9]/g, '').slice(0, 6);
 
-  // Try the full address first when we have enough to be useful.
+  // Sanitise state — Nominatim wants the full name ("Tamil Nadu"),
+  // not the postal abbreviation ("Tn" / "TN"). A 2- or 3-letter
+  // token in the state slot triggers a 400 for the whole query, so
+  // we drop it. Callers that pass a full state name still work.
+  const stateClean = (state && String(state).trim().length > 3)
+    ? String(state).trim()
+    : null;
+
   const haveDetail = (address_line && address_line.trim()) || (city && city.trim());
   if (haveDetail) {
-    const q = encodeURIComponent(
-      [address_line, city, state, pin, country].filter(Boolean).join(', '),
-    );
-    const hit = await _nominatimSearch(`q=${q}`);
-    if (hit) return { latitude: hit.lat, longitude: hit.lng };
+    // Try progressively looser candidate queries. Some inputs
+    // ("Nagai, Tn, India") make Nominatim return 400 for the full
+    // string but succeed with just city + country. Each miss is a
+    // silent no-op — the caller (branch/institution create) already
+    // treats geocoding as best-effort.
+    const candidates = [
+      [address_line, city, stateClean, pin, country],
+      [address_line, city, pin, country],
+      [address_line, city, country],
+      [city, stateClean, country],
+      [city, country],
+    ];
+    for (const parts of candidates) {
+      const q = parts.filter(Boolean).map((p) => String(p).trim()).filter(Boolean).join(', ');
+      if (!q) continue;
+      const hit = await _nominatimSearch(`q=${encodeURIComponent(q)}`);
+      if (hit) return { latitude: hit.lat, longitude: hit.lng };
+    }
   }
 
   // Fall back to pincode-only.

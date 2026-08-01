@@ -351,6 +351,21 @@ exports.sendCertificate = async (req, res) => {
     // from the student / completion data, and the merged array is
     // stored on certificates.placeholder_data so a re-render never has
     // to hit live tables again.
+    //
+    // Templates live under the ROOT institution id — when the student
+    // is enrolled at a sub-branch (rowPre.institution_id points at the
+    // branch, not the root), the raw lookup would return null and the
+    // dispatched certificate would land with template_id=NULL, leaving
+    // the student's Belts & Certs screen showing the "no template
+    // artwork" fallback. Walking parent_institution_id here means both
+    // main-institution and branch students get the same template the
+    // admin approved.
+    const rootRes = await pool.query(
+      `SELECT COALESCE(parent_institution_id, id) AS root_id
+         FROM institutions WHERE id = $1`,
+      [rowPre.institution_id],
+    );
+    const rootInstitutionId = rootRes.rows[0]?.root_id || rowPre.institution_id;
     const bodyTemplateId = Number.parseInt(req.body?.template_id, 10);
     let template = null;
     try {
@@ -361,8 +376,8 @@ exports.sendCertificate = async (req, res) => {
           : `SELECT * FROM certificate_templates
               WHERE institution_id = $1 AND is_default = TRUE
               ORDER BY updated_at DESC LIMIT 1`,
-        Number.isInteger(bodyTemplateId) ? [bodyTemplateId, rowPre.institution_id]
-                                         : [rowPre.institution_id],
+        Number.isInteger(bodyTemplateId) ? [bodyTemplateId, rootInstitutionId]
+                                         : [rootInstitutionId],
       );
       template = t.rows[0] || null;
     } catch (tplErr) {

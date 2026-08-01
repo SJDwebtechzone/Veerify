@@ -574,6 +574,16 @@ exports.create = async (req, res) => {
           ? 'active'
           : (parent.onboarding_status || 'active');
 
+      // onboarding_status = 'pending' — the branch is awaiting the
+      // super/institution admin to send credentials. Deliberately NOT
+      // 'pending_activation'; some deployments carry a CHECK
+      // constraint on institutions.onboarding_status that pre-dates
+      // that value and rejects the INSERT with 23514
+      // (institutions_onboarding_status_check). 'pending' is present
+      // in every historical version of the CHECK. The real "not yet
+      // usable" gate is credentials_sent=FALSE + is_active=FALSE;
+      // sendBranchCredentials flips this row to onboarding_status =
+      // 'active' when the admin dispatches credentials.
       const subIns = await client.query(
         `INSERT INTO institutions
            (name, brand_name, address, city, pincode, phone, email,
@@ -585,7 +595,7 @@ exports.create = async (req, res) => {
          VALUES ($1, $1, $2, $3, $4, $5, $6,
                  $7, $8,
                  $9, $10,
-                 'pending_activation', 'pending', FALSE, FALSE,
+                 'pending', 'pending', FALSE, FALSE,
                  $11, $12, $13, $14,
                  $15, $16, $17)
          RETURNING *`,

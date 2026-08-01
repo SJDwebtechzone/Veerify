@@ -136,6 +136,22 @@ async function getMyInstitutionId(userId) {
   return r.rows[0]?.institution_id || null;
 }
 
+// Templates live under the root academy — a sub-branch admin needs to
+// operate on the parent institution's templates, not their own row.
+// Walks parent_institution_id and returns the top of the tree; falls
+// back to the caller's raw institution_id when the row has no parent
+// (main-institution admins).
+async function getMyRootInstitutionId(userId) {
+  const r = await pool.query(
+    `SELECT COALESCE(i.parent_institution_id, i.id) AS root_id
+       FROM users u
+       JOIN institutions i ON i.id = u.institution_id
+      WHERE u.id = $1`,
+    [userId],
+  );
+  return r.rows[0]?.root_id || null;
+}
+
 // Normalise a placeholder pin — drops unknown keys, clamps x/y to
 // [0, 1], enforces sane font size range. Silent about invalid values
 // so callers with older mobile builds don't crash the save.
@@ -175,7 +191,13 @@ function sanitisePlaceholders(list) {
 // GET /api/certificate-templates
 exports.list = async (req, res) => {
   try {
-    const institutionId = await getMyInstitutionId(req.user.id);
+    // Templates are institution-wide — resolve the ROOT id so
+    // sub-branch admins see (and can dispatch against) the parent
+    // academy's templates. Without this, /certificate-templates
+    // returns 0 rows for a branch admin and the Send Certificate flow
+    // has nothing to pick, so the dispatched cert lands with
+    // template_id=NULL and the student's app shows the fallback card.
+    const institutionId = await getMyRootInstitutionId(req.user.id);
     if (!institutionId) return res.status(403).json({ message: 'No institution linked' });
     // My Certificates only — sample rows live in a separate list
     // (see exports.listSamples) so the mobile UI can render them in
@@ -703,7 +725,10 @@ exports.prepare = async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
     if (!Number.isInteger(id)) return res.status(400).json({ message: 'Invalid id' });
-    const institutionId = await getMyInstitutionId(req.user.id);
+    // Preview must succeed for both main-institution AND branch admins
+    // — templates always resolve against the root academy id so a
+    // branch admin previews the same layout the main admin does.
+    const institutionId = await getMyRootInstitutionId(req.user.id);
     if (!institutionId) return res.status(403).json({ message: 'No institution linked' });
 
     const tplRes = await pool.query(
