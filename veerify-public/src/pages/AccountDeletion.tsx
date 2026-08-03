@@ -26,15 +26,14 @@ export default function AccountDeletion() {
         <p style={styles.meta}><strong>Last updated:</strong> {LAST_UPDATED}</p>
 
         <p style={styles.lead}>
-          You can permanently delete your Veerify account at any time. This
-          page describes the two ways to do it, exactly what happens when
-          you do, and what is retained (with all personal identifiers
-          removed) for legal and tax records.
+          You can permanently delete your Veerify account at any time. This page describes how you can permanently delete your Veerify account directly from within the mobile application, what information is deleted immediately, and what information may be retained for legal and tax compliance.
         </p>
 
         <div style={styles.callout}>
           <p style={{ margin: 0, fontWeight: 800, fontSize: 15 }}>
-            The fastest way: open Veerify → <em>More</em> → <em>Delete Account</em>.
+            Delete your account directly in the app:
+
+            open Veerify → <em>More</em> → <em>Delete Account</em>.
           </p>
           <p style={{ margin: '6px 0 0', fontSize: 13, color: '#6B7280' }}>
             Deletion is immediate. Re-enter your password to confirm.
@@ -54,7 +53,7 @@ export default function AccountDeletion() {
           <p>Deletion is immediate. You will be signed out of all devices and returned to the Welcome screen.</p>
         </Section>
 
-        <Section title="2. Method B — By Email">
+        {/* <Section title="2. Method B — By Email">
           <p>If you cannot access the app (forgot password, uninstalled, etc.), email us:</p>
           <div style={styles.contactBox}>
             <p style={{ margin: 0 }}><strong>To:</strong> <a href="mailto:support@veerifyapp.com" style={styles.link}>support@veerifyapp.com</a></p>
@@ -64,9 +63,9 @@ export default function AccountDeletion() {
           <p style={{ marginTop: 12 }}>
             We verify the request by sending a confirmation email to the same address. Once confirmed, we complete the deletion within <strong>3 business days</strong>.
           </p>
-        </Section>
+        </Section> */}
 
-        <Section title="3. What is Deleted">
+        <Section title="2. What is Deleted">
           <p>Immediately anonymised — irrecoverable:</p>
           <ul style={styles.ul}>
             <li>Your name, replaced with "Deleted User".</li>
@@ -80,7 +79,7 @@ export default function AccountDeletion() {
           </ul>
         </Section>
 
-        <Section title="4. What is Retained (with Personal Identifiers Removed)">
+        <Section title="3. What is Retained (with Personal Identifiers Removed)">
           <p>The following are kept because Indian tax law (Section 44AA of the Income-tax Act, 1961) requires financial records for <strong>8 years</strong>. All personal identifiers on them are anonymised:</p>
           <ul style={styles.ul}>
             <li><strong>Enrolment history</strong> — course, batch, dates. Attached to the tombstoned "Deleted User" row, no personal identity.</li>
@@ -95,7 +94,7 @@ export default function AccountDeletion() {
           </p>
         </Section>
 
-        <Section title="5. What Happens to Data the Academy Holds">
+        <Section title="4. What Happens to Data the Academy Holds">
           <p>
             If you enrolled with an academy through Veerify, that academy has its own copy of the operational data required to run its classes — attendance you attended, belts you earned, certificates you were issued. This copy is governed by the academy's own privacy practices and is not deleted by our anonymisation of your Veerify account.
           </p>
@@ -103,8 +102,8 @@ export default function AccountDeletion() {
             To request deletion of academy-held records, contact the academy directly. Veerify will assist in facilitating the request.
           </p>
         </Section>
-
-        <Section title="6. Sessions &amp; Devices">
+          
+        <Section title="5. Sessions &amp; Devices">
           <p>Immediately on deletion:</p>
           <ul style={styles.ul}>
             <li>All active login sessions are invalidated.</li>
@@ -114,27 +113,27 @@ export default function AccountDeletion() {
           <p>If you want to use Veerify again after deletion, you must register a new account.</p>
         </Section>
 
-        <Section title="7. Institution Admins">
+        <Section title="6. Institution Admins">
           <p>
             If you are the owner of an active institution on Veerify, you cannot self-delete while the institution is still active — deleting the owner would orphan every student and trainer under it. Please:
           </p>
           <ol style={styles.ol}>
-            <li>Contact <a href="mailto:support@veerifyapp.com" style={styles.link}>support@veerifyapp.com</a> to close the institution first.</li>
+            <li>Institution owners cannot delete their account while their institution has active students, trainers, or administrators. Transfer ownership or close the institution before using the in-app Delete Account feature.</li>
             <li>Or transfer ownership to another admin.</li>
             <li>Once the institution is closed or transferred, follow Method A or B above to delete your own account.</li>
           </ol>
         </Section>
 
-        <Section title="8. Timeline Summary">
+        <Section title="7. Timeline Summary">
           <ul style={styles.ul}>
-            <li><strong>In-app delete</strong>: immediate.</li>
+            <li><strong>Account deletion</strong>: Immediate after confirmation in the app.</li>
             <li><strong>Email delete</strong>: within 3 business days after confirmation.</li>
             <li><strong>Backup purge</strong>: within 90 days.</li>
-            <li><strong>Financial records purge</strong>: 8 years from the date of the last financial transaction, per Indian tax law.</li>
+            <li><strong>Financial records purge</strong>: retained for up to 8 years where required by applicable law.</li>
           </ul>
         </Section>
 
-        <Section title="9. Questions">
+        <Section title="8. Questions">
           <div style={styles.contactBox}>
             <p style={{ margin: 0 }}><strong>Veerify — Data Protection Team</strong></p>
             <p style={{ margin: '4px 0' }}>
