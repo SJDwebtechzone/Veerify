@@ -6,6 +6,144 @@ const { getBranchScope } = require('../utils/branchScope');
 // Schedule guard — refuses attendance marks on days the batch isn't
 // scheduled to run. Same helper the mobile uses to build the date strip.
 const { isScheduledClassDay } = require('../utils/batchSchedule');
+// WhatsApp attendance-alerts. Both dependencies are lazy-loaded via
+// require() so the WhatsApp send path (which touches Meta Cloud API +
+// walks the plan flag) never adds boot-time cost or crashes the
+// attendance module when either helper is missing.
+const { sendTextMessage: sendWhatsAppText } = require('../services/whatsapp.service');
+const { isWhatsAppEnabledForUser } = require('../utils/planFeatureGuard');
+
+// ── WhatsApp attendance-alert helpers ─────────────────────────────
+//
+// Fires only for NON-'present' saves + only when the institution's
+// plan has WhatsApp enabled + only when the student carries a valid
+// contact number. Idempotent via attendance.wa_sent_at /
+// wa_sent_status (migration 083). NEVER throws — every path resolves
+// silently so a WA outage can't fail an attendance mark.
+const NON_PRESENT_STATUSES = new Set(['absent', 'late', 'leave', 'holiday', 'excused']);
+
+function humanStatus(s) {
+  const clean = String(s || '').trim().toLowerCase();
+  if (!clean) return 'Absent';
+  return clean.charAt(0).toUpperCase() + clean.slice(1);
+}
+
+function fmtWaDate(iso) {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return String(iso);
+    return d.toLocaleDateString('en-IN', {
+      day: '2-digit', month: 'short', year: 'numeric',
+    });
+  } catch {
+    return String(iso);
+  }
+}
+
+// Dispatch a single attendance WA — safe to await OR fire-and-forget.
+// Callers should NOT block the response on the returned promise;
+// attendance save is committed already by the time this runs.
+async function dispatchAttendanceWa({ attendanceId, status, actorUserId }) {
+  try {
+    const cleanStatus = String(status || '').trim().toLowerCase();
+    // Rule 1 — only non-present. Present marks silently no-op.
+    if (!cleanStatus || cleanStatus === 'present' || !NON_PRESENT_STATUSES.has(cleanStatus)) {
+      return { ok: false, skipped: 'status-present-or-unknown' };
+    }
+
+    // Rule 2 — institution's plan must have WhatsApp enabled. Falls
+    // to false on any lookup error (readPlanFlag fail-closed).
+    const enabled = await isWhatsAppEnabledForUser(actorUserId);
+    if (!enabled) {
+      console.log(`[wa/attendance] skip attendance=${attendanceId} reason=plan-disabled`);
+      return { ok: false, skipped: 'plan-disabled' };
+    }
+
+    // Resolve the row + student contact + batch/course names + inst
+    // name in one round-trip. student_profiles.contact_number is the
+    // enrolment-form phone (source of truth for parent contact);
+    // users.phone is the fallback for pre-profile enrolments.
+    const r = await pool.query(
+      `SELECT a.id, a.student_id, a.batch_id, a.date, a.status,
+              a.wa_sent_at, a.wa_sent_status,
+              COALESCE(sp.contact_number, u.phone) AS phone,
+              u.name  AS student_name,
+              b.name  AS batch_name,
+              c.name  AS course_name,
+              i.name  AS institution_name
+         FROM attendance a
+         JOIN users u    ON u.id = a.student_id
+         LEFT JOIN student_profiles sp ON sp.user_id = a.student_id
+         JOIN batches b  ON b.id = a.batch_id
+         LEFT JOIN courses c ON c.id = b.course_id
+         LEFT JOIN institutions i ON i.id = a.institution_id
+        WHERE a.id = $1`,
+      [attendanceId],
+    );
+    const row = r.rows[0];
+    if (!row) return { ok: false, skipped: 'row-missing' };
+
+    // Rule 3 — student must have a valid mobile number.
+    if (!row.phone) {
+      console.log(`[wa/attendance] skip attendance=${attendanceId} reason=no-phone`);
+      return { ok: false, skipped: 'no-phone' };
+    }
+
+    // Rule 4 — dedup. Same status already dispatched → no-op. A
+    // status CHANGE (absent → late) still fires because the sent
+    // status is different from the current one.
+    if (row.wa_sent_at && String(row.wa_sent_status || '').toLowerCase() === cleanStatus) {
+      console.log(`[wa/attendance] skip attendance=${attendanceId} reason=already-sent status=${cleanStatus}`);
+      return { ok: false, skipped: 'already-sent' };
+    }
+
+    const inst = row.institution_name || 'your academy';
+    const student = row.student_name || 'Student';
+    const batchLine = row.batch_name
+      ? (row.course_name ? `${row.course_name} – ${row.batch_name}` : row.batch_name)
+      : (row.course_name || 'class');
+    const message =
+      `Attendance update from ${inst}\n\n`
+      + `${student} was marked ${humanStatus(cleanStatus)} on ${fmtWaDate(row.date)} for ${batchLine}.\n\n`
+      + `Please contact the academy if this is incorrect.`;
+
+    const res = await sendWhatsAppText(row.phone, message);
+    if (!res?.ok) {
+      console.warn(
+        `[wa/attendance] send failed attendance=${attendanceId} `
+        + `student=${row.student_id} status=${cleanStatus} `
+        + `reason=${res?.error || 'unknown'}`,
+      );
+      return { ok: false, error: res?.error || 'send-failed' };
+    }
+
+    // Stamp only on successful dispatch so a transient send failure
+    // stays retryable on the next attendance edit.
+    await pool.query(
+      `UPDATE attendance
+          SET wa_sent_at     = NOW(),
+              wa_sent_status = $2
+        WHERE id = $1`,
+      [attendanceId, cleanStatus],
+    ).catch((err) => {
+      // schema-missing (pre-083) — swallow so we don't spam logs on
+      // every send until the migration lands.
+      if (err?.code !== '42703') {
+        console.warn(`[wa/attendance] stamp failed attendance=${attendanceId}:`, err?.message);
+      }
+    });
+
+    console.log(
+      `[wa/attendance] sent attendance=${attendanceId} student=${row.student_id} `
+      + `status=${cleanStatus} to=${row.phone}`,
+    );
+    return { ok: true };
+  } catch (err) {
+    console.warn('[wa/attendance] unexpected error:', err?.message);
+    return { ok: false, error: err?.message };
+  }
+}
 
 // Fetch the batch's days_of_week once so both mark handlers can enforce
 // the schedule. Returns null when the batch has no schedule declared —
@@ -201,6 +339,16 @@ exports.markAttendance = async (req, res) => {
     });
     await client.query('COMMIT');
 
+    // Fire-and-forget WhatsApp alert. Only fires for non-'present'
+    // saves; the dispatcher gates on plan + phone + dedup internally.
+    // NEVER awaited — attendance save is committed and the response
+    // must not block on Meta Cloud API latency.
+    dispatchAttendanceWa({
+      attendanceId: attendance.id,
+      status: attendance.status,
+      actorUserId: actorId,
+    }).catch(() => { /* logged inside */ });
+
     res.status(action === 'create' ? 201 : 200).json({
       message: action === 'create' ? 'Attendance marked' : 'Attendance updated',
       action,
@@ -258,6 +406,18 @@ exports.markBulkAttendance = async (req, res) => {
       results.push({ ...attendance, action });
     }
     await client.query('COMMIT');
+
+    // Fan-out WhatsApp alerts for every non-'present' row committed
+    // above. Fired in parallel and unawaited so the response returns
+    // as soon as the DB write is durable. Each dispatch is
+    // independently gated (plan + phone + dedup) inside the helper.
+    for (const rec of results) {
+      dispatchAttendanceWa({
+        attendanceId: rec.id,
+        status: rec.status,
+        actorUserId: actorId,
+      }).catch(() => { /* logged inside */ });
+    }
 
     res.status(201).json({
       message: `Attendance marked for ${results.length} students`,

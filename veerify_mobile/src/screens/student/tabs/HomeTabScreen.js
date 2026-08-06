@@ -34,7 +34,7 @@ import { useInstitution } from '../../../context/InstitutionContext';
 import { palette, spacing, radius, shadows, type } from '../../../theme';
 import MyDashboard from '../MyDashboard';
 import NearbyLocationPicker from '../../../components/NearbyLocationPicker';
-import { useBellScrollHandler } from '../../../components/bellScrollBus';
+import NotificationBellButton from '../../../components/NotificationBellButton';
 import { confirm } from '../../../components/ConfirmDialog';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -254,8 +254,6 @@ export default function HomeTabScreen({ navigation }) {
     );
   }
 
-  const bellScroll = useBellScrollHandler();
-
   return (
     <View style={styles.screen}>
       <ScrollView
@@ -269,19 +267,14 @@ export default function HomeTabScreen({ navigation }) {
           />
         }
         contentContainerStyle={{ paddingBottom: 40 }}
-        // Auto-hide the floating notification bell as the viewer
-        // scrolls down; slide it back in on scroll up. Handler is
-        // stateless — no re-renders on scroll frames.
-        onScroll={bellScroll}
-        scrollEventThrottle={16}
       >
-        {/* ── Header ───────────────────────────────────────────── */}
-        {/* Bell removed from the header — it now floats globally via
-            <GlobalNotificationBell/> so it stays visible on every
-            screen. The spacer keeps the greeting from butting up
-            against the floating bell in the top-right corner. */}
+        {/* ── Greeting row ─────────────────────────────────────── */}
+        {/* Notification bell lives in the top-right of this welcome
+            card (matching the Institution + Trainer dashboards) so
+            it reads as part of the greeting rather than a separate
+            top bar. Unread badge + tap-to-open behavior unchanged. */}
         <View style={styles.header}>
-          <View style={{ flex: 1, paddingRight: 54 }}>
+          <View style={{ flex: 1 }}>
             <Text style={styles.greeting}>{isGuest ? 'Welcome to Veerify' : `Hi, ${user.name.split(' ')[0]} 👋`}</Text>
             <TouchableOpacity
               style={styles.instSelector}
@@ -293,6 +286,9 @@ export default function HomeTabScreen({ navigation }) {
               </Text>
               <ChevronDown size={16} color={palette.purple.vivid} strokeWidth={2.4} />
             </TouchableOpacity>
+          </View>
+          <View style={styles.welcomeBellSlot}>
+            <NotificationBellButton showBackground={false} />
           </View>
         </View>
 
@@ -1091,6 +1087,13 @@ const styles = StyleSheet.create({
     gap: spacing.md,
   },
   greeting: { ...type.caption, color: palette.textMuted },
+  // Right-aligned bell slot inside the welcome row. Sized so the
+  // icon stays visually balanced with the greeting eyebrow above.
+  welcomeBellSlot: {
+    alignItems: 'flex-end',
+    justifyContent: 'flex-start',
+    paddingTop: 2,
+  },
   instSelector: {
     flexDirection: 'row',
     alignItems: 'center',

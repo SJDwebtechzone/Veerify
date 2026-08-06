@@ -3,6 +3,7 @@ import { View, Text, ScrollView, TouchableOpacity, RefreshControl, ActivityIndic
 import { useFocusEffect } from '@react-navigation/native';
 import apiClient from '../../api/client';
 import { colors } from '../../utils/styles';
+import { formatBatchTime } from '../../utils/formatTime';
 
 export default function ChildDetailScreen({ route, navigation }) {
   const { childId, childName } = route.params;
@@ -122,7 +123,7 @@ export default function ChildDetailScreen({ route, navigation }) {
               <View style={{ flex: 1 }}>
                 <Text style={styles.courseName}>{e.course_name}</Text>
                 <Text style={styles.batchName}>{e.batch_name}</Text>
-                <Text style={styles.batchInfo}>📆 {e.days_of_week} • ⏰ {e.start_time?.slice(0,5)}</Text>
+                <Text style={styles.batchInfo}>📆 {e.days_of_week} • ⏰ {formatBatchTime(e.start_time)}</Text>
                 <Text style={styles.batchInfo}>👨‍🏫 {e.trainer_name || 'TBA'}</Text>
                 <Text style={styles.batchInfo}>🏫 {e.institution_name}</Text>
               </View>

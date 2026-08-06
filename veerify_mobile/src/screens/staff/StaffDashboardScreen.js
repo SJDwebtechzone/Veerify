@@ -35,22 +35,20 @@ import {
 import apiClient from '../../api/client';
 import { useAuth } from '../../context/AuthContext';
 import { palette, spacing, radius, shadows, type } from '../../theme';
-import { useBellScrollHandler } from '../../components/bellScrollBus';
+import NotificationBellButton from '../../components/NotificationBellButton';
 // Shared resolver — strips embedded localhost / 10.0.2.2 hosts from
 // legacy DB rows so uploads written before the bug fix still render
 // on any client.
 import resolveAssetUrl from '../../utils/assetUrl';
+// Shared 12-hour clock formatter — the spec mandates AM/PM everywhere,
+// so batch timings must never render the raw 24h TIME from Postgres.
+import { formatBatchTime, formatBatchTimeRange } from '../../utils/formatTime';
+// Recurring-schedule maths — computes the next real occurrence of a
+// batch from days_of_week + start/end time so "Upcoming" never shows a
+// slot whose scheduled datetime has already passed.
+import { partitionBatches } from '../../utils/batchOccurrence';
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-
-// Tiny string-distance helper for matching days_of_week to today.
-function classesToday(batches) {
-  const today = DAYS[new Date().getDay()];
-  return batches.filter((b) => {
-    const days = (b.days_of_week || '').toLowerCase();
-    return days.includes(today.toLowerCase().slice(0, 3));
-  });
-}
 
 export default function StaffDashboardScreen({ navigation }) {
   const { user } = useAuth();
@@ -113,7 +111,26 @@ export default function StaffDashboardScreen({ navigation }) {
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
-  const todayClasses = useMemo(() => classesToday(batches), [batches]);
+  // Nudge every minute so a session that just ended / just started
+  // moves between Today's Classes and Upcoming without waiting for a
+  // full refresh. Cheap because the calculation is pure JS over the
+  // already-loaded batches list.
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 60_000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Partition into "in progress right now" (Today's Classes) and
+  // "next session strictly in the future" (Upcoming Batches). The
+  // helper computes the real datetime of each batch's next occurrence
+  // from days_of_week + start_time, so a slot whose end time has
+  // already passed today is automatically kicked forward to next
+  // week — matching the spec.
+  const { ongoing: todayClasses, upcoming: upcomingBatchList } = useMemo(
+    () => partitionBatches(batches, new Date(nowTick)),
+    [batches, nowTick],
+  );
   const totalStudents = useMemo(
     () => batches.reduce((sum, b) => sum + (Number(b.enrolled_count) || 0), 0),
     [batches],
@@ -162,23 +179,20 @@ export default function StaffDashboardScreen({ navigation }) {
     );
   }
 
-  const bellScroll = useBellScrollHandler();
-
   return (
-    <ScrollView
-      style={styles.screen}
-      contentContainerStyle={{ paddingBottom: 100 }}
-      showsVerticalScrollIndicator={false}
-      onScroll={bellScroll}
-      scrollEventThrottle={16}
-      refreshControl={
-        <RefreshControl
-          refreshing={refreshing}
-          onRefresh={() => { setRefreshing(true); load(); }}
-          tintColor={palette.purple.vivid}
-        />
-      }
-    >
+    <View style={{ flex: 1, backgroundColor: palette.bg }}>
+      <ScrollView
+        style={styles.screen}
+        contentContainerStyle={{ paddingBottom: 100 }}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => { setRefreshing(true); load(); }}
+            tintColor={palette.purple.vivid}
+          />
+        }
+      >
       {/* ───── Header ───── */}
       <View style={styles.header}>
         <View style={styles.greetRow}>
@@ -202,8 +216,11 @@ export default function StaffDashboardScreen({ navigation }) {
             <Text style={styles.eyebrow}>Welcome back</Text>
             <Text style={styles.greetName} numberOfLines={1}>{displayName}</Text>
           </TouchableOpacity>
-          {/* Inline bell removed — GlobalNotificationBell renders it
-              globally now so it stays visible across every screen. */}
+          {/* Notification bell sits in the top-right of the Welcome
+              card so the bell reads as part of the greeting rather
+              than a floating overlay. Kept unread badge + tap-to-open
+              behavior identical to the shared button. */}
+          <NotificationBellButton showBackground={false} />
         </View>
         <Text style={styles.headerSub}>
           {todayClasses.length > 0
@@ -296,12 +313,14 @@ export default function StaffDashboardScreen({ navigation }) {
           accent={palette.pink}
           onPress={() => navigation.navigate('StaffPerformanceReports')}
         />
-        <ActionButton
-          icon={Award}
-          label="Promote Belt"
-          accent={palette.purple}
-          onPress={() => navigation.navigate('StaffPromoteStudent')}
-        />
+        {/* Promote Belt was here — moved off the Home dashboard per
+            spec. Belt promotions now happen ONLY from:
+              Home → View Students → student → Curriculum → Promote Belt
+            The StaffPromoteStudent screen + backend endpoint are
+            deliberately left in place so any existing deep link (a
+            stale push notification, a bookmarked route) still works;
+            we just don't offer the shortcut from the dashboard grid
+            anymore. */}
       </View>
 
       {/* ───── Today's Classes ───── */}
@@ -324,7 +343,11 @@ export default function StaffDashboardScreen({ navigation }) {
         </>
       )}
 
-      {/* ───── Upcoming Batches ───── */}
+      {/* ───── Upcoming Batches ─────
+          Only batches whose next scheduled session is strictly in the
+          future (device-local). Anything happening RIGHT NOW is above
+          under Today's Classes. `partitionBatches` handles the roll-
+          forward automatically once a slot's end time passes. */}
       <SectionHeader
         title="Upcoming Batches"
         actionLabel="See all"
@@ -338,9 +361,17 @@ export default function StaffDashboardScreen({ navigation }) {
             Ask your academy admin to add you to a batch.
           </Text>
         </View>
+      ) : upcomingBatchList.length === 0 ? (
+        <View style={styles.emptyCard}>
+          <BookOpen size={28} color={palette.textLight} strokeWidth={1.6} />
+          <Text style={styles.emptyTitle}>No upcoming sessions</Text>
+          <Text style={styles.emptySub}>
+            All your batches for today are done. Check back later.
+          </Text>
+        </View>
       ) : (
         <View style={{ paddingHorizontal: spacing.xl, gap: spacing.sm }}>
-          {batches.slice(0, 5).map((b) => (
+          {upcomingBatchList.slice(0, 5).map((b) => (
             <BatchRow
               key={b.id}
               batch={b}
@@ -368,7 +399,8 @@ export default function StaffDashboardScreen({ navigation }) {
           </View>
         </>
       ) : null}
-    </ScrollView>
+      </ScrollView>
+    </View>
   );
 }
 
@@ -587,7 +619,7 @@ function SectionHeader({ title, subtitle, actionLabel, onAction }) {
 
 function ClassTimingCard({ batch, onPress }) {
   const time = batch.start_time
-    ? `${batch.start_time.slice(0, 5)}${batch.end_time ? ' – ' + batch.end_time.slice(0, 5) : ''}`
+    ? formatBatchTimeRange(batch.start_time, batch.end_time) || 'Time not set'
     : 'Time not set';
   return (
     <TouchableOpacity style={styles.classCard} onPress={onPress} activeOpacity={0.9}>
@@ -623,7 +655,7 @@ function BatchRow({ batch, onPress }) {
             <Text style={styles.batchMetaText}>{batch.days_of_week}</Text>
           ) : null}
           {batch.start_time ? (
-            <Text style={styles.batchMetaText}>· {batch.start_time.slice(0, 5)}</Text>
+            <Text style={styles.batchMetaText}>· {formatBatchTime(batch.start_time)}</Text>
           ) : null}
           <Text style={styles.batchMetaText}>· {batch.enrolled_count || 0} students</Text>
         </View>

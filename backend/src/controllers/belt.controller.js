@@ -204,7 +204,127 @@ exports.getJourney = async (req, res) => {
     proms.rows.forEach((p) => promotionMap.set(p.belt_level_id, p));
     const belts = annotateBelts(beltsRes.rows, promotionMap);
 
-    const current = belts.find((b) => b.status === 'current') || null;
+    // ── Belt history (source of truth for the mobile timeline) ──
+    //
+    // The classic belts[] above is CATALOGUE-based (institution's
+    // belt_levels sequence with each row annotated completed /
+    // current / locked). Useful for the "here's the whole path"
+    // view, but it doesn't reflect the actual promotion trail — and
+    // the new belt-promotion-approval workflow writes to
+    // `belt_promotion_requests` (status='approved') NOT to
+    // student_belt_promotions, so a student promoted via that flow
+    // would never show up in belts[].
+    //
+    // Build a chronological belt_history[] that merges BOTH sources:
+    //   • student_belt_promotions rows (joined to belt_levels for the
+    //     canonical belt name + colour + emoji).
+    //   • belt_promotion_requests rows where status='approved' (joined
+    //     to users for the trainer's display name).
+    //
+    // Sorted ascending (oldest first) per spec: "Order belts from
+    // first to latest." Renderers can reverse the array if they want
+    // newest-first without recomputing.
+    let promoHistory = { rows: [] };
+    try {
+      promoHistory = await pool.query(
+        `SELECT r.id, r.requested_belt AS belt_name,
+                r.resolved_at         AS promoted_at,
+                r.trainer_remarks     AS remarks,
+                COALESCE(t.name, '')  AS trainer_name,
+                COALESCE(a.name, '')  AS approver_name
+           FROM belt_promotion_requests r
+           LEFT JOIN users t ON t.id = r.trainer_id
+           LEFT JOIN users a ON a.id = r.resolved_by
+          WHERE r.student_id = $1
+            AND r.status     = 'approved'
+          ORDER BY r.resolved_at, r.id`,
+        [studentId],
+      );
+    } catch (err) {
+      // Pre-085 schema (table doesn't exist yet) — degrade to just
+      // the student_belt_promotions rows below. Log once so ops
+      // knows to apply the migration.
+      if (err?.code !== '42P01') {
+        console.warn('[belt/journey] promo requests read failed:', err?.message);
+      }
+    }
+
+    const belt_history = [];
+    proms.rows.forEach((p) => {
+      const belt = beltsRes.rows.find((b) => b.id === p.belt_level_id);
+      belt_history.push({
+        id:            `sbp:${p.id}`,
+        source:        'student_belt_promotions',
+        belt_name:     belt?.name || 'Belt',
+        color_hex:     belt?.color_hex || null,
+        emoji:         belt?.emoji || null,
+        promoted_at:   p.promoted_at,
+        promoted_by:   p.instructor_name || null,
+        remarks:       p.remarks || p.performance_notes || null,
+      });
+    });
+    promoHistory.rows.forEach((r) => {
+      belt_history.push({
+        id:            `bpr:${r.id}`,
+        source:        'belt_promotion_request',
+        belt_name:     r.belt_name,
+        // No colour_hex on requests — the belt name is free-text so
+        // the mobile derives a swatch from the label. Emoji stays
+        // null; the mobile falls back to 🥋.
+        color_hex:     null,
+        emoji:         null,
+        promoted_at:   r.promoted_at,
+        // Prefer the trainer who submitted the request (they earned
+        // the credit); fall back to the admin who approved when the
+        // trainer row was cleaned up via ON DELETE SET NULL.
+        promoted_by:   r.trainer_name || r.approver_name || null,
+        remarks:       r.remarks || null,
+      });
+    });
+    // Oldest → newest so the timeline reads chronologically. Same
+    // date collisions tie-broken by the synthetic id keeping insert
+    // order stable.
+    belt_history.sort((a, b) => {
+      const da = a.promoted_at ? new Date(a.promoted_at).getTime() : 0;
+      const db = b.promoted_at ? new Date(b.promoted_at).getTime() : 0;
+      if (da !== db) return da - db;
+      return String(a.id).localeCompare(String(b.id));
+    });
+
+    // Current belt derivation:
+    //   1. Newest belt_history entry wins (it's the last one the
+    //      institution approved OR the last row in the canonical
+    //      promotion audit).
+    //   2. Fall back to student_profiles.belt_category — captured
+    //      from the enrolment form, always populated for a fresh
+    //      student even before any promotion happens.
+    //   3. Finally the catalogue's currently-marked belt (legacy).
+    let currentFromHistory = null;
+    if (belt_history.length > 0) {
+      const last = belt_history[belt_history.length - 1];
+      currentFromHistory = {
+        name:      last.belt_name,
+        color_hex: last.color_hex,
+        emoji:     last.emoji,
+        earned_at: last.promoted_at,
+      };
+    }
+    let currentFromProfile = null;
+    try {
+      const pRes = await pool.query(
+        `SELECT belt_category FROM student_profiles WHERE user_id = $1`,
+        [studentId],
+      );
+      const cat = pRes.rows[0]?.belt_category;
+      if (cat) {
+        currentFromProfile = { name: cat, color_hex: null, emoji: null, earned_at: null };
+      }
+    } catch (_) { /* schema missing */ }
+
+    const current = currentFromHistory
+      || currentFromProfile
+      || belts.find((b) => b.status === 'current')
+      || null;
 
     const certsRes = await pool.query(
       `SELECT c.*, i.name AS institution_name, u.name AS student_name,
@@ -253,9 +373,19 @@ exports.getJourney = async (req, res) => {
       },
       current_belt: current,
       belts,
+      // Chronological promotion history — what the mobile Belt
+      // Journey timeline renders. Fed by BOTH student_belt_promotions
+      // AND belt_promotion_requests (approved), sorted oldest → newest.
+      belt_history,
       certificates: certsRes.rows,
       summary: {
-        belts_earned: belts.filter((b) => b.status === 'completed' || b.status === 'current').length,
+        // belts_earned = actual promotions on record (either source),
+        // not the catalogue slots. When there's no promotion history
+        // at all we count the initial enrolled belt (if the profile
+        // has one) as 1 so the tile isn't zero for a fresh student.
+        belts_earned: belt_history.length > 0
+          ? belt_history.length
+          : (currentFromProfile ? 1 : 0),
         certificates: certsRes.rows.length,
       },
       timeline,
@@ -281,6 +411,17 @@ exports.myJourney = (req, res) => {
 exports.promote = async (req, res) => {
   const client = await pool.connect();
   try {
+    // Trainers can no longer promote directly. Per the Belt Promotion
+    // Approval workflow (migration 085), trainers must submit a
+    // request via POST /api/belt-promotion-requests and the
+    // institution admin approves. Guard the legacy direct endpoint
+    // so an older mobile build (or a curl) can't sidestep the flow.
+    if (req.user?.role === 'trainer') {
+      return res.status(403).json({
+        code:    'BELT_PROMOTION_REQUIRES_APPROVAL',
+        message: 'Trainers cannot promote belts directly. Submit a promotion request; the institution admin approves.',
+      });
+    }
     const {
       student_id, belt_level_id, promoted_at,
       instructor_name, performance_notes, remarks,

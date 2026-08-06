@@ -3208,6 +3208,20 @@ exports.listSubscriptionPayments = async (req, res) => {
 
 exports.getRecentInstitutionPayments = async (_req, res) => {
   try {
+    // MAIN INSTITUTIONS ONLY. Sub-branches (parent_institution_id
+    // IS NOT NULL) inherit the parent's subscription — when the
+    // parent renews, the branch's payment mirror gets stamped with
+    // paid_at + amount too (see branch.controller.js#create + the
+    // renewal self-heal). Without this filter the widget lists every
+    // branch as a duplicate payment, which double-counts revenue
+    // and misleads the super admin.
+    //
+    // The `AND i.parent_institution_id IS NULL` clause guarantees:
+    //   • Institution Name is the payer's name, not a branch name.
+    //   • Amount / plan / paid_at all belong to the actual payer.
+    //   • Dashboard counts and totals derived from this list
+    //     represent unique subscription payments, not per-branch
+    //     mirrors of the same charge.
     const result = await pool.query(
       `SELECT
          i.id                  AS institution_id,
@@ -3230,6 +3244,7 @@ exports.getRecentInstitutionPayments = async (_req, res) => {
        LEFT JOIN users u ON i.owner_user_id = u.id
        WHERE i.paid_at IS NOT NULL
          AND i.deleted_at IS NULL
+         AND i.parent_institution_id IS NULL
        ORDER BY i.paid_at DESC
        LIMIT 25`,
     );

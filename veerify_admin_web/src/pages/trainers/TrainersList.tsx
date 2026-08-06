@@ -5,6 +5,7 @@ import {
   User, ShieldCheck, CalendarClock, Users,
 } from 'lucide-react';
 import apiClient from '../../api/client';
+import { formatTime12h } from '../../lib/utils';
 
 interface AssignedBatch {
   id:             number;
@@ -712,7 +713,7 @@ function TrainerDetailModal({
                           {b.days_of_week}
                           {b.days_of_week && (b.start_time || b.end_time) ? ' · ' : ''}
                           {b.start_time && b.end_time
-                            ? `${b.start_time.slice(0, 5)} – ${b.end_time.slice(0, 5)}`
+                            ? `${formatTime12h(b.start_time)} – ${formatTime12h(b.end_time)}`
                             : ''}
                         </p>
                       ) : null}

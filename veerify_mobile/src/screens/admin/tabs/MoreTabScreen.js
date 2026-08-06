@@ -35,9 +35,23 @@ import resolveAssetUrl from '../../../utils/assetUrl';
 import Avatar from '../../../components/Avatar';
 
 // ─── Menu definition ─────────────────────────────────────────────────────────
+//
+// Trainers stays here — the Home Dashboard also carries it in Quick
+// Actions now (per spec) but the More tab remains its formal home so
+// deep-links (notifications, spotlight search, etc.) still resolve to
+// the same route.
+//
+// Courses and Support were removed from this grid per spec:
+//   • Courses is reached via the Home dashboard's course cards +
+//     the Add Course quick action, so a duplicate entry point wasn't
+//     earning its slot in the top-level menu.
+//   • Support is still reachable from every screen's help sheet
+//     (and remains registered in AppNavigator), we just don't want
+//     it in the primary tab grid.
+// Route resolution + role-based access below are untouched, so any
+// deep-link into the removed screens continues to work.
 const MENU = [
   { key: 'trainers',      label: 'Trainers',         icon: UserCog,        accent: palette.purple },
-  { key: 'courses',       label: 'Courses',          icon: BookOpen,       accent: palette.blue   },
   // "Batches" — full list of every batch the institution admin has
   // created. Reuses the existing BatchesList screen registered in the
   // root navigator.
@@ -53,21 +67,9 @@ const MENU = [
   // picks a trainer, sees their read-only Basic Salary from the
   // trainer profile, enters Deductions, and saves a per-month slip.
   { key: 'salary',        label: 'Salary',           icon: CreditCard,     accent: palette.teal   },
-  // ── Note: About Academy, Academy Rules, Attendance Policy, Belt
-  //    Test Policy, and Certificate Templates were previously here
-  //    in the main grid. They've all moved into their own "Academy"
-  //    section (rendered below the grid + right above the account
-  //    shortcuts card) so admins can find every academy-configuration
-  //    entry point in one place. Platform Information also moved out
-  //    — it's now the "Legal" row in the account shortcuts card.
-  // { key: 'notifications', label: 'Notifications',    icon: Bell,           accent: palette.pink   },
-  // { key: 'announcements', label: 'Announcements',    icon: Megaphone,      accent: palette.teal   },
-  // { key: 'feedback',      label: 'Feedback',         icon: MessageSquare,  accent: palette.rose   },
-  // { key: 'reports',       label: 'Reports',          icon: BarChart3,      accent: palette.purple },
   { key: 'branding',      label: 'Branding',         icon: Palette,        accent: palette.blue   },
   { key: 'pricing',       label: 'Pricing & Plans',  icon: CreditCard,     accent: palette.green  },
   { key: 'settings',      label: 'Settings',         icon: Settings,       accent: palette.orange },
-  { key: 'support',       label: 'Support',          icon: LifeBuoy,       accent: palette.pink   },
 ];
 
 // ── Academy section — every institution-managed policy in one place.
@@ -295,9 +297,9 @@ export default function MoreTabScreen({ navigation }) {
           Sub-branch admins get a trimmed menu — tiles that belong to
           the main institution (Trainers roster, Branches list,
           Branding banners, Pricing & Plans, Salary payroll) are
-          hidden. Their branch only manages day-to-day (Courses,
-          Batches, Events, Attendance, Settings, Support). Main
-          admins still see the full grid.
+          hidden. Their branch only manages day-to-day (Batches,
+          Attendance, Events, Certificates, Settings). Main admins
+          still see the full grid.
           Salary is main-institution-only because payroll is
           administered by the parent academy — branch admins can
           view trainer profiles but not run payroll. */}
@@ -386,13 +388,12 @@ export default function MoreTabScreen({ navigation }) {
           onPress={() => navigation.navigate('ChangePassword')}
         />
         <View style={styles.divider} />
-        <ListRow
-          icon={LifeBuoy}
-          label="Support"
-          accent={palette.blue}
-          onPress={() => navigation.navigate('Support')}
-        />
-        <View style={styles.divider} />
+        {/* Support row removed from the account shortcuts per the
+            "Remove Support from More" spec. The Support screen is
+            still registered in AppNavigator so any deep-link into
+            it (from FAQ answers, error toasts, help chips on other
+            screens) keeps working — we just no longer expose it as
+            a top-level entry on the More tab. */}
         {/* FAQs — dynamic content managed on the super-admin web
             panel. Filtered on the caller's role so this admin sees
             only their bucket. */}

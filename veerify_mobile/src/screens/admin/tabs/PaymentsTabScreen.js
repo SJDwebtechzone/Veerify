@@ -211,9 +211,21 @@ export default function PaymentsTabScreen({ route, navigation }) {
     let cancelled = false;
     (async () => {
       try {
-        const qs = branchIdParam != null
-          ? `?branch_id=${encodeURIComponent(branchIdParam)}`
-          : '';
+        // Earnings is an institution-WIDE financial view. When the
+        // admin didn't drill in via a specific branch tile (no
+        // branchId route param), send ?branch_id=all so the main
+        // admin sees enrolments across the entire academy tree —
+        // main institution AND every sub-branch. Without this the
+        // backend defaults to b.branch_id IS NULL (main-only),
+        // which produces an empty Payment Details list for any
+        // academy whose students are all enrolled through branches.
+        // Sub-branch admins are still auto-scoped to their own
+        // branch server-side; the ?branch_id=all is silently ignored
+        // for them.
+        const branchQuery = branchIdParam != null
+          ? encodeURIComponent(branchIdParam)
+          : 'all';
+        const qs = `?branch_id=${branchQuery}`;
         const res = await apiClient.get(`/enrollments/institution/me${qs}`);
         // Diagnostic log so we can see the actual response shape when
         // the list looks empty. Safe to leave in — it only fires once

@@ -105,10 +105,24 @@ export default function SelectInstitutionScreen({ navigation, route }) {
     };
   }, []);
 
+  // Filter matches both the parent institution's name AND the branch
+  // label so a search for "Anna Nagar" still finds "Tiger Martial Arts
+  // — Anna Nagar Branch". De-dup by row id — the backend already
+  // returns each row (main + each branch) exactly once, but we defend
+  // against upstream duplication defensively.
   const visible = useMemo(() => {
+    const seen = new Set();
+    const deduped = institutions.filter((i) => {
+      const key = String(i.id);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
     const q = search.trim().toLowerCase();
-    if (!q) return institutions;
-    return institutions.filter((i) =>
+    if (!q) return deduped;
+    return deduped.filter((i) =>
+      (i.display_name || i.name || '').toLowerCase().includes(q) ||
+      (i.branch_label || '').toLowerCase().includes(q) ||
       (i.name || '').toLowerCase().includes(q) ||
       (i.city || '').toLowerCase().includes(q) ||
       (i.pincode || '').toLowerCase().includes(q),
@@ -381,10 +395,22 @@ export default function SelectInstitutionScreen({ navigation, route }) {
 }
 
 function InstitutionRow({ item, selected, disabled, onPress }) {
-  const logo = resolveAssetUrl(item.logo_url);
   const distanceLabel = Number.isFinite(item.distance_km)
     ? `${item.distance_km.toFixed(1)} km away`
     : null;
+
+  // Backend supplies both derived fields:
+  //   • display_name  — the parent institution name (or the row's own
+  //                     name if this row IS the main institution)
+  //   • branch_label  — "Main Branch" for a main institution, or the
+  //                     branch's own name (e.g. "Anna Nagar Branch")
+  // The three-line stack is exactly:
+  //   Tiger Martial Arts
+  //   Main Branch / Anna Nagar Branch / Velachery Branch
+  //   Chennai • 600040
+  const institutionName = item.display_name || item.name || '';
+  const branchLabel     = item.branch_label || (item.parent_institution_id ? item.name : 'Main Branch');
+  const isBranch        = !!item.is_branch || !!item.parent_institution_id;
 
   return (
     <TouchableOpacity
@@ -395,13 +421,26 @@ function InstitutionRow({ item, selected, disabled, onPress }) {
     >
       <Avatar
         uri={item.logo_url}
-        name={item.name}
+        name={institutionName}
         size={50}
         tone="purple"
         fit="contain"
       />
       <View style={{ flex: 1 }}>
-        <Text style={styles.name} numberOfLines={1}>{item.name}</Text>
+        <Text style={styles.name} numberOfLines={1}>{institutionName}</Text>
+        <View style={styles.branchPillRow}>
+          <View style={[
+            styles.branchPill,
+            isBranch ? styles.branchPillSub : styles.branchPillMain,
+          ]}>
+            <Text style={[
+              styles.branchPillText,
+              isBranch ? styles.branchPillTextSub : styles.branchPillTextMain,
+            ]} numberOfLines={1}>
+              {branchLabel}
+            </Text>
+          </View>
+        </View>
         <View style={styles.metaRow}>
           <MapPin size={12} color={palette.textMuted} strokeWidth={2.2} />
           <Text style={styles.meta} numberOfLines={1}>
@@ -504,6 +543,20 @@ const styles = StyleSheet.create({
   metaRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4 },
   meta: { ...type.caption, color: palette.textMuted },
   distance: { ...type.micro, color: palette.purple.on, marginTop: 4 },
+  // Branch label pill — sits between the institution name and the
+  // city line so the row reads Name / Branch / Location vertically.
+  branchPillRow: { flexDirection: 'row', marginTop: 4 },
+  branchPill: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 999,
+    maxWidth: '100%',
+  },
+  branchPillMain: { backgroundColor: palette.purple.soft || '#EDE9FE' },
+  branchPillSub:  { backgroundColor: '#DBEAFE' },
+  branchPillText: { fontSize: 11, fontWeight: '700' },
+  branchPillTextMain: { color: palette.purple.on || '#5B21B6' },
+  branchPillTextSub:  { color: '#1E40AF' },
   selectedDot: {
     width: 24, height: 24, borderRadius: 12,
     backgroundColor: palette.purple.vivid,

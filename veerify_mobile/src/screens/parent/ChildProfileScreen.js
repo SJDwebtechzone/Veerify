@@ -31,6 +31,7 @@ import {
 import apiClient from '../../api/client';
 import { useChild } from '../../context/ChildContext';
 import { palette, spacing, radius, shadows, type } from '../../theme';
+import { formatBatchTime } from '../../utils/formatTime';
 
 const BELTS = [
   { key: 'white',  label: 'White',  bg: '#FFFFFF', fg: '#111827', border: '#E5E7EB' },
@@ -335,8 +336,8 @@ function BatchRow({ enroll }) {
             <View style={styles.batchMetaItem}>
               <Clock size={10} color={palette.textMuted} strokeWidth={2.4} />
               <Text style={styles.batchMetaText}>
-                {enroll.start_time.slice(0, 5)}
-                {enroll.end_time ? ` – ${enroll.end_time.slice(0, 5)}` : ''}
+                {formatBatchTime(enroll.start_time)}
+                {enroll.end_time ? ` – ${formatBatchTime(enroll.end_time)}` : ''}
               </Text>
             </View>
           ) : null}

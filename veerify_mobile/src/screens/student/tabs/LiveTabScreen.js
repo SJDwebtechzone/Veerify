@@ -3,15 +3,25 @@
 // Student-facing Sessions tab.
 //
 // Two views, switched by a toggle near the top:
-//   Live sessions   → upcoming + currently-live classes (institution-scoped)
-//   Recorded videos → on-demand recordings posted by trainers (per batch)
+//   Live sessions   → upcoming + currently-live classes
+//   Recorded videos → on-demand recordings posted by the student's trainers
 //
-// Recorded videos come from /api/students/my-videos (already scoped to the
-// student's PAID enrolments). The toggle / tab is hidden for users who
-// don't have a paid enrolment — they get a gentle upsell screen instead.
+// SCOPING (per spec):
+//   • Only content from institutions / branches the student is enrolled
+//     in appears here. There is no academy selector — the student never
+//     sees another academy's sessions.
+//   • Both feeds come from GET /api/students/my-videos, which
+//     server-side JOINs enrollments → batches and filters to
+//     e.student_id = req.user.id AND e.payment_status = 'paid'. The
+//     batch's branch_id is inherited automatically because we join
+//     through the batch the student actually enrolled in.
+//   • Live sessions live in the same course_videos table with
+//     kind='live' and a scheduled_at; recorded ones use kind='recorded'.
+//   • The legacy /institutions/:id/live-classes endpoint is a stub
+//     (returns 0 rows) — dropped from this screen entirely.
 //
-// Live classes still use the existing /institutions/:id/live-classes
-// endpoint; it returns [] until that table is populated.
+// The tab is hidden behind a paid-enrolment gate: students without a
+// paid enrolment see an upsell card instead of the lists.
 
 import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import {
@@ -28,7 +38,6 @@ import {
 
 import apiClient from '../../../api/client';
 import { useAuth } from '../../../context/AuthContext';
-import { useInstitution } from '../../../context/InstitutionContext';
 import { palette, spacing, radius, shadows, type } from '../../../theme';
 import { useBellScrollHandler } from '../../../components/bellScrollBus';
 
@@ -58,7 +67,8 @@ function formatScheduledTime(iso) {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return '';
   return d.toLocaleString('en-IN', {
-    day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+    day: '2-digit', month: 'short',
+    hour: 'numeric', minute: '2-digit', hour12: true,
   });
 }
 
@@ -72,15 +82,17 @@ function isLiveNow(c) {
 
 export default function LiveTabScreen({ navigation }) {
   const { user } = useAuth();
-  const { selectedInstitution, loading: instLoading } = useInstitution();
   const insets = useSafeAreaInsets();
 
   // 'live' = upcoming + currently-live classes view
   // 'recorded' = on-demand recordings posted by the trainer
   const [mode, setMode] = useState('live');
 
-  const [classes, setClasses] = useState([]);     // /institutions/:id/live-classes
-  const [videos,  setVideos]  = useState([]);     // /students/my-videos
+  // Both feeds come from /students/my-videos — a single endpoint
+  // that returns kind='live' (upcoming sessions) and kind='recorded'
+  // (on-demand videos), scoped server-side to the student's enrolled
+  // batches. No separate /institutions/:id/live-classes call.
+  const [videos,  setVideos]  = useState([]);
   const [hasPaidEnrolment, setHasPaidEnrolment] = useState(false);
 
   const [loading, setLoading] = useState(true);
@@ -93,18 +105,8 @@ export default function LiveTabScreen({ navigation }) {
 
   const load = useCallback(async () => {
     try {
-      // 1. Live classes (institution scope)
-      let live = [];
-      if (selectedInstitution?.id) {
-        const liveRes = await apiClient
-          .get(`/institutions/${selectedInstitution.id}/live-classes`)
-          .catch(() => ({ data: { live_classes: [] } }));
-        live = liveRes.data.live_classes || [];
-      }
-      setClasses(live);
-
-      // 2. Determine paid-enrolment access via the same /enrollments/my
-      //    check the HomeTab uses. This is the gate for the whole tab.
+      // 1. Determine paid-enrolment access (same signal HomeTab uses).
+      //    This is the gate for the whole tab.
       let paid = false;
       let myVideos = [];
       if (user) {
@@ -115,6 +117,13 @@ export default function LiveTabScreen({ navigation }) {
         } catch (err) {
           console.log('[Sessions] my enrolments load skipped:', err?.message);
         }
+        // 2. Videos + live sessions — single call, already scoped
+        //    to the student's enrolments server-side (JOIN enrollments
+        //    e ON e.batch_id = b.id WHERE e.student_id = req.user.id
+        //    AND e.payment_status = 'paid'). The branch is inherited
+        //    via the batch, so a sub-branch student only sees their
+        //    sub-branch's content and a main-institution student only
+        //    sees main-institution content.
         if (paid) {
           try {
             const vRes = await apiClient.get('/students/my-videos');
@@ -132,80 +141,51 @@ export default function LiveTabScreen({ navigation }) {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [selectedInstitution?.id, user]);
+  }, [user]);
 
   useFocusEffect(useCallback(() => { setLoading(true); load(); }, [load]));
-  useEffect(() => { setLoading(true); load(); }, [selectedInstitution?.id, load]);
 
-  const liveNow = useMemo(() => classes.find(isLiveNow), [classes]);
-
-  const buckets = useMemo(() => {
-    const upcoming = [];
-    const recordings = [];
-    classes.forEach((c) => {
-      if (isLiveNow(c)) return; // shown in hero
-      const start = c.start_time ? new Date(c.start_time).getTime() : null;
-      const hasRecording = !!(c.recording_url || c.recording);
-      if (start && start > Date.now()) {
-        upcoming.push(c);
-      } else if (hasRecording) {
-        recordings.push(c);
-      } else if (start) {
-        // Past with no recording — drop into Recordings list with disabled CTA
-        recordings.push(c);
-      } else {
-        upcoming.push(c);
-      }
-    });
-    // Sort upcoming chronologically
-    upcoming.sort((a, b) =>
-      (new Date(a.start_time || 0)).getTime() - (new Date(b.start_time || 0)).getTime(),
-    );
-    return { upcoming, recordings };
-  }, [classes]);
+  // Both Live and Recorded feeds come from the same `videos` array;
+  // we split by `kind`. Live sessions have kind='live' + a
+  // scheduled_at. A row where NOW() is between scheduled_at and
+  // scheduled_at + duration is considered "live right now" and gets
+  // promoted to the hero card.
+  const liveVideos = useMemo(
+    () => videos.filter((v) => v.kind === 'live'),
+    [videos],
+  );
+  const liveNow = useMemo(
+    () => liveVideos.find((v) => isLiveNow({
+      start_time: v.scheduled_at,
+      end_time:   v.scheduled_at && v.duration_seconds
+        ? new Date(new Date(v.scheduled_at).getTime() + v.duration_seconds * 1000).toISOString()
+        : null,
+      status:     v.status,
+    })),
+    [liveVideos],
+  );
 
   // Only fires for users who reached the Live list, which already requires
   // hasAccess === true. No more "Subscribe" interstitial — the upsell card
   // takes care of unpaid users now. We just open the URL directly.
   const handleJoinLive = (c) => {
-    if (!c.youtube_url) {
+    const url = c.youtube_url || c.video_url;
+    if (!url) {
       Alert.alert('Join link unavailable',
         'The trainer hasn\'t posted a join link for this session yet.');
       return;
     }
-    Linking.openURL(c.youtube_url).catch(() => {
+    Linking.openURL(url).catch(() => {
       Alert.alert('Could not open link', 'Please copy the link from your email or notifications.');
     });
   };
   const handleWatchRecording = (c) => {
-    if (!c.recording_url) return;
-    Linking.openURL(c.recording_url).catch(() => {});
+    const url = c.recording_url || c.video_url;
+    if (!url) return;
+    Linking.openURL(url).catch(() => {});
   };
 
-  // No academy chosen
-  if (!instLoading && !selectedInstitution) {
-    return (
-      <View style={[styles.screen, styles.center, { padding: spacing.xxl }]}>
-        <View style={styles.emptyIconWrap}>
-          <Building2 size={36} color={palette.purple.vivid} strokeWidth={2.2} />
-        </View>
-        <Text style={styles.emptyTitle}>Pick your academy first</Text>
-        <Text style={styles.emptyBody}>
-          Live classes are organized per academy. Choose one to see today's sessions.
-        </Text>
-        <TouchableOpacity
-          style={styles.ctaButton}
-          onPress={() => navigation.navigate('SelectInstitution')}
-          activeOpacity={0.85}
-        >
-          <Text style={styles.ctaText}>Choose academy</Text>
-          <ChevronRight size={16} color="#fff" strokeWidth={2.6} />
-        </TouchableOpacity>
-      </View>
-    );
-  }
-
-  if (loading && classes.length === 0) {
+  if (loading && videos.length === 0) {
     return (
       <View style={[styles.screen, styles.center]}>
         <ActivityIndicator size="large" color={palette.purple.vivid} />
@@ -213,29 +193,28 @@ export default function LiveTabScreen({ navigation }) {
     );
   }
 
-  // Split the my-videos payload by kind. The trainer Sessions screen now
+  // Split the my-videos payload by kind. The trainer Sessions screen
   // posts BOTH recorded videos (kind='recorded') and live-session join
-  // links (kind='live') into course_videos, so this single endpoint feeds
-  // both modes on the student side.
+  // links (kind='live') into course_videos, so this single endpoint
+  // feeds both modes on the student side.
   const recordedVideos = videos.filter((v) => (v.kind || 'recorded') === 'recorded');
-  const trainerLiveSessions = videos
-    .filter((v) => v.kind === 'live')
-    // Map each into the same shape the existing LiveCard renderer expects.
+  // Live sessions — shape each into the format the existing LiveCard
+  // renderer expects. Excludes the row currently promoted to the
+  // "Live now" hero above, if any.
+  const liveList = liveVideos
+    .filter((v) => !(liveNow && v.id === liveNow.id))
     .map((v) => ({
-      id:           `cv-${v.id}`,
-      title:        v.title,
-      trainer_name: v.uploaded_by_name,
-      start_time:   v.scheduled_at,
-      youtube_url:  v.video_url,
+      id:            `cv-${v.id}`,
+      title:         v.title,
+      trainer_name:  v.uploaded_by_name,
+      start_time:    v.scheduled_at,
+      youtube_url:   v.video_url,
       thumbnail_url: v.thumbnail_url,
-      duration:     v.duration_seconds ? `${Math.round(v.duration_seconds / 60)} min` : null,
-    }));
-
-  // Live tab list: upcoming classes from the institution endpoint plus any
-  // trainer-posted live sessions, sorted chronologically.
-  const liveList = [...buckets.upcoming, ...trainerLiveSessions].sort(
-    (a, b) => new Date(a.start_time || 0).getTime() - new Date(b.start_time || 0).getTime(),
-  );
+      duration:      v.duration_seconds ? `${Math.round(v.duration_seconds / 60)} min` : null,
+    }))
+    .sort((a, b) =>
+      new Date(a.start_time || 0).getTime() - new Date(b.start_time || 0).getTime(),
+    );
 
   // Header padding budget. We pick the LARGEST of:
   //   - 56px floor   (covers the worst case where every inset reads 0)
@@ -252,20 +231,12 @@ export default function LiveTabScreen({ navigation }) {
 
   return (
     <View style={styles.screen}>
-      {/* Header — just academy name + dropdown, matching the simplified
-          Programs + Batches layout. Eyebrow line dropped; bottom padding
-          bumped so the mode toggle below sits clear of the academy name. */}
+      {/* Header — single "Sessions" title. Per spec, no academy
+          selector and no subtitle; the feed is fixed to the
+          student's enrolled batches server-side via
+          /students/my-videos → JOIN enrollments. */}
       <View style={[styles.header, { paddingTop: headerPadTop }]}>
-        <TouchableOpacity
-          onPress={() => navigation.navigate('SelectInstitution')}
-          activeOpacity={0.85}
-          style={styles.instSelector}
-        >
-          <Text style={styles.instText} numberOfLines={1}>
-            {selectedInstitution?.name || 'Pick academy'}
-          </Text>
-          <ChevronDown size={20} color={palette.purple.vivid} strokeWidth={2.4} />
-        </TouchableOpacity>
+        <Text style={styles.instText} numberOfLines={1}>Sessions</Text>
       </View>
 
       {/* Mode toggle — a single pill split between Live / Recorded. Hidden

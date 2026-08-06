@@ -29,7 +29,7 @@ import {
 import {
   ArrowLeft, ChevronRight, ChevronLeft, ChevronDown, Check, Camera, FileText, Plus, Trash2,
   Building2, MapPin, ShieldCheck, BarChart3, UserSquare, Calendar, X, Clock,
-  Images as ImagesIcon,
+  Images as ImagesIcon, Info,
 } from 'lucide-react-native';
 import { launchImageLibrary, launchCamera, } from 'react-native-image-picker';
 
@@ -1564,7 +1564,20 @@ function StepContact({ form, set, addBranch, updateBranch, removeBranch, planInf
         })()}
       </Field>
 
-      <Field label="Branch Addresses" hint="Add any branches beyond your head office. Optional.">
+      <Field label="Branch Addresses">
+        <Text style={[styles.hint, { marginTop: 0, marginBottom: 8 }]}>
+          Add any branches beyond your Head Office (Optional)
+        </Text>
+        {/* Info note — clarifies that branch access is gated on the
+            first login using the credentials we mail to the branch's
+            registered email address. Subtle blue/gray so it reads as
+            informational rather than an error. */}
+        <View style={styles.branchInfoNote}>
+          <Info size={14} color="#1e40af" strokeWidth={2.2} style={{ marginTop: 1 }} />
+          <Text style={styles.branchInfoNoteText}>
+            Note: Branch login credentials will be shared to the registered branch email address. Branches will get full access to the Veerify app only after successful login.
+          </Text>
+        </View>
         {form.branches.length === 0 ? (
           <Text style={styles.emptyHint}>No branches added yet.</Text>
         ) : (
@@ -3198,6 +3211,28 @@ const styles = StyleSheet.create({
 
   label: { fontSize: 12, fontWeight: '700', color: TEXT, marginBottom: 6, letterSpacing: 0.3 },
   hint: { fontSize: 11, color: TEXT_MUTED, marginTop: 4, lineHeight: 16 },
+
+  // Subtle blue/gray info banner. Sits directly below the branch
+  // helper text and tells the admin that the branch will only be
+  // fully activated on first login using the mailed credentials.
+  branchInfoNote: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    backgroundColor: '#eff6ff',
+    borderColor: '#bfdbfe',
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    marginBottom: 10,
+  },
+  branchInfoNoteText: {
+    flex: 1,
+    fontSize: 11.5,
+    lineHeight: 16,
+    color: '#1e3a8a',
+  },
 
   input: {
     backgroundColor: SURFACE,

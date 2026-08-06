@@ -1,10 +1,14 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { View, Text, FlatList, TouchableOpacity, Alert, RefreshControl, ActivityIndicator } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import apiClient from '../../api/client';
 import { useBellScrollHandler } from '../../components/bellScrollBus';
 import { colors, commonStyles } from '../../utils/styles';
 import { confirm } from '../../components/ConfirmDialog';
+// Ongoing / upcoming split — a batch whose end time already passed
+// today rolls forward to next week's session so past slots never
+// appear at the top of the list.
+import { partitionBatches } from '../../utils/batchOccurrence';
 
 // ─── Schedule helpers ────────────────────────────────────────────────
 // Batches carry two schedule signals:
@@ -83,9 +87,29 @@ export default function BatchesListScreen({ navigation, route }) {
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
+  // Nudge every minute so a batch that just started / just ended
+  // moves between the "Ongoing" strip and the "Upcoming" list without
+  // waiting for a manual refresh.
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 60_000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Ongoing = a session is in progress right now. Upcoming = next
+  // occurrence is strictly in the future. Rendered ongoing first so
+  // the admin sees currently-live sessions at the top.
+  const { ongoing, upcoming } = useMemo(
+    () => partitionBatches(batches, new Date(nowTick)),
+    [batches, nowTick],
+  );
+  const orderedBatches = useMemo(
+    () => [...ongoing, ...upcoming],
+    [ongoing, upcoming],
+  );
+
   // One-shot fetch on mount — no dependency on batches list, so it
   // doesn't refire on every list refresh.
-  useCallback(() => {}, []);
   React.useEffect(() => {
     let cancelled = false;
     apiClient
@@ -157,7 +181,8 @@ export default function BatchesListScreen({ navigation, route }) {
       </View>
 
       <FlatList
-        data={batches}
+        data={orderedBatches}
+        extraData={nowTick}
         keyExtractor={(item) => item.id.toString()}
         contentContainerStyle={{ padding: 20 }}
         onScroll={useBellScrollHandler()}
@@ -176,7 +201,21 @@ export default function BatchesListScreen({ navigation, route }) {
               batch: item,
             })}
           >
-            <Text style={commonStyles.cardTitle}>{item.name}</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <Text style={[commonStyles.cardTitle, { flexShrink: 1 }]}>{item.name}</Text>
+              {item._next?.isOngoing ? (
+                <View style={{
+                  backgroundColor: '#dcfce7',
+                  paddingHorizontal: 8,
+                  paddingVertical: 2,
+                  borderRadius: 999,
+                }}>
+                  <Text style={{ color: '#166534', fontSize: 10, fontWeight: '800' }}>
+                    IN PROGRESS
+                  </Text>
+                </View>
+              ) : null}
+            </View>
             <Text style={commonStyles.cardSubtitle}>{item.course_name}</Text>
 
             {/* Per-day schedule — each active weekday on its own row

@@ -123,6 +123,10 @@ app.use('/api/course-completions', require('./src/routes/courseCompletion.routes
 // Certificate template CRUD + merge/preview. The templates are the
 // canvas for the "Send Certificate" flow on the admin's Certificates screen.
 app.use('/api/certificate-templates', require('./src/routes/certificateTemplate.routes'));
+// Belt Promotion Approval workflow — trainer submits a request,
+// institution admin reviews. Full flow in
+// controllers/beltPromotionRequest.controller.js.
+app.use('/api/belt-promotion-requests', require('./src/routes/beltPromotionRequest.routes'));
 app.use('/api/academies', academyRoutes);
 app.use('/api/students', studentRoutes);
 app.use('/api/course-videos', courseVideoRoutes);

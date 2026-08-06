@@ -35,6 +35,7 @@ import resolveAssetUrl from '../../utils/assetUrl';
 import DownloadInvoiceButton from '../../components/DownloadInvoiceButton';
 import { confirm } from '../../components/ConfirmDialog';
 import CourseImage from '../../components/CourseImage';
+import { useAuth } from '../../context/AuthContext';
 
 function fmtDate(iso) {
   if (!iso) return '—';
@@ -51,7 +52,25 @@ const STATUS_META = {
   failed:  { label: 'Failed',   fg: '#991B1B', bg: '#FEE2E2' },
 };
 
+// Belt-colour resolver — first colour word wins so "Blue II" and
+// "Brown III" still get their canonical swatch. Keeps the belt chip
+// consistent with the Belt Journey screen.
+const BELT_COLOR_BY_KEY = {
+  white:  '#FFFFFF', yellow: '#F59E0B', orange: '#F97316', green:  '#22C55E',
+  blue:   '#3B82F6', gray:   '#9CA3AF', grey:   '#9CA3AF', brown:  '#A16207',
+  black:  '#0F172A', red:    '#DC2626', purple: '#8B5CF6',
+};
+function beltSwatch(label) {
+  const first = String(label || '').trim().toLowerCase().split(/\s+/)[0];
+  return BELT_COLOR_BY_KEY[first] || palette.borderSoft;
+}
+
 export default function StudentEnrolledProgramsScreen({ navigation }) {
+  // Logged-in student — used for the /curriculum-progress query
+  // string. The backend rejects the request with 400 when
+  // student_id is missing (see curriculum.controller#getProgress),
+  // which is why the previous version showed 0% on every card.
+  const { user } = useAuth();
   const [rows, setRows]         = useState([]);
   const [loading, setLoading]   = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -60,31 +79,52 @@ export default function StudentEnrolledProgramsScreen({ navigation }) {
 
   const load = useCallback(async () => {
     try {
+      // /belts/my-journey is the STUDENT convenience alias for
+      // /belts/journey/:studentId. The old code hit /belts/journey
+      // (no id) which 404s → beltName stayed null and the card fell
+      // back to batch_name, which read like the wrong belt. Backend
+      // journey already picks the latest approved belt via
+      // belt_history so this always reflects the current rank
+      // (updates the moment the institution approves a promotion).
       const [enrolls, journey] = await Promise.all([
         apiClient.get('/enrollments/my').catch(() => ({ data: { enrollments: [] } })),
-        apiClient.get('/belts/journey').catch(() => ({ data: null })),
+        apiClient.get('/belts/my-journey').catch(() => ({ data: null })),
       ]);
       const list = enrolls.data?.enrollments || [];
       setRows(list);
       setBeltName(journey.data?.current_belt?.name || null);
 
       // Best-effort curriculum progress per unique course. Only fetch
-      // for PAID rows — pending / failed enrolments don't grant access
-      // to lessons, so their progress is by definition 0/0 and asking
-      // the backend would just spam useless requests.
+      // for PAID rows — pending / failed enrolments don't grant
+      // access to lessons, so their progress is by definition 0/0
+      // and asking the backend would just spam useless requests.
+      //
+      // student_id IS required by the backend — omitting it 400s and
+      // the card fell back to done=0/total=0, which is why every
+      // program used to render "0%" even after the student had
+      // completed lessons. We now pull the logged-in student id from
+      // auth context and pass it explicitly.
+      const studentId = user?.id;
       const uniqueCourses = Array.from(new Set(
         list
           .filter((e) => e.payment_status === 'paid')
           .map((e) => e.course_id)
           .filter(Boolean),
       ));
-      const progResults = await Promise.all(
-        uniqueCourses.map((cid) =>
-          apiClient.get(`/curriculum-progress?course_id=${cid}`)
-            .then((r) => ({ cid, done: r.data?.progress?.length || 0, total: r.data?.lessons?.length || 0 }))
-            .catch(() => ({ cid, done: 0, total: 0 })),
-        ),
-      );
+      const progResults = studentId
+        ? await Promise.all(
+            uniqueCourses.map((cid) =>
+              apiClient
+                .get(`/curriculum-progress?course_id=${cid}&student_id=${studentId}`)
+                .then((r) => ({
+                  cid,
+                  done:  r.data?.progress?.length || 0,
+                  total: r.data?.lessons?.length  || 0,
+                }))
+                .catch(() => ({ cid, done: 0, total: 0 })),
+            ),
+          )
+        : [];
       const byCid = {};
       progResults.forEach((p) => { byCid[p.cid] = p; });
       setProgressById(byCid);
@@ -92,7 +132,7 @@ export default function StudentEnrolledProgramsScreen({ navigation }) {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [user?.id]);
 
   // Split rows into paid (grants access to course content) vs pending
   // / failed / cancelled (only exposes Pay Now). Cancelled and any
@@ -350,6 +390,35 @@ function ProgramCard({ row, beltName, progress, onPress }) {
         </View>
       </View>
 
+      {/* ── Belt badge row ─────────────────────────────────────
+          Prominent coloured chip for the student's CURRENT belt
+          (fetched from /belts/my-journey → current_belt, which the
+          backend keeps in sync with the latest approved promotion).
+          Renders even without a promotion — the student's initial
+          enrolment belt shows here until the first approval. */}
+      {beltName ? (
+        <View style={styles.beltBadgeRow}>
+          <View style={styles.beltBadge}>
+            <View
+              style={[
+                styles.beltBadgeDot,
+                {
+                  backgroundColor: beltSwatch(beltName),
+                  borderColor: beltSwatch(beltName).toLowerCase() === '#ffffff'
+                    ? '#D1D5DB' : beltSwatch(beltName),
+                },
+              ]}
+            />
+            <Text style={styles.beltBadgeText} numberOfLines={1}>{beltName}</Text>
+          </View>
+          <Text style={styles.beltBadgeCaption}>Current belt</Text>
+        </View>
+      ) : null}
+
+      {/* Meta grid — Trainer / Batch on row 1, Enrolled date on
+          row 2 (full-width). Removed the "Lessons" tile per spec;
+          per-lesson counts now live only in the caption under the
+          progress bar so there's no duplicate. */}
       <View style={styles.detailGrid}>
         <Detail
           icon={User}
@@ -357,30 +426,32 @@ function ProgramCard({ row, beltName, progress, onPress }) {
           value={row.trainer_name || 'To be assigned'}
         />
         <Detail
-          icon={Award}
-          label="Belt / Level"
-          value={beltName || row.batch_name || '—'}
-        />
-      </View>
-      <View style={[styles.detailGrid, { marginTop: 4 }]}>
-        <Detail
-          icon={Calendar}
-          label="Enrolled"
-          value={fmtDate(row.enrolled_at)}
-        />
-        <Detail
           icon={BookOpen}
           label="Batch"
           value={row.batch_name || '—'}
         />
       </View>
+      <View style={{ marginTop: 4 }}>
+        <Detail
+          icon={Calendar}
+          label="Enrolled"
+          value={fmtDate(row.enrolled_at)}
+        />
+      </View>
 
-      {/* Progress bar */}
+      {/* ── Progress bar ────────────────────────────────────────
+          Curriculum completion — real numbers from
+          /curriculum-progress. Refreshes on every screen focus so a
+          just-ticked lesson (in EnrolledCourse) reflects immediately
+          when the student swipes back here. */}
       <View style={styles.progressBlock}>
         <View style={styles.progressHead}>
           <Text style={styles.progressLabel}>Curriculum progress</Text>
-          <Text style={styles.progressValue}>
-            {total > 0 ? `${done}/${total} · ${pct}%` : '—'}
+          <Text style={[
+            styles.progressValue,
+            pct >= 100 && { color: palette.green.vivid },
+          ]}>
+            {total > 0 ? `${pct}%` : '—'}
           </Text>
         </View>
         <View style={styles.progressTrack}>
@@ -391,6 +462,11 @@ function ProgramCard({ row, beltName, progress, onPress }) {
             ]}
           />
         </View>
+        {total > 0 ? (
+          <Text style={styles.progressSubtle}>
+            {done} of {total} lesson{total === 1 ? '' : 's'} completed
+          </Text>
+        ) : null}
       </View>
 
       {/* Download Invoice — only shows on paid enrolments. Backend
@@ -587,24 +663,55 @@ const styles = StyleSheet.create({
 
   invoiceRow: { marginTop: spacing.md },
 
+  // ── Belt badge (current-belt chip on the card) ──────────────
+  beltBadgeRow: {
+    flexDirection: 'row', alignItems: 'center',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+    marginBottom: 4,
+  },
+  beltBadge: {
+    flexDirection: 'row', alignItems: 'center',
+    gap: 8,
+    paddingLeft: 8, paddingRight: 12, paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: palette.surface,
+    borderWidth: 1, borderColor: palette.borderSoft,
+  },
+  beltBadgeDot: {
+    width: 16, height: 16, borderRadius: 8,
+    borderWidth: 1.5,
+  },
+  beltBadgeText: {
+    ...type.body, color: palette.text, fontWeight: '800', fontSize: 13,
+  },
+  beltBadgeCaption: {
+    ...type.micro, color: palette.textLight,
+    letterSpacing: 0.4, textTransform: 'uppercase', fontWeight: '700',
+  },
+
   progressBlock: { marginTop: spacing.md },
   progressHead: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    marginBottom: 4,
+    marginBottom: 6,
   },
   progressLabel: {
     ...type.micro, color: palette.textMuted, fontWeight: '800',
     letterSpacing: 0.4, textTransform: 'uppercase',
   },
   progressValue: {
-    ...type.micro, color: palette.text, fontWeight: '800',
+    ...type.body, color: palette.text, fontWeight: '900', fontSize: 15,
   },
   progressTrack: {
-    height: 6, borderRadius: 3,
+    height: 8, borderRadius: 4,
     backgroundColor: palette.borderSoft,
     overflow: 'hidden',
   },
-  progressFill: { height: '100%', borderRadius: 3 },
+  progressFill: { height: '100%', borderRadius: 4 },
+  progressSubtle: {
+    ...type.micro, color: palette.textMuted, marginTop: 6,
+    fontWeight: '600',
+  },
 
   footer: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end',

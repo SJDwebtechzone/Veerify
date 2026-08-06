@@ -11,7 +11,7 @@ import { name as appName } from './app.json';
 // notification tray. The require() is wrapped in a try/catch because
 // the @react-native-firebase native module isn't part of the JS
 // bundle until the Android/iOS binary is rebuilt after `npm install`
-// — without this guard the entire app red-boxes with
+// — without this guard the entirae app red-boxes with
 // "Native module RNFBAppModule not found" on Metro reload even
 // though the JS package is present. When the native side is missing
 // we log once and skip; the in-app notification bell keeps working

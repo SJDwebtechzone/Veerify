@@ -32,6 +32,7 @@ import apiClient from '../../api/client';
 import { useAuth } from '../../context/AuthContext';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 import { confirm } from '../../components/ConfirmDialog';
+import { formatBatchTime } from '../../utils/formatTime';
 
 export default function StaffProfileScreen({ navigation }) {
   const { user, logout } = useAuth();
@@ -201,7 +202,7 @@ export default function StaffProfileScreen({ navigation }) {
                     <Text style={styles.batchName} numberOfLines={1}>{b.name}</Text>
                     <View style={styles.batchMeta}>
                       {b.days_of_week ? <Text style={styles.batchMetaText}>{b.days_of_week}</Text> : null}
-                      {b.start_time ? <Text style={styles.batchMetaText}>· {b.start_time.slice(0, 5)}</Text> : null}
+                      {b.start_time ? <Text style={styles.batchMetaText}>· {formatBatchTime(b.start_time)}</Text> : null}
                       <Text style={styles.batchMetaText}>· {b.enrolled_count || 0} students</Text>
                     </View>
                   </View>

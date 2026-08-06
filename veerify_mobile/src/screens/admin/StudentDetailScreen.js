@@ -93,7 +93,7 @@ export default function StudentDetailScreen({ navigation, route }) {
       // even before the next enrollments refresh.
       setPayments((prev) => prev.map((p) => (
         p.id === enrollmentId
-          ? { ...p, last_resent: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) }
+          ? { ...p, last_resent: new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }) }
           : p
       )));
     } catch (err) {
@@ -129,6 +129,11 @@ export default function StudentDetailScreen({ navigation, route }) {
           // exposed on pending rows where the admin toggled the
           // link path (payment_link_enabled=true).
           payment_link_enabled: !!e.payment_link_enabled,
+          // Next Payment Date — surfaced in the payment card so the
+          // admin can see when the student's next installment is
+          // due. Read-only when the enrolment is link-driven per
+          // spec ("payment scheduling is handled by payment links").
+          next_payment_date: e.next_payment_date || null,
           date:   e.paid_at
             ? new Date(e.paid_at).toLocaleDateString('en-IN', {
                 day: '2-digit', month: 'short', year: 'numeric',

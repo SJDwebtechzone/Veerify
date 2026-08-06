@@ -30,6 +30,7 @@ import {
 import apiClient from '../../api/client';
 import { useChild } from '../../context/ChildContext';
 import { palette, spacing, radius, shadows, type } from '../../theme';
+import { formatBatchTimeRange } from '../../utils/formatTime';
 
 // Same belt table the staff screens use, so a student looks identical to a
 // trainer and to their own parent.
@@ -190,7 +191,7 @@ function ChildCard({ child, enrich, isActive, onPress, onView }) {
   const pending = child.status === 'pending';
 
   const timing = enrich?.start_time
-    ? `${enrich.start_time.slice(0, 5)}${enrich.end_time ? ' – ' + enrich.end_time.slice(0, 5) : ''}`
+    ? formatBatchTimeRange(enrich.start_time, enrich.end_time) || null
     : null;
 
   return (

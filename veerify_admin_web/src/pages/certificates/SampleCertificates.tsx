@@ -90,7 +90,7 @@ const PLACEHOLDER_META: { key: string; label: string; sample: string; isImage?: 
 
 const BELT_OPTIONS = [
   'New student', 'White', 'Yellow', 'Orange', 'Green',
-  'Blue I', 'Blue II', 'Gray', 'Brown I', 'Brown II', 'Brown III', 'Black',
+  'Blue', 'Blue I', 'Blue II', 'Gray', 'Brown I', 'Brown II', 'Brown III', 'Black',
 ];
 
 function newPin(key: string): PlaceholderPin {

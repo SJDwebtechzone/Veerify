@@ -38,6 +38,7 @@ import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 import { billingCycleLabel } from '../../utils/billingCycle';
 import CourseImage from '../../components/CourseImage';
+import { formatBatchTime } from '../../utils/formatTime';
 
 // ─── Asset host helper ─────────────────────────────────────────────────
 const ASSET_HOST = (apiClient.defaults.baseURL || '').replace(/\/api\/?$/, '');
@@ -467,8 +468,8 @@ export default function AdminCourseDetailScreen({ route, navigation }) {
                       {b.start_time ? (
                         <Text style={styles.batchMetaText}>
                           {b.days_of_week ? ' · ' : ''}
-                          {b.start_time.slice(0, 5)}
-                          {b.end_time ? ` – ${b.end_time.slice(0, 5)}` : ''}
+                          {formatBatchTime(b.start_time)}
+                          {b.end_time ? ` – ${formatBatchTime(b.end_time)}` : ''}
                         </Text>
                       ) : null}
                     </View>

@@ -119,34 +119,7 @@ async function registerTokenWithBackend(token, meta = {}) {
 // Called from AuthContext right after login. Requests permission,
 // pulls the FCM token, ships it to the backend, and subscribes to
 // onTokenRefresh so Firebase-driven rotations land automatically.
-export async function requestPermissionAndRegister() {
-  const m = getMessaging();
-  if (!m) return { ok: false, skipped: 'firebase-native-module-missing' };
-  try {
-    const granted = await ensurePermission();
-    if (!granted) return { ok: false, skipped: 'permission-denied' };
-
-    // getToken auto-generates one on first call and caches it.
-    const token = await m().getToken();
-    await registerTokenWithBackend(token);
-
-    // Detach any previous refresh subscription so we don't stack
-    // duplicate listeners across login/logout cycles.
-    if (typeof unsubscribeTokenRefresh === 'function') {
-      try { unsubscribeTokenRefresh(); } catch {}
-      unsubscribeTokenRefresh = null;
-    }
-    unsubscribeTokenRefresh = m().onTokenRefresh(async (freshToken) => {
-      console.log('[fcm] onTokenRefresh — re-registering');
-      await registerTokenWithBackend(freshToken);
-    });
-
-    return { ok: true, token };
-  } catch (err) {
-    console.warn('[fcm] requestPermissionAndRegister threw:', err?.message);
-    return { ok: false, error: err?.message };
-  }
-}
+export async function requestPermissionAndRegister() {a}
 
 // Reset the token registration + logout ex-user's push subscription
 // so the next login owner starts fresh.

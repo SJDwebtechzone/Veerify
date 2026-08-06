@@ -520,10 +520,25 @@ const STUDENT_BROWSABLE = `
 `;
 
 // GET /api/institutions/nearby?lat=<num>&lng=<num>&limit=<int>&max_km=<int>
-// Returns institutions sorted by haversine distance from the given lat/lng.
-// Defaults: limit=10, max_km=50. If lat/lng are omitted, falls back to the
-// "all browsable institutions" list (so the mobile picker still has something
-// to show when GPS is denied).
+// Returns institutions AND branches sorted by haversine distance from the
+// given lat/lng. Defaults: limit=10, max_km=50. If lat/lng are omitted,
+// falls back to the "all browsable" list (so the mobile picker still has
+// something to show when GPS is denied).
+//
+// A branch is treated as a full row in the `institutions` table with
+// `parent_institution_id` set. It appears in the results when its parent
+// institution is browsable (regardless of the branch's own onboarding
+// state, since branches are always created with a non-'active' status).
+// Each row exposes:
+//   • is_branch — true for sub-branches, false for main institutions
+//   • parent_institution_id / parent_institution_name — always present
+//     for a branch; NULL for a main institution
+//   • display_name — the parent's institution name (or the row's own
+//     name if it IS the main institution)
+//   • branch_label — "Main Branch" for a main, or the branch's own
+//     name (e.g. "Anna Nagar Branch") for a sub-branch
+// This lets the mobile UI render "Institution | Branch | City" without
+// needing a second round-trip.
 exports.getNearbyInstitutions = async (req, res) => {
   try {
     const lat   = req.query.lat   !== undefined ? Number(req.query.lat)   : null;
@@ -533,23 +548,68 @@ exports.getNearbyInstitutions = async (req, res) => {
 
     const hasGeo = Number.isFinite(lat) && Number.isFinite(lng);
 
+    // Shared browsability clause: main institutions must pass
+    // STUDENT_BROWSABLE directly; branches must have a parent that
+    // passes it. A branch inherits its parent's activation state — a
+    // paused parent hides its branches too.
+    //
+    // NOTE: keep every reference qualified by `i.` here (this string
+    // is dropped into the outer query below).
+    const rowIsBrowsable = `
+      (
+        i.parent_institution_id IS NULL
+        AND ${STUDENT_BROWSABLE}
+      )
+      OR (
+        i.parent_institution_id IS NOT NULL
+        AND COALESCE(i.is_active, TRUE) = TRUE
+        AND i.deleted_at IS NULL
+        AND EXISTS (
+          SELECT 1 FROM institutions p
+           WHERE p.id = i.parent_institution_id
+             AND p.onboarding_status = 'active'
+             AND COALESCE(p.is_active, TRUE) = TRUE
+             AND COALESCE(p.accepts_students, TRUE) = TRUE
+             AND p.deleted_at IS NULL
+        )
+      )
+    `;
+
+    // Derived display fields. Computed in SQL so the mobile UI just
+    // reads them verbatim and no client-side branch/main branching
+    // logic is needed.
+    const derivedFields = `
+      (i.parent_institution_id IS NOT NULL)              AS is_branch,
+      i.parent_institution_id,
+      p.name                                             AS parent_institution_name,
+      COALESCE(p.name, i.name)                           AS display_name,
+      CASE WHEN i.parent_institution_id IS NOT NULL
+           THEN i.name
+           ELSE 'Main Branch'
+      END                                                AS branch_label
+    `;
+
     if (!hasGeo) {
       // Fallback: same shape as the geo query but without distance.
       const result = await pool.query(
         `SELECT i.id, i.name, i.city, i.pincode, i.address, i.logo_url,
                 i.latitude, i.longitude, i.institution_type, i.phone,
-                NULL::float AS distance_km
+                NULL::float AS distance_km,
+                ${derivedFields}
            FROM institutions i
-          WHERE ${STUDENT_BROWSABLE}
-          ORDER BY i.created_at DESC
+           LEFT JOIN institutions p ON p.id = i.parent_institution_id
+          WHERE ${rowIsBrowsable}
+          ORDER BY (i.parent_institution_id IS NOT NULL), i.created_at DESC
           LIMIT $1`,
         [limit],
       );
-      return res.json({ used_geo: false, count: result.rows.length, institutions: result.rows });
+      return res.json({
+        used_geo: false, count: result.rows.length, institutions: result.rows,
+      });
     }
 
-    // Haversine distance in km. earthdistance/cube extensions would be faster
-    // at huge scale but raw SQL is fine for thousands of rows.
+    // Haversine distance in km. earthdistance/cube extensions would be
+    // faster at huge scale but raw SQL is fine for thousands of rows.
     const result = await pool.query(
       `SELECT
          i.id, i.name, i.city, i.pincode, i.address, i.logo_url,
@@ -560,9 +620,11 @@ exports.getNearbyInstitutions = async (req, res) => {
              * cos(radians(i.longitude) - radians($2))
              + sin(radians($1)) * sin(radians(i.latitude))
            )
-         ) AS distance_km
+         ) AS distance_km,
+         ${derivedFields}
        FROM institutions i
-       WHERE ${STUDENT_BROWSABLE}
+       LEFT JOIN institutions p ON p.id = i.parent_institution_id
+       WHERE (${rowIsBrowsable})
          AND i.latitude  IS NOT NULL
          AND i.longitude IS NOT NULL
        HAVING (
@@ -580,6 +642,52 @@ exports.getNearbyInstitutions = async (req, res) => {
     res.json({ used_geo: true, count: result.rows.length, institutions: result.rows });
   } catch (err) {
     console.error('getNearbyInstitutions error:', err);
+    // If the DB doesn't have parent_institution_id yet (pre-035),
+    // gracefully retry with the legacy main-only query so the mobile
+    // client still gets a list on old schemas.
+    if (err && err.code === '42703') {
+      try {
+        const lat   = Number(req.query.lat);
+        const lng   = Number(req.query.lng);
+        const limit = Math.min(parseInt(req.query.limit, 10) || 10, 50);
+        const maxKm = Math.min(parseInt(req.query.max_km, 10) || 50, 500);
+        const hasGeo = Number.isFinite(lat) && Number.isFinite(lng);
+        const legacy = await pool.query(
+          hasGeo
+            ? `SELECT i.id, i.name, i.city, i.pincode, i.address, i.logo_url,
+                      i.latitude, i.longitude, i.institution_type, i.phone,
+                      (6371 * acos(cos(radians($1)) * cos(radians(i.latitude))
+                                   * cos(radians(i.longitude) - radians($2))
+                                   + sin(radians($1)) * sin(radians(i.latitude))))
+                        AS distance_km,
+                      FALSE AS is_branch, NULL::int AS parent_institution_id,
+                      NULL::text AS parent_institution_name,
+                      i.name AS display_name, 'Main Branch' AS branch_label
+                 FROM institutions i
+                WHERE ${STUDENT_BROWSABLE}
+                  AND i.latitude IS NOT NULL AND i.longitude IS NOT NULL
+                HAVING (6371 * acos(cos(radians($1)) * cos(radians(i.latitude))
+                                     * cos(radians(i.longitude) - radians($2))
+                                     + sin(radians($1)) * sin(radians(i.latitude)))) <= $3
+                ORDER BY distance_km ASC
+                LIMIT $4`
+            : `SELECT i.id, i.name, i.city, i.pincode, i.address, i.logo_url,
+                      i.latitude, i.longitude, i.institution_type, i.phone,
+                      NULL::float AS distance_km,
+                      FALSE AS is_branch, NULL::int AS parent_institution_id,
+                      NULL::text AS parent_institution_name,
+                      i.name AS display_name, 'Main Branch' AS branch_label
+                 FROM institutions i
+                WHERE ${STUDENT_BROWSABLE}
+                ORDER BY i.created_at DESC
+                LIMIT $1`,
+          hasGeo ? [lat, lng, maxKm, limit] : [limit],
+        );
+        return res.json({
+          used_geo: hasGeo, count: legacy.rows.length, institutions: legacy.rows,
+        });
+      } catch (_) { /* fall through to 500 below */ }
+    }
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };

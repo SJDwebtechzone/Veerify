@@ -61,6 +61,7 @@ const BELT_OPTIONS = [
   'Yellow',
   'Orange',
   'Green',
+  'Blue',
   'Blue I',
   'Blue II',
   'Gray',
@@ -85,7 +86,12 @@ function ageFromDob(iso) {
 
 export default function EnrollmentFormScreen({ route, navigation }) {
   const { batch, course, adminMode, batchId: paramBatchId } = route?.params || {};
-  const { user } = useAuth();
+  const { user, institution } = useAuth();
+  // Sub-branch admins are locked to their own branch server-side —
+  // batches auto-filter to their branch_id, enrolInBatch refuses
+  // cross-branch batches. We only render the Branch dropdown for
+  // MAIN admins so they can pick which branch the student joins.
+  const isBranchAdmin = !!institution?.parent_institution_id;
   const { selectedInstitution } = useInstitution();
 
   // ── Guest gate ──────────────────────────────────────────────────
@@ -122,6 +128,18 @@ export default function EnrollmentFormScreen({ route, navigation }) {
   const [adminBatches, setAdminBatches] = useState([]);
   const [coursePickerOpen, setCoursePickerOpen] = useState(false);
   const [batchPickerOpen, setBatchPickerOpen] = useState(false);
+
+  // Branch selector — main-institution admin only. String value so
+  // 'main' passes cleanly to the backend (batches.branch_id IS NULL).
+  // Selecting a branch narrows the batch picker to that branch's
+  // batches; changing the branch resets course/batch so a stale
+  // selection can't survive across branch flips.
+  const [subBranches, setSubBranches] = useState([]);
+  const [selectedBranchId, setSelectedBranchId] = useState('main');
+  const [branchPickerOpen, setBranchPickerOpen] = useState(false);
+  const branchLabel = selectedBranchId === 'main'
+    ? 'Main Institution'
+    : (subBranches.find((b) => String(b.id) === String(selectedBranchId))?.name || 'Branch');
 
   // Derive the course list from the batches the admin has access to. We
   // don't fire a separate /courses request — every batch row already
@@ -195,21 +213,56 @@ export default function EnrollmentFormScreen({ route, navigation }) {
   // than minting a ₹0 link.
   const paymentAmount = feeConfigured ? Number(coursePrice) : 0;
 
+  // Fetch sub-branches once for the branch dropdown. Skipped when
+  // the caller is a branch admin — they have no choice to make.
+  useEffect(() => {
+    if (!adminMode || isBranchAdmin) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiClient.get('/branches');
+        const list = (res?.data?.branches || [])
+          .filter((b) => b.branch_kind === 'sub_branch' || b.parent_institution_id);
+        if (!cancelled) setSubBranches(list);
+      } catch (err) {
+        // Non-fatal — dropdown just shows Main Institution.
+        if (!cancelled) setSubBranches([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [adminMode, isBranchAdmin]);
+
   // When opened from admin "Add Student", fetch the institution's batches
-  // so we can populate the inline picker.
+  // so we can populate the inline picker. Scoped to the selected branch
+  // for main admins (backend accepts ?branch_id=main / <id> / all); a
+  // branch admin's list is auto-scoped server-side to their own branch
+  // regardless of query, so we omit the param there.
   useEffect(() => {
     if (!adminMode) return;
     let cancelled = false;
     (async () => {
       try {
-        const res = await apiClient.get('/batches');
+        const url = isBranchAdmin
+          ? '/batches'
+          : `/batches?branch_id=${encodeURIComponent(selectedBranchId)}`;
+        const res = await apiClient.get(url);
         if (!cancelled) setAdminBatches(res?.data?.batches || []);
       } catch (err) {
         console.warn('[EnrollmentForm] failed to load batches for admin picker:', err?.message);
       }
     })();
     return () => { cancelled = true; };
-  }, [adminMode]);
+  }, [adminMode, isBranchAdmin, selectedBranchId]);
+
+  // Changing the branch invalidates any prior course/batch pick.
+  // Without this, the admin could switch branches and still submit an
+  // enrolment against a batch under the previous branch.
+  useEffect(() => {
+    if (!adminMode || isBranchAdmin) return;
+    setPickedCourseId(null);
+    setPickedBatch(null);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedBranchId]);
 
   const [form, setForm] = useState({
     full_name: '',
@@ -246,6 +299,10 @@ export default function EnrollmentFormScreen({ route, navigation }) {
     // Payment until the webhook fires. When FALSE we fall through to
     // the offline payment_mode branch as before.
     enable_payment_link: false,
+    // Admin-mode only: the OFFLINE-path next-installment date. Empty
+    // string when unset. Deliberately disabled + ignored server-side
+    // when enable_payment_link=true (Razorpay drives that schedule).
+    next_payment_date: '',
   });
   const [submitting, setSubmitting] = useState(false);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
@@ -559,6 +616,14 @@ export default function EnrollmentFormScreen({ route, navigation }) {
           adminMode && !form.enable_payment_link
             ? (form.payment_mode || 'cash')
             : undefined,
+        // Only send next_payment_date on the OFFLINE path. The
+        // backend also enforces this (ignores the field when
+        // payment_link_enabled=true) but omitting it client-side
+        // keeps the request payload honest to the UI.
+        next_payment_date:
+          adminMode && !form.enable_payment_link
+            ? (form.next_payment_date || null)
+            : undefined,
         full_name:      form.full_name.trim(),
         date_of_birth:  form.date_of_birth || null,
         father_name:    form.father_name.trim() || null,
@@ -733,6 +798,80 @@ export default function EnrollmentFormScreen({ route, navigation }) {
             still get a pre-bound batch from CourseDetail's "Enroll Now". */}
         {adminMode ? (
           <>
+            {/* ── 0. Select Branch ──────────────────────────────────
+                Main-institution admin only. Branch admins have their
+                branch inferred from the JWT and can only see their
+                own branch's batches — no dropdown for them, no
+                cross-branch enrolment possible. When the branch
+                changes the batch picker refetches (see the effect on
+                selectedBranchId) so the admin can't submit an
+                enrolment against a batch that no longer belongs to
+                the picked branch. */}
+            {!isBranchAdmin && subBranches.length > 0 ? (
+              <View style={styles.adminBatchCard}>
+                <Text style={styles.adminBatchLabel}>Branch</Text>
+                <TouchableOpacity
+                  style={styles.adminBatchTrigger}
+                  onPress={() => {
+                    setBranchPickerOpen((o) => !o);
+                    setCoursePickerOpen(false);
+                    setBatchPickerOpen(false);
+                  }}
+                  activeOpacity={0.85}
+                >
+                  <Text style={styles.adminBatchTriggerText} numberOfLines={1}>
+                    {branchLabel}
+                  </Text>
+                  <ChevronRight
+                    size={14}
+                    color={TEXT_MUTED}
+                    strokeWidth={2.2}
+                    style={{ transform: [{ rotate: branchPickerOpen ? '90deg' : '0deg' }] }}
+                  />
+                </TouchableOpacity>
+
+                {branchPickerOpen ? (
+                  <View style={styles.adminBatchMenu}>
+                    {/* Main Institution is always the first + default
+                        option per spec. Selecting it sets branch_id
+                        to null server-side. */}
+                    <TouchableOpacity
+                      style={[
+                        styles.adminBatchItem,
+                        selectedBranchId === 'main' && styles.adminBatchItemSelected,
+                      ]}
+                      onPress={() => {
+                        setSelectedBranchId('main');
+                        setBranchPickerOpen(false);
+                      }}
+                      activeOpacity={0.85}
+                    >
+                      <Text style={styles.adminBatchItemTitle}>Main Institution</Text>
+                    </TouchableOpacity>
+                    {subBranches.map((b) => {
+                      const isSel = String(selectedBranchId) === String(b.id);
+                      return (
+                        <TouchableOpacity
+                          key={b.id}
+                          style={[styles.adminBatchItem, isSel && styles.adminBatchItemSelected]}
+                          onPress={() => {
+                            setSelectedBranchId(b.id);
+                            setBranchPickerOpen(false);
+                          }}
+                          activeOpacity={0.85}
+                        >
+                          <Text style={styles.adminBatchItemTitle}>{b.name}</Text>
+                          {b.city ? (
+                            <Text style={styles.adminBatchItemMeta} numberOfLines={1}>{b.city}</Text>
+                          ) : null}
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                ) : null}
+              </View>
+            ) : null}
+
             {/* ── 1. Select Course ─────────────────────────────────── */}
             <View style={styles.adminBatchCard}>
               <Text style={styles.adminBatchLabel}>Select Course</Text>
@@ -1191,49 +1330,82 @@ export default function EnrollmentFormScreen({ route, navigation }) {
                 so we visually enforce the spec's "Payment Link field"
                 requirement even before Save. */}
             {form.enable_payment_link ? (
-              <Field
-                label="Payment Link"
-                hint="Automatically generated after Save and emailed to the student. Refresh their record to copy the URL later."
-              >
-                <View style={styles.linkPreview}>
-                  <Text style={styles.linkPreviewText} numberOfLines={1}>
-                    Will be generated on save · sent to {form.email.trim() || 'the student email'}
-                  </Text>
-                </View>
-              </Field>
+              <>
+                <Field
+                  label="Payment Link"
+                  hint="Automatically generated after Save and emailed to the student. Refresh their record to copy the URL later."
+                >
+                  <View style={styles.linkPreview}>
+                    <Text style={styles.linkPreviewText} numberOfLines={1}>
+                      Will be generated on save · sent to {form.email.trim() || 'the student email'}
+                    </Text>
+                  </View>
+                </Field>
+                {/* Read-only Next Payment Date when the link path is
+                    on — spec: "If Payment Link is enabled, payment
+                    scheduling is handled by payment links, so manual
+                    Next Payment Date should not be editable." */}
+                <Field
+                  label="Next Payment Date"
+                  hint="Managed by the Payment Link. Turn off Enable Payment Link to set a manual reminder date."
+                >
+                  <View style={[styles.linkPreview, { opacity: 0.55 }]}>
+                    <Text style={styles.linkPreviewText} numberOfLines={1}>
+                      Auto-managed by Payment Link
+                    </Text>
+                  </View>
+                </Field>
+              </>
             ) : (
-              <Field
-                label="Mode of Payment *"
-                hint="How was the fee collected? The enrolment will be marked paid immediately."
-              >
-                <View style={styles.payModeRow}>
-                  {[
-                    { v: 'cash',   label: 'Cash' },
-                    { v: 'upi',    label: 'UPI' },
-                    { v: 'bank',   label: 'Bank Transfer' },
-                    { v: 'cheque', label: 'Cheque' },
-                  ].map((opt) => {
-                    const active = form.payment_mode === opt.v;
-                    return (
-                      <TouchableOpacity
-                        key={opt.v}
-                        style={[styles.payModeChip, active && styles.payModeChipActive]}
-                        onPress={() => set('payment_mode', opt.v)}
-                        activeOpacity={0.85}
-                      >
-                        <Text
-                          style={[
-                            styles.payModeChipText,
-                            active && styles.payModeChipTextActive,
-                          ]}
+              <>
+                <Field
+                  label="Mode of Payment *"
+                  hint="How was the fee collected? The enrolment will be marked paid immediately."
+                >
+                  <View style={styles.payModeRow}>
+                    {[
+                      { v: 'cash',   label: 'Cash' },
+                      { v: 'upi',    label: 'UPI' },
+                      { v: 'bank',   label: 'Bank Transfer' },
+                      { v: 'cheque', label: 'Cheque' },
+                    ].map((opt) => {
+                      const active = form.payment_mode === opt.v;
+                      return (
+                        <TouchableOpacity
+                          key={opt.v}
+                          style={[styles.payModeChip, active && styles.payModeChipActive]}
+                          onPress={() => set('payment_mode', opt.v)}
+                          activeOpacity={0.85}
                         >
-                          {opt.label}
-                        </Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </View>
-              </Field>
+                          <Text
+                            style={[
+                              styles.payModeChipText,
+                              active && styles.payModeChipTextActive,
+                            ]}
+                          >
+                            {opt.label}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                </Field>
+
+                {/* Next Payment Date — editable only on the offline
+                    path. Feeds the reminder job so the student gets
+                    a bell + WA nudge N days before this date. Empty
+                    is fine — the row just isn't in the reminder set. */}
+                <Field
+                  label="Next Payment Date"
+                  hint="Optional. Sets the reminder date for the next installment. Leave blank for one-time fees."
+                >
+                  <DateField
+                    value={form.next_payment_date}
+                    onChange={(v) => set('next_payment_date', v || '')}
+                    placeholder="YYYY-MM-DD"
+                  />
+                </Field>
+              </>
             )}
           </>
         ) : null}

@@ -45,6 +45,22 @@ export default function AdminCertificatesScreen({ navigation }) {
   const [loading, setLoading]     = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [sendingId, setSendingId] = useState(null);
+
+  // ── Belt Promotion Requests (trainer → institution) ───────────
+  // Second inbox on this screen. Rendered above the classic
+  // course-completion inbox so pending promotions get first
+  // attention. Each row surfaces two admin actions:
+  //   • Notify Trainer (modal for institution remarks → returns
+  //     the request to the trainer with a note)
+  //   • Send Certificate (confirm → hits /approve which mints the
+  //     belt certificate + updates the student's belt_category +
+  //     notifies both parties)
+  const [promoRequests, setPromoRequests] = useState([]);
+  const [promoLoading, setPromoLoading] = useState(true);
+  const [promoActingId, setPromoActingId] = useState(null);
+  const [notifyModal, setNotifyModal] = useState(null); // {id, student_name}
+  const [notifyRemarks, setNotifyRemarks] = useState('');
+  const [notifySubmitting, setNotifySubmitting] = useState(false);
   // Preview flow — when the admin taps Send Certificate we first
   // fetch the merged template + placeholder payload and render it
   // in a modal. Only after they tap Confirm & Send do we POST.
@@ -68,20 +84,96 @@ export default function AdminCertificatesScreen({ navigation }) {
 
   const load = useCallback(async () => {
     try {
-      const r = await apiClient.get(
-        '/course-completions/institution/awaiting-certificate',
-      );
-      setRows(r.data?.completions || []);
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.log('[AdminCertificates] load error:',
-        err?.response?.status, err?.response?.data);
+      // Fire both inboxes in parallel — awaiting course-certificates
+      // and pending belt-promotion requests. Independent so one
+      // failure doesn't blank the other.
+      const [rRes, pRes] = await Promise.all([
+        apiClient.get('/course-completions/institution/awaiting-certificate')
+          .catch((err) => { console.log('[AdminCertificates] awaiting load error:', err?.response?.data); return { data: {} }; }),
+        apiClient.get('/belt-promotion-requests/institution')
+          .catch((err) => { console.log('[AdminCertificates] promo load error:', err?.response?.data); return { data: {} }; }),
+      ]);
+      setRows(rRes.data?.completions || []);
+      setPromoRequests(pRes.data?.requests || []);
     } finally {
       setLoading(false);
+      setPromoLoading(false);
       setRefreshing(false);
     }
   }, []);
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  // ── Promotion admin actions ─────────────────────────────────
+  const openNotifyModal = (req) => {
+    setNotifyRemarks('');
+    setNotifyModal({ id: req.id, student_name: req.student_name });
+  };
+  const submitNotifyTrainer = async () => {
+    if (!notifyModal) return;
+    const remarks = notifyRemarks.trim();
+    if (!remarks) {
+      confirm({
+        title: 'Add remarks',
+        message: 'Tell the trainer what needs to change before resubmitting.',
+        variant: 'warning', confirmText: 'OK', hideCancel: true,
+      });
+      return;
+    }
+    try {
+      setNotifySubmitting(true);
+      await apiClient.post(
+        `/belt-promotion-requests/${notifyModal.id}/notify-trainer`,
+        { remarks },
+      );
+      setPromoRequests((prev) => prev.filter((r) => r.id !== notifyModal.id));
+      setNotifyModal(null);
+      setNotifyRemarks('');
+      setTimeout(() => confirm({
+        title: 'Trainer notified',
+        message: 'The trainer will see your remarks in their inbox.',
+        variant: 'success', confirmText: 'OK', hideCancel: true,
+      }), 200);
+    } catch (err) {
+      confirm({
+        title: 'Could not notify',
+        message: err?.response?.data?.message || 'Try again.',
+        variant: 'warning', confirmText: 'OK', hideCancel: true,
+      });
+    } finally {
+      setNotifySubmitting(false);
+    }
+  };
+  const approvePromotion = (req) => {
+    confirm({
+      title:       'Send certificate?',
+      message:     `Approve promotion to ${req.requested_belt} for ${req.student_name}? This mints the belt certificate and updates the student's belt category.`,
+      variant:     'info',
+      confirmText: 'Yes, send',
+      cancelText:  'Cancel',
+      onConfirm: async () => {
+        try {
+          setPromoActingId(req.id);
+          await apiClient.post(`/belt-promotion-requests/${req.id}/approve`);
+          setPromoRequests((prev) => prev.filter((r) => r.id !== req.id));
+          setTimeout(() => confirm({
+            title:       'Promotion approved',
+            message:     `${req.student_name} is now ${req.requested_belt}. Certificate delivered.`,
+            variant:     'success',
+            confirmText: 'Done',
+            hideCancel:  true,
+          }), 260);
+        } catch (err) {
+          confirm({
+            title: 'Approve failed',
+            message: err?.response?.data?.message || 'Try again.',
+            variant: 'warning', confirmText: 'OK', hideCancel: true,
+          });
+        } finally {
+          setPromoActingId(null);
+        }
+      },
+    });
+  };
 
   // Open the template + merged data as a preview modal. The admin
   // eyeballs the placeholder values (student name, dates, remarks etc.
@@ -169,26 +261,29 @@ export default function AdminCertificatesScreen({ navigation }) {
         <View style={{ flex: 1 }}>
           <Text style={styles.title}>Certificates</Text>
           <Text style={styles.subtitle}>
-            {rows.length === 0 ? 'No students awaiting certificate' : `${rows.length} awaiting certificate`}
+            {promoRequests.length > 0
+              ? `${promoRequests.length} belt request${promoRequests.length === 1 ? '' : 's'} · ${rows.length} awaiting certificate`
+              : rows.length === 0
+                ? 'Nothing pending'
+                : `${rows.length} awaiting certificate`}
           </Text>
         </View>
         <View style={styles.headerBadge}>
           <Award size={13} color="#B45309" strokeWidth={2.4} />
-          <Text style={styles.headerBadgeText}>{rows.length}</Text>
+          <Text style={styles.headerBadgeText}>{rows.length + promoRequests.length}</Text>
         </View>
       </View>
 
-      {loading ? (
+      {loading && promoLoading ? (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={palette.purple.vivid} />
         </View>
-      ) : rows.length === 0 ? (
+      ) : rows.length === 0 && promoRequests.length === 0 ? (
         <View style={styles.emptyCard}>
           <Trophy size={32} color={palette.textLight} strokeWidth={1.6} />
           <Text style={styles.emptyTitle}>Inbox is empty</Text>
           <Text style={styles.emptySub}>
-            Rows appear here as soon as a trainer submits belt-test remarks
-            for a student who finished the curriculum.
+            Belt promotion requests and course-completion certificates land here for your review.
           </Text>
         </View>
       ) : (
@@ -202,16 +297,111 @@ export default function AdminCertificatesScreen({ navigation }) {
             />
           }
         >
-          {rows.map((row) => (
-            <AwaitingCard
-              key={row.id}
-              row={row}
-              sending={sendingId === row.id}
-              onSend={() => sendCertificate(row)}
-            />
-          ))}
+          {/* ── Belt Promotion Requests ── */}
+          {promoRequests.length > 0 ? (
+            <View style={{ marginBottom: spacing.lg }}>
+              <Text style={styles.sectionLabel}>BELT PROMOTION REQUESTS</Text>
+              {promoRequests.map((req) => (
+                <PromotionRequestCard
+                  key={req.id}
+                  request={req}
+                  acting={promoActingId === req.id}
+                  onNotify={() => openNotifyModal(req)}
+                  onApprove={() => approvePromotion(req)}
+                />
+              ))}
+            </View>
+          ) : null}
+
+          {/* ── Awaiting course-completion certificates (existing flow) ── */}
+          {rows.length > 0 ? (
+            <>
+              {promoRequests.length > 0 ? (
+                <Text style={styles.sectionLabel}>AWAITING CERTIFICATES</Text>
+              ) : null}
+              {rows.map((row) => (
+                <AwaitingCard
+                  key={row.id}
+                  row={row}
+                  sending={sendingId === row.id}
+                  onSend={() => sendCertificate(row)}
+                />
+              ))}
+            </>
+          ) : null}
         </ScrollView>
       )}
+
+      {/* ── Notify Trainer modal ── */}
+      <Modal
+        visible={!!notifyModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => !notifySubmitting && setNotifyModal(null)}
+      >
+        <View style={styles.notifyOverlay}>
+          <View style={styles.notifyCard}>
+            <View style={styles.notifyHead}>
+              <MessageSquare size={18} color={palette.purple.vivid} strokeWidth={2.4} />
+              <Text style={styles.notifyTitle}>Notify Trainer</Text>
+              <TouchableOpacity
+                onPress={() => !notifySubmitting && setNotifyModal(null)}
+                style={{ padding: 4 }}
+                hitSlop={8}
+              >
+                <XIcon size={16} color={palette.textMuted} strokeWidth={2.4} />
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.notifyHint}>
+              Remarks for {notifyModal?.student_name || 'this student'}'s trainer. The request stays pending until they resubmit.
+            </Text>
+            <View style={styles.notifyInputWrap}>
+              <Text style={styles.notifyLabel}>Institution Remarks *</Text>
+              <View style={styles.notifyInputBox}>
+                <Text
+                  onPress={() => {}}
+                  style={{ display: 'none' }}
+                />
+                {/* Using TextInput via a lazy import so the modal can
+                    live alongside the existing screen without pulling
+                    the whole form kit. */}
+                {(() => {
+                  const { TextInput } = require('react-native');
+                  return (
+                    <TextInput
+                      value={notifyRemarks}
+                      onChangeText={setNotifyRemarks}
+                      placeholder="e.g. Attendance below 75%. Please have the student attend more sessions before resubmitting."
+                      placeholderTextColor={palette.textLight}
+                      multiline
+                      style={styles.notifyInput}
+                    />
+                  );
+                })()}
+              </View>
+            </View>
+            <View style={styles.notifyFooter}>
+              <TouchableOpacity
+                style={styles.notifyCancel}
+                onPress={() => !notifySubmitting && setNotifyModal(null)}
+                activeOpacity={0.85}
+              >
+                <Text style={styles.notifyCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.notifySubmit, (!notifyRemarks.trim() || notifySubmitting) && { opacity: 0.6 }]}
+                onPress={submitNotifyTrainer}
+                disabled={!notifyRemarks.trim() || notifySubmitting}
+                activeOpacity={0.85}
+              >
+                {notifySubmitting
+                  ? <ActivityIndicator color="#fff" size="small" />
+                  : <Text style={styles.notifySubmitText}>Send</Text>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       {/* ── Template preview modal ── */}
       <PreviewModal
@@ -408,6 +598,87 @@ function PreviewModal({
   );
 }
 
+// ─── Belt Promotion Request card ───────────────────────────────────
+function PromotionRequestCard({ request, acting, onNotify, onApprove }) {
+  const att = request.attendance_summary || {};
+  const percent = Number.isFinite(Number(att.percent)) ? Number(att.percent) : 0;
+  return (
+    <View style={[styles.card, { borderColor: palette.purple.soft, borderWidth: 1 }]}>
+      <View style={[styles.ribbon, { backgroundColor: palette.purple.soft }]}>
+        <Award size={12} color={palette.purple.on} strokeWidth={2.6} />
+        <Text style={[styles.ribbonText, { color: palette.purple.on }]}>Belt Promotion Request</Text>
+      </View>
+
+      <View style={styles.cardHeader}>
+        <View style={styles.avatar}>
+          <User size={18} color={palette.purple.vivid} strokeWidth={2.4} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.studentName} numberOfLines={1}>
+            {request.student_name || 'Student'}
+          </Text>
+          <Text style={styles.courseLine} numberOfLines={1}>
+            Trainer: {request.trainer_name || '—'}
+            {request.course_name ? ` · ${request.course_name}` : ''}
+          </Text>
+        </View>
+      </View>
+
+      {/* Belt transition line — current → requested */}
+      <View style={styles.metaRow}>
+        <View style={styles.metaItem}>
+          <Text style={styles.metaLabel}>Current</Text>
+          <Text style={styles.metaValue}>{request.current_belt || '—'}</Text>
+        </View>
+        <View style={styles.metaItem}>
+          <Text style={styles.metaLabel}>Requested</Text>
+          <Text style={[styles.metaValue, { color: palette.purple.vivid }]}>
+            {request.requested_belt || '—'}
+          </Text>
+        </View>
+        <View style={styles.metaItem}>
+          <Text style={styles.metaLabel}>Attendance</Text>
+          <Text style={styles.metaValue}>{percent}%</Text>
+        </View>
+      </View>
+
+      {request.trainer_remarks ? (
+        <View style={styles.remarksBox}>
+          <Text style={styles.remarksLabel}>Trainer Remarks</Text>
+          <Text style={styles.remarksText}>{request.trainer_remarks}</Text>
+        </View>
+      ) : null}
+
+      <View style={styles.actionRow}>
+        <TouchableOpacity
+          onPress={onNotify}
+          disabled={acting}
+          style={[styles.ghostBtn, acting && { opacity: 0.6 }]}
+          activeOpacity={0.85}
+        >
+          <MessageSquare size={14} color={palette.purple.vivid} strokeWidth={2.4} />
+          <Text style={styles.ghostBtnText}>Notify Trainer</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          onPress={onApprove}
+          disabled={acting}
+          style={[styles.sendBtn, acting && { opacity: 0.6 }]}
+          activeOpacity={0.85}
+        >
+          {acting
+            ? <ActivityIndicator color="#fff" size="small" />
+            : (
+              <>
+                <Send size={14} color="#fff" strokeWidth={2.4} />
+                <Text style={styles.sendBtnText}>Send Certificate</Text>
+              </>
+            )}
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+}
+
 // ─── Card ───────────────────────────────────────────────────────────
 function AwaitingCard({ row, sending, onSend }) {
   return (
@@ -539,6 +810,108 @@ const styles = StyleSheet.create({
   },
   emptyTitle: { ...type.bodyBold, color: palette.text, marginTop: 6 },
   emptySub:   { ...type.caption, color: palette.textMuted, textAlign: 'center' },
+
+  // Section labels between the two inbox groups (Belt Promotion
+  // Requests / Awaiting Certificates).
+  sectionLabel: {
+    fontSize: 11, fontWeight: '800', letterSpacing: 0.6,
+    color: palette.textMuted, textTransform: 'uppercase',
+    marginBottom: spacing.sm, marginTop: spacing.xs,
+  },
+
+  // Belt promotion — meta row (current / requested / attendance).
+  metaRow: {
+    flexDirection: 'row', gap: spacing.md,
+    marginTop: spacing.md,
+    paddingHorizontal: spacing.sm,
+  },
+  metaItem: { flex: 1, minWidth: 0 },
+  metaLabel: {
+    fontSize: 10, color: palette.textLight, fontWeight: '800',
+    textTransform: 'uppercase', letterSpacing: 0.4,
+  },
+  metaValue: {
+    fontSize: 13, color: palette.text, fontWeight: '700', marginTop: 2,
+  },
+  remarksBox: {
+    marginTop: spacing.md,
+    padding: spacing.sm,
+    borderRadius: radius.md,
+    backgroundColor: palette.bg,
+  },
+  remarksLabel: {
+    fontSize: 10, color: palette.textLight, fontWeight: '800',
+    textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 4,
+  },
+  remarksText: { fontSize: 12, color: palette.text, lineHeight: 18 },
+  actionRow: {
+    flexDirection: 'row', gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  ghostBtn: {
+    flex: 1,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10, paddingHorizontal: 12,
+    borderRadius: radius.md,
+    backgroundColor: palette.purple.soft,
+    borderWidth: 1, borderColor: palette.purple.soft,
+  },
+  ghostBtnText: { color: palette.purple.on, fontWeight: '800', fontSize: 12 },
+
+  // Notify Trainer modal
+  notifyOverlay: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center', alignItems: 'center',
+    padding: spacing.lg,
+  },
+  notifyCard: {
+    width: '100%', maxWidth: 440,
+    backgroundColor: palette.surface,
+    borderRadius: radius.xl,
+    padding: spacing.lg,
+    ...shadows.raised,
+  },
+  notifyHead: {
+    flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
+    marginBottom: spacing.sm,
+    paddingBottom: spacing.sm,
+    borderBottomWidth: 1, borderBottomColor: palette.borderSoft,
+  },
+  notifyTitle: { flex: 1, fontSize: 16, fontWeight: '800', color: palette.text },
+  notifyHint: {
+    fontSize: 12, color: palette.textMuted, lineHeight: 18,
+    marginBottom: spacing.md,
+  },
+  notifyInputWrap: { marginBottom: spacing.md },
+  notifyLabel: {
+    fontSize: 11, fontWeight: '800', letterSpacing: 0.4,
+    color: palette.textMuted, textTransform: 'uppercase', marginBottom: 6,
+  },
+  notifyInputBox: {
+    borderRadius: radius.md,
+    borderWidth: 1, borderColor: palette.borderSoft,
+    backgroundColor: palette.surface,
+  },
+  notifyInput: {
+    minHeight: 100,
+    padding: spacing.sm,
+    fontSize: 13, color: palette.text,
+    textAlignVertical: 'top',
+  },
+  notifyFooter: {
+    flexDirection: 'row', justifyContent: 'flex-end', gap: spacing.sm,
+    marginTop: spacing.sm,
+  },
+  notifyCancel: { paddingHorizontal: 14, paddingVertical: 10, borderRadius: radius.md },
+  notifyCancelText: { fontSize: 13, fontWeight: '700', color: palette.textMuted },
+  notifySubmit: {
+    paddingHorizontal: 18, paddingVertical: 10,
+    borderRadius: radius.md,
+    backgroundColor: palette.purple.vivid,
+    minWidth: 96, alignItems: 'center',
+  },
+  notifySubmitText: { color: '#fff', fontWeight: '800', fontSize: 13 },
 
   card: {
     backgroundColor: palette.surface,

@@ -33,6 +33,151 @@ function fmtDate(iso) {
   return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 }
 
+// Colour swatch for a belt label. Institution-configured belts arrive
+// with a real color_hex from the backend; the new
+// belt_promotion_requests flow stores freeform labels ("Blue II",
+// "Brown III") without a hex. We derive a colour by matching the
+// FIRST word of the label against the standard belt palette so the
+// timeline still reads visually. Ranks with no colour word fall back
+// to a neutral swatch.
+const BELT_COLOR_BY_KEY = {
+  white:  '#FFFFFF', yellow: '#F59E0B', orange: '#F97316', green:  '#22C55E',
+  blue:   '#3B82F6', gray:   '#9CA3AF', grey:   '#9CA3AF', brown:  '#A16207',
+  black:  '#0F172A', red:    '#DC2626', purple: '#8B5CF6',
+};
+function beltColorFor(label, provided) {
+  if (provided) return provided;
+  const first = String(label || '').trim().toLowerCase().split(/\s+/)[0];
+  return BELT_COLOR_BY_KEY[first] || palette.borderSoft;
+}
+
+// Canonical belt sequence — the 12 ranks the app renders on every
+// student journey. Same list as the enrollment form's BELT_OPTIONS
+// (minus "Other") and the trainer's Promote Belt dropdown, so all
+// three surfaces (enrol / promote / journey) agree on the ladder a
+// student walks. Rendered even when the institution's own
+// belt_levels catalogue is shorter or empty — extra ranks the
+// institution DID configure get merged in via buildSequence below,
+// so an academy that runs 15 belts still sees every one of them.
+const CANONICAL_BELT_SEQUENCE = [
+  'White', 'Yellow', 'Orange', 'Green',
+  'Blue', 'Blue I', 'Blue II', 'Gray',
+  'Brown I', 'Brown II', 'Brown III', 'Black',
+];
+
+// Normalise a belt label for equality checks — trims, lowercases,
+// strips a trailing "belt" so "White Belt" and "White" match. Blue I
+// stays distinct from Blue.
+function normaliseBeltKey(s) {
+  return String(s || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+belt$/, '')
+    .replace(/\s+/g, ' ');
+}
+
+// Build the full sequence to render. We ALWAYS render the canonical
+// 12-belt ladder so every student sees the same recognisable path
+// regardless of what their institution has configured on the
+// backend. Then:
+//   • Institution-configured extras (belts in `belts[]` that aren't
+//     in the canonical list) are appended in their configured order,
+//     so an academy with "1st Dan / 2nd Dan / Assistant Instructor"
+//     ranks after Black still gets them visible.
+//   • Any belt appearing in `belt_history` that isn't already in the
+//     sequence gets appended too — the student's earned belts must
+//     ALL be represented.
+//
+// Colour + emoji fall back to the catalogue row when available so
+// custom colours (e.g. an academy's dark-green Green Belt) still
+// win over the derived hex.
+//
+// Each output entry: { key, name, color_hex, emoji, event,
+//                      unlocked, isCurrent }.
+function buildSequence(catalogue, history) {
+  // Catalogue lookup by normalised key — used to enrich canonical
+  // entries with the institution's real colour_hex / emoji when
+  // they exist.
+  const catByKey = new Map();
+  (catalogue || []).forEach((b) => {
+    const k = normaliseBeltKey(b.name);
+    if (k && !catByKey.has(k)) {
+      catByKey.set(k, { name: b.name, color_hex: b.color_hex || null, emoji: b.emoji || null });
+    }
+  });
+
+  const seen = new Set();
+  const base = [];
+
+  // 1) The canonical 12.
+  CANONICAL_BELT_SEQUENCE.forEach((name) => {
+    const key = normaliseBeltKey(name);
+    if (seen.has(key)) return;
+    seen.add(key);
+    const cat = catByKey.get(key);
+    base.push({
+      key,
+      // Prefer the institution's exact label if they've configured
+      // one for this rank (e.g. "White Belt" vs "White").
+      name:      cat?.name || name,
+      color_hex: cat?.color_hex || null,
+      emoji:     cat?.emoji || null,
+    });
+  });
+
+  // 2) Any extras the institution defined that aren't in the canonical
+  //    list, in their configured order.
+  (catalogue || []).forEach((b) => {
+    const key = normaliseBeltKey(b.name);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    base.push({
+      key,
+      name:      b.name,
+      color_hex: b.color_hex || null,
+      emoji:     b.emoji || null,
+    });
+  });
+
+  // 3) Belts in belt_history that aren't in the base yet (custom
+  //    labels the trainer picked "freeform" that don't match either
+  //    the canonical list or the institution catalogue).
+  (history || []).forEach((h) => {
+    const key = normaliseBeltKey(h.belt_name);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    base.push({
+      key,
+      name:      h.belt_name,
+      color_hex: h.color_hex || null,
+      emoji:     h.emoji || null,
+    });
+  });
+
+  // Index history by normalised key for O(1) lookup.
+  const eventByKey = new Map();
+  (history || []).forEach((h) => {
+    const k = normaliseBeltKey(h.belt_name);
+    if (k && !eventByKey.has(k)) eventByKey.set(k, h);
+  });
+
+  // Find the highest rank the student has actually reached in this
+  // sequence. Everything at or below is unlocked; everything above
+  // is locked. Handles the "jumped a rank" case cleanly — a
+  // promotion straight to Blue II implicitly unlocks all the ranks
+  // before it in the ladder.
+  let latestReachedIdx = -1;
+  base.forEach((b, i) => {
+    if (eventByKey.has(b.key)) latestReachedIdx = Math.max(latestReachedIdx, i);
+  });
+
+  return base.map((b, i) => {
+    const event = eventByKey.get(b.key) || null;
+    const unlocked = event != null || i <= latestReachedIdx;
+    return { ...b, event, unlocked, isCurrent: i === latestReachedIdx };
+  });
+}
+
 export default function StudentBeltJourneyScreen({ navigation, route }) {
   const studentIdParam = route?.params?.student_id || null;
   const studentNameParam = route?.params?.student_name || null;
@@ -66,9 +211,22 @@ export default function StudentBeltJourneyScreen({ navigation, route }) {
     );
   }
 
-  const { belts = [], current_belt: current, certificates = [], summary = {}, timeline = [] } = data;
-  const totalBelts = belts.length || 1;
-  const completed = belts.filter((b) => b.status === 'completed' || b.status === 'current').length;
+  const {
+    belts = [],
+    belt_history = [],
+    current_belt: current,
+    certificates = [],
+    summary = {},
+    timeline = [],
+  } = data;
+  // Progress % uses the catalogue view when available (how far
+  // through the institution's belt sequence the student has walked).
+  // Falls back to the belt_history count when the catalogue is empty
+  // so a freshly seeded institution still shows a sane number.
+  const totalBelts = belts.length || belt_history.length || 1;
+  const completed = belts.length > 0
+    ? belts.filter((b) => b.status === 'completed' || b.status === 'current').length
+    : belt_history.length;
   const progressPct = Math.round((completed / totalBelts) * 100);
 
   return (
@@ -104,7 +262,7 @@ export default function StudentBeltJourneyScreen({ navigation, route }) {
             <View
               style={[
                 styles.heroBeltChip,
-                { backgroundColor: current?.color_hex || '#FFFFFF' },
+                { backgroundColor: beltColorFor(current?.name, current?.color_hex) },
               ]}
             >
               <Text style={styles.heroBeltEmoji}>{current?.emoji || '🥋'}</Text>
@@ -145,17 +303,38 @@ export default function StudentBeltJourneyScreen({ navigation, route }) {
           />
         </View>
 
-        {/* Belt journey */}
+        {/* ── Belt Journey ─────────────────────────────────────
+            Shows EVERY belt in the institution's sequence (falls back
+            to the canonical 12-rank list when the institution hasn't
+            defined a custom catalogue). Each belt is one of:
+              • Unlocked — student has reached this belt (or a higher
+                           one in the sequence). Shows event details
+                           when we have them from belt_history.
+              • Locked   — upcoming belts the student hasn't reached
+                           yet. Rendered muted with a padlock so the
+                           progression is visible without misleading
+                           them into thinking they've earned it.
+            The latest unlocked belt carries the CURRENT pill. Order
+            is first-to-latest per spec. */}
         <Text style={styles.sectionTitle}>Belt Journey</Text>
         <View style={styles.journeyCard}>
-          {belts.map((b, i) => (
-            <BeltRow
-              key={b.id}
-              belt={b}
-              isFirst={i === 0}
-              isLast={i === belts.length - 1}
-            />
-          ))}
+          {(() => {
+            const sequence = buildSequence(belts, belt_history);
+            if (sequence.length === 0) {
+              return (
+                <Text style={styles.emptyText}>
+                  No belt sequence configured yet. Your institution will publish the belt progression soon.
+                </Text>
+              );
+            }
+            return sequence.map((seq, i) => (
+              <BeltJourneyRow
+                key={`${seq.key}-${i}`}
+                seq={seq}
+                isLast={i === sequence.length - 1}
+              />
+            ));
+          })()}
         </View>
 
         {/* Certificates */}
@@ -240,6 +419,165 @@ function SummaryTile({ icon: Icon, label, value, accent }) {
       </View>
       <Text style={styles.summaryValue}>{value}</Text>
       <Text style={styles.summaryLabel}>{label}</Text>
+    </View>
+  );
+}
+
+// One row in the Belt Journey timeline — a stop on the sequence
+// (built by buildSequence()). Renders either the Unlocked state
+// (colour swatch + event details when we have them, else just the
+// belt name + "Unlocked" pill) or the Locked state (muted swatch +
+// padlock). The latest unlocked belt carries the CURRENT pill.
+function BeltJourneyRow({ seq, isLast }) {
+  const { unlocked, isCurrent, event } = seq;
+  const swatchBase = beltColorFor(seq.name, seq.color_hex);
+  // Locked belts get a muted swatch so the row reads as "future"
+  // without hiding the belt's colour identity entirely — students
+  // can still see which colour is coming next.
+  const swatch = unlocked ? swatchBase : palette.borderSoft;
+  const borderColor = unlocked
+    ? (swatchBase.toLowerCase() === '#ffffff' ? '#D1D5DB' : swatchBase)
+    : palette.borderSoft;
+
+  return (
+    <View style={styles.historyRow}>
+      <View style={styles.historyDotCol}>
+        <View
+          style={[
+            styles.historyChip,
+            {
+              backgroundColor: swatch,
+              borderColor,
+              opacity: unlocked ? 1 : 0.55,
+            },
+          ]}
+        >
+          {unlocked ? (
+            <Text style={styles.historyChipEmoji}>{seq.emoji || '🥋'}</Text>
+          ) : (
+            <Lock size={14} color={palette.textLight} strokeWidth={2.4} />
+          )}
+        </View>
+        {!isLast ? (
+          <View
+            style={[
+              styles.historyConnector,
+              !unlocked && { opacity: 0.4 },
+            ]}
+          />
+        ) : null}
+      </View>
+      <View style={{ flex: 1, paddingBottom: isLast ? 0 : 10 }}>
+        <View style={styles.historyHeadRow}>
+          <Text
+            style={[
+              styles.historyName,
+              !unlocked && { color: palette.textLight, fontWeight: '700' },
+            ]}
+            numberOfLines={1}
+          >
+            {seq.name}
+          </Text>
+          {isCurrent ? (
+            <View style={styles.historyCurrentPill}>
+              <Star size={9} color={palette.purple.vivid} strokeWidth={2.6} />
+              <Text style={styles.historyCurrentPillText}>CURRENT</Text>
+            </View>
+          ) : unlocked ? (
+            <View style={styles.historyUnlockedPill}>
+              <CheckCircle2 size={9} color={palette.green.vivid} strokeWidth={2.6} />
+              <Text style={styles.historyUnlockedPillText}>UNLOCKED</Text>
+            </View>
+          ) : (
+            <View style={styles.historyLockedPill}>
+              <Lock size={9} color={palette.textLight} strokeWidth={2.6} />
+              <Text style={styles.historyLockedPillText}>LOCKED</Text>
+            </View>
+          )}
+        </View>
+
+        {/* Event details — only rendered when the belt is unlocked
+            AND we have a real promotion event on file. Skipping this
+            block for "implicitly unlocked" belts (student jumped
+            ranks) keeps the row honest. */}
+        {unlocked && event ? (
+          <>
+            {event.promoted_at ? (
+              <View style={styles.historyMetaRow}>
+                <Calendar size={10} color={palette.textLight} strokeWidth={2.4} />
+                <Text style={styles.historyMetaText}>{fmtDate(event.promoted_at)}</Text>
+              </View>
+            ) : null}
+            {event.promoted_by ? (
+              <View style={styles.historyMetaRow}>
+                <Award size={10} color={palette.textLight} strokeWidth={2.4} />
+                <Text style={styles.historyMetaText}>Promoted by {event.promoted_by}</Text>
+              </View>
+            ) : null}
+            {event.remarks ? (
+              <Text style={styles.historyRemarks} numberOfLines={4}>
+                “{event.remarks}”
+              </Text>
+            ) : null}
+          </>
+        ) : null}
+      </View>
+    </View>
+  );
+}
+
+// One row in the Belt Journey timeline (real promotion event).
+// Colour dot on the left connects with a vertical line to the next
+// row for a clean stepper look. The latest entry gets a highlighted
+// "Current" pill so the student sees which belt is their live rank.
+function BeltHistoryRow({ entry, isLast }) {
+  const swatch = beltColorFor(entry?.belt_name, entry?.color_hex);
+  return (
+    <View style={styles.historyRow}>
+      <View style={styles.historyDotCol}>
+        <View
+          style={[
+            styles.historyChip,
+            {
+              backgroundColor: swatch,
+              // Darken the border for very-light swatches (white / yellow)
+              // so the dot doesn't blur into the card.
+              borderColor: swatch.toLowerCase() === '#ffffff' ? '#D1D5DB' : swatch,
+            },
+          ]}
+        >
+          <Text style={styles.historyChipEmoji}>{entry?.emoji || '🥋'}</Text>
+        </View>
+        {!isLast ? <View style={styles.historyConnector} /> : null}
+      </View>
+      <View style={{ flex: 1, paddingBottom: isLast ? 0 : 10 }}>
+        <View style={styles.historyHeadRow}>
+          <Text style={styles.historyName} numberOfLines={1}>{entry?.belt_name || 'Belt'}</Text>
+          {isLast ? (
+            <View style={styles.historyCurrentPill}>
+              <Star size={9} color={palette.purple.vivid} strokeWidth={2.6} />
+              <Text style={styles.historyCurrentPillText}>CURRENT</Text>
+            </View>
+          ) : null}
+        </View>
+        {entry?.promoted_at ? (
+          <View style={styles.historyMetaRow}>
+            <Calendar size={10} color={palette.textLight} strokeWidth={2.4} />
+            <Text style={styles.historyMetaText}>{fmtDate(entry.promoted_at)}</Text>
+          </View>
+        ) : null}
+        {entry?.promoted_by ? (
+          <View style={styles.historyMetaRow}>
+            <Award size={10} color={palette.textLight} strokeWidth={2.4} />
+            <Text style={styles.historyMetaText}>Promoted by {entry.promoted_by}</Text>
+          </View>
+        ) : null}
+        {entry?.remarks ? (
+          <Text style={styles.historyRemarks} numberOfLines={4}>
+            “{entry.remarks}”
+          </Text>
+        ) : null}
+      </View>
     </View>
   );
 }
@@ -363,6 +701,77 @@ const styles = StyleSheet.create({
     borderRadius: radius.lg,
     padding: 14,
     ...shadows.soft,
+  },
+
+  // ── Belt history timeline (from belt_history[]) ───────────
+  historyRow: {
+    flexDirection: 'row',
+    gap: 12,
+    paddingTop: 4,
+  },
+  historyDotCol: {
+    alignItems: 'center',
+    width: 40,
+  },
+  historyChip: {
+    width: 34, height: 34, borderRadius: 17,
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1.5,
+  },
+  historyChipEmoji: { fontSize: 16 },
+  historyConnector: {
+    width: 2, flex: 1,
+    backgroundColor: palette.borderSoft,
+    marginTop: 4, minHeight: 24,
+  },
+  historyHeadRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+  },
+  historyName: {
+    flex: 1,
+    fontSize: 14, fontWeight: '800', color: palette.dark,
+  },
+  historyCurrentPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 3,
+    paddingHorizontal: 7, paddingVertical: 3,
+    backgroundColor: palette.purple.soft,
+    borderRadius: 999,
+  },
+  historyCurrentPillText: {
+    fontSize: 9, fontWeight: '800', letterSpacing: 0.5,
+    color: palette.purple.vivid,
+  },
+  historyUnlockedPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 3,
+    paddingHorizontal: 7, paddingVertical: 3,
+    backgroundColor: palette.green.soft,
+    borderRadius: 999,
+  },
+  historyUnlockedPillText: {
+    fontSize: 9, fontWeight: '800', letterSpacing: 0.5,
+    color: palette.green.vivid,
+  },
+  historyLockedPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 3,
+    paddingHorizontal: 7, paddingVertical: 3,
+    backgroundColor: palette.surfaceAlt,
+    borderRadius: 999,
+    borderWidth: 1, borderColor: palette.borderSoft,
+  },
+  historyLockedPillText: {
+    fontSize: 9, fontWeight: '800', letterSpacing: 0.5,
+    color: palette.textLight,
+  },
+  historyMetaRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    marginTop: 3,
+  },
+  historyMetaText: {
+    fontSize: 11, color: palette.textLight, fontWeight: '600',
+  },
+  historyRemarks: {
+    fontSize: 12, color: palette.text,
+    marginTop: 6, lineHeight: 17, fontStyle: 'italic',
   },
   beltRow: { flexDirection: 'row', gap: 12, paddingVertical: 6 },
   beltDotCol: { alignItems: 'center' },

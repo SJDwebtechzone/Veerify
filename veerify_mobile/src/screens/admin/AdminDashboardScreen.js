@@ -35,8 +35,8 @@ import { useAuth } from '../../context/AuthContext';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 import StatCard from '../../components/StatCard';
 import QuickAction from '../../components/QuickAction';
-import { useBellScrollHandler } from '../../components/bellScrollBus';
 import FAB from '../../components/FAB';
+import NotificationBellButton from '../../components/NotificationBellButton';
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
 const CHART_WIDTH = SCREEN_WIDTH - spacing.xl * 2;
@@ -406,8 +406,6 @@ export default function AdminDashboardScreen({ navigation }) {
   const placeholder = (name) =>
     Alert.alert(name, 'We\'ll wire this up as we build out the related screen.');
 
-  const bellScroll = useBellScrollHandler();
-
   return (
     <View style={styles.screen}>
       <ScrollView
@@ -420,10 +418,6 @@ export default function AdminDashboardScreen({ navigation }) {
             tintColor={palette.purple.vivid}
           />
         }
-        // Auto-hide the floating notification bell on scroll down,
-        // slide it back in on scroll up.
-        onScroll={bellScroll}
-        scrollEventThrottle={16}
       >
         {/* ───── Header — polished logo + academy name card ─────
             Soft greeting line + a floating white card that holds the
@@ -431,6 +425,13 @@ export default function AdminDashboardScreen({ navigation }) {
             a member-since line, and the notification bell. Replaces the
             old solid-red hero. */}
         <View style={styles.topBar}>
+          {/* Notification bell anchored to the top-right of the
+              Welcome card so it visually reads as part of the
+              greeting. Unread badge + tap-to-notifications behavior
+              is unchanged. */}
+          <View style={styles.welcomeBellSlot}>
+            <NotificationBellButton showBackground={false} />
+          </View>
           <Text style={styles.greeting}>{greeting},</Text>
           <Text style={styles.greetingName} numberOfLines={1}>
             {(user?.name || 'Admin').split(' ')[0]} 👋
@@ -633,6 +634,16 @@ export default function AdminDashboardScreen({ navigation }) {
                 // admin-initiated path by showing an inline batch picker
                 // at the top when no batch_id was passed in.
                 onPress: () => navigation.navigate('EnrollmentForm', { adminMode: true }),
+              },
+              // Trainers list — shortcut to the roster screen (formerly
+              // reached only via the analytics tile in the header
+              // grid). Available to sub-branch admins too because
+              // TrainersList already scopes per branch server-side.
+              {
+                icon: GraduationCap,
+                label: 'Trainers',
+                accent: palette.rose,
+                onPress: () => navigation.navigate('TrainersList'),
               },
               // Add Course / Create Batch / Trainer Approvals / Refer & Earn
               // are main-institution operations. Sub-branch admins only
@@ -1094,6 +1105,16 @@ const styles = StyleSheet.create({
     backgroundColor: palette.purple.soft,
     borderBottomLeftRadius: radius.xxl,
     borderBottomRightRadius: radius.xxl,
+    position: 'relative',
+  },
+  // Top-right anchor for the notification bell inside the greeting
+  // area. Vertically nudged so it lines up with the "Good morning"
+  // eyebrow rather than the larger name text below it.
+  welcomeBellSlot: {
+    position: 'absolute',
+    top: spacing.xxxl,
+    right: spacing.xl,
+    zIndex: 2,
   },
   greeting: {
     ...type.caption,
@@ -1106,6 +1127,9 @@ const styles = StyleSheet.create({
     color: palette.text,
     marginTop: 2,
     marginBottom: spacing.lg,
+    // Reserve space for the absolutely-positioned bell in the
+    // top-right so a long first name never runs under the icon.
+    paddingRight: 48,
   },
 
   // Identity card that holds the logo + name + bell

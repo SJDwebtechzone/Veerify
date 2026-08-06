@@ -611,7 +611,8 @@ function VideoCard({ video, onOpen, onDelete }) {
               <Calendar size={9} color={TEXT_MUTED} strokeWidth={2.4} />
               <Text style={styles.videoMetaText}>
                 {new Date(video.scheduled_at).toLocaleString('en-IN', {
-                  day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+                  day: '2-digit', month: 'short',
+                  hour: 'numeric', minute: '2-digit', hour12: true,
                 })}
               </Text>
             </View>

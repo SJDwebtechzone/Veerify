@@ -1,4 +1,27 @@
 const pool = require('../config/db');
+
+// ── Schema-availability latch ───────────────────────────────────
+// Migration 084 adds enrollments.next_payment_date. On a DB that
+// hasn't run it, any query that selects the column fails with 42703
+// and the endpoint 500s. We latch the missing state on the FIRST
+// failure so:
+//   • subsequent requests skip the failing column immediately (no
+//     wasted round-trip),
+//   • the app keeps working on stale schemas until the migration
+//     lands + the process restarts (fresh boot → latch defaults
+//     back to available and probes again).
+// Never negates on success — one bad query per process is enough.
+let hasNextPaymentDate = true;
+function markNextPaymentDateMissing() {
+  if (hasNextPaymentDate) {
+    hasNextPaymentDate = false;
+    console.warn(
+      '[enrollment] enrollments.next_payment_date column missing — '
+      + 'apply migration 084 and restart. Serving requests without it in the meantime.'
+    );
+  }
+}
+
 // Use the same bcrypt package as the rest of the codebase (the native
 // one, not bcryptjs). Both expose the same hash/compare API so no
 // other code change is needed.
@@ -239,32 +262,45 @@ exports.getEnrollmentsForMyInstitution = async (req, res) => {
 
     // Branch View override — the Institution Home dashboard passes
     // ?branch_id=X when the admin drilled into a specific branch's
-    // tile. `0` maps to "Main institution only" (b.branch_id IS NULL),
-    // a positive int locks to that branch. Sub-branch admins can't
-    // override (they only see their own branch anyway); an invalid
-    // id is silently ignored so a stale link never leaks another
-    // academy's data.
+    // tile. Values accepted (main admin only):
+    //   'all' | 'ALL'   — every branch + main institution (used by
+    //                     the Earnings tab so Payment Details isn't
+    //                     empty for academies whose students are all
+    //                     enrolled through sub-branches).
+    //   0               — Main institution only (b.branch_id IS NULL).
+    //   positive int    — locks to that branch, validated below.
+    // Sub-branch admins can't override (they only see their own
+    // branch anyway); an invalid id is silently ignored so a stale
+    // link never leaks another academy's data.
     let usedOverride = false;
     if (!scope.isSubBranchAdmin && req.query.branch_id !== undefined) {
-      const raw = parseInt(req.query.branch_id, 10);
-      if (Number.isFinite(raw) && raw >= 0) {
-        if (raw === 0) {
-          where += ` AND b.branch_id IS NULL`;
-          usedOverride = true;
-        } else {
-          // Validate the branch belongs to the caller's tree so a
-          // spoofed id can't spy on another academy.
-          const bRow = await pool.query(
-            `SELECT id FROM institutions
-              WHERE id = $1
-                AND (id = $2 OR parent_institution_id = $2)
-                AND deleted_at IS NULL`,
-            [raw, scope.rootId],
-          );
-          if (bRow.rows.length > 0) {
-            params.push(raw);
-            where += ` AND b.branch_id = $${params.length}`;
+      const rawStr = String(req.query.branch_id || '').trim().toLowerCase();
+      if (rawStr === 'all') {
+        // No branch clause — accept every enrolment in the caller's
+        // academy tree. This matches the "aggregate revenue" view the
+        // Earnings tab wants by default.
+        usedOverride = true;
+      } else {
+        const raw = parseInt(rawStr, 10);
+        if (Number.isFinite(raw) && raw >= 0) {
+          if (raw === 0) {
+            where += ` AND b.branch_id IS NULL`;
             usedOverride = true;
+          } else {
+            // Validate the branch belongs to the caller's tree so a
+            // spoofed id can't spy on another academy.
+            const bRow = await pool.query(
+              `SELECT id FROM institutions
+                WHERE id = $1
+                  AND (id = $2 OR parent_institution_id = $2)
+                  AND deleted_at IS NULL`,
+              [raw, scope.rootId],
+            );
+            if (bRow.rows.length > 0) {
+              params.push(raw);
+              where += ` AND b.branch_id = $${params.length}`;
+              usedOverride = true;
+            }
           }
         }
       }
@@ -274,8 +310,12 @@ exports.getEnrollmentsForMyInstitution = async (req, res) => {
       if (branchClause) where += ` AND ${branchClause}`;
     }
 
-    const result = await pool.query(
-      `SELECT
+    // next_payment_date is spliced in only when the schema latch
+    // reports the column exists. On first 42703 we flip the latch
+    // and retry without the column so a pre-084 schema returns rows
+    // instead of 500-ing. Renderers already treat null / missing as
+    // "no manual reminder set".
+    const buildQuery = () => `SELECT
          e.id,
          e.enrolled_at,
          e.payment_status,
@@ -286,6 +326,7 @@ exports.getEnrollmentsForMyInstitution = async (req, res) => {
          e.payment_link_enabled,
          e.payment_link_url,
          e.payment_link_sent_at,
+         ${hasNextPaymentDate ? 'e.next_payment_date,' : '/* next_payment_date column missing */'}
 
          u.id    AS student_id,
          u.name  AS student_name,
@@ -314,9 +355,21 @@ exports.getEnrollmentsForMyInstitution = async (req, res) => {
        JOIN courses c      ON b.course_id  = c.id
        LEFT JOIN student_profiles sp ON sp.user_id = u.id
        WHERE ${where}
-       ORDER BY e.enrolled_at DESC`,
-      params,
-    );
+       ORDER BY e.enrolled_at DESC`;
+
+    let result;
+    try {
+      result = await pool.query(buildQuery(), params);
+    } catch (queryErr) {
+      // 42703 = undefined_column. On the first hit for
+      // next_payment_date, latch it as missing and re-run without.
+      if (queryErr?.code === '42703' && hasNextPaymentDate) {
+        markNextPaymentDateMissing();
+        result = await pool.query(buildQuery(), params);
+      } else {
+        throw queryErr;
+      }
+    }
 
     // Counts strip for the mobile Earnings tab.
     const counts = result.rows.reduce(
@@ -635,6 +688,35 @@ exports.enrollInBatch = async (req, res) => {
       [studentId, batch_id, batch.institution_id, batch.course_price || null]
     );
 
+    // ── next_payment_date validation ──────────────────────────────
+    // Applies to the OFFLINE payment path only. The admin sets it on
+    // the Add Student form so the reminder scheduler can nudge the
+    // student N days before the next installment. Ignored server-
+    // side when Payment Link is enabled (Razorpay drives that
+    // timeline). Accepts YYYY-MM-DD or an empty string / null.
+    let nextPaymentDate = null;
+    const rawNext = String(req.body?.next_payment_date || '').trim();
+    if (rawNext) {
+      // Strict YYYY-MM-DD so a client passing a raw Date.toString()
+      // doesn't accidentally land as an unparseable value.
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(rawNext)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          field: 'next_payment_date',
+          message: 'next_payment_date must be YYYY-MM-DD',
+        });
+      }
+      const d = new Date(`${rawNext}T00:00:00Z`);
+      if (Number.isNaN(d.getTime())) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          field: 'next_payment_date',
+          message: 'next_payment_date is not a valid date',
+        });
+      }
+      nextPaymentDate = rawNext;
+    }
+
     // ── Admin-mode: pick the payment path ────────────────────────
     // Two branches now, driven by req.body.enable_payment_link:
     //
@@ -751,6 +833,60 @@ exports.enrollInBatch = async (req, res) => {
       } catch (mailErr) {
         console.warn('[enroll] mailer helper unavailable:', mailErr?.message);
       }
+
+      // ── WhatsApp: same payment link, spec-copy ────────────────
+      // Fires only when:
+      //   • admin-mode enrolment (we're inside isAdminMode &&
+      //     linkEnabled already, so this covers both institution
+      //     and branch admins).
+      //   • institution's plan has WhatsApp enabled
+      //     (isWhatsAppEnabledForUser walks to root; branch admins
+      //     inherit the parent academy's plan).
+      //   • student has a valid mobile number on file (users.phone).
+      // The message uses the EXACT short_url minted by Razorpay — same
+      // URL sent by email — so the two channels never diverge.
+      // Fire-and-forget: WA outages, missing envs, plan-disabled, or
+      // an invalid phone must NEVER fail the enrolment.
+      (async () => {
+        try {
+          const { sendTextMessage } = require('../services/whatsapp.service');
+          const { isWhatsAppEnabledForUser } = require('../utils/planFeatureGuard');
+          const actorId = req.user?.id;
+          const enabled = await isWhatsAppEnabledForUser(actorId);
+          if (!enabled) {
+            console.log(`[enroll/wa/link] skip enrollment=${enrollmentId} reason=plan-disabled`);
+            return;
+          }
+          const studentPhone = stu.rows[0]?.phone;
+          if (!studentPhone) {
+            console.log(`[enroll/wa/link] skip enrollment=${enrollmentId} reason=no-phone`);
+            return;
+          }
+          const institutionName = inst.rows[0]?.name || 'Veerify';
+          const message =
+            `Welcome to ${institutionName}!\n\n`
+            + `Your enrollment is successful.\n\n`
+            + `Complete your payment using the link below:\n`
+            + `${link.link.short_url}\n\n`
+            + `Thank you,\n`
+            + `${institutionName}`;
+          const res = await sendTextMessage(studentPhone, message);
+          if (res?.ok) {
+            console.log(
+              `[enroll/wa/link] sent enrollment=${enrollmentId} `
+              + `student=${studentId} to=${studentPhone}`,
+            );
+          } else {
+            console.warn(
+              `[enroll/wa/link] send failed enrollment=${enrollmentId} `
+              + `student=${studentId} reason=${res?.error || 'unknown'}`,
+            );
+          }
+        } catch (waErr) {
+          // Belt-and-suspenders — never throws to the enrolment flow.
+          console.warn('[enroll/wa/link] unexpected error:', waErr?.message);
+        }
+      })();
     } else if (isAdminMode && rawMode) {
       // ── Offline-payment path (unchanged behaviour) ──────────────
       if (!ALLOWED_MODES.includes(rawMode)) {
@@ -761,18 +897,56 @@ exports.enrollInBatch = async (req, res) => {
       }
       const reference = `${rawMode.toUpperCase()}-${Date.now()}-${result.rows[0].id}`;
       const amount = Number(batch.course_price) || 0;
-      const paid = await client.query(
-        `UPDATE enrollments SET
-           payment_status    = 'paid',
-           payment_mode      = $1,
-           payment_reference = $2,
-           payment_amount    = COALESCE(payment_amount, $3),
-           paid_at           = NOW(),
-           revenue_channel   = 'revenue'
-         WHERE id = $4
-         RETURNING *`,
-        [rawMode, reference, amount, result.rows[0].id]
-      );
+      // Schema-tolerant next_payment_date write. Migration 084 adds
+      // the column; on pre-084 DBs we swallow the 42703 (undefined
+      // column) via a SAVEPOINT so a stale schema doesn't roll back
+      // the enrolment. Only stamped on the offline path — spec:
+      // "If Payment Link is enabled, payment scheduling is handled
+      // by payment links, so manual Next Payment Date should not be
+      // editable."
+      await client.query('SAVEPOINT nxt_pmt');
+      let paid;
+      try {
+        paid = await client.query(
+          `UPDATE enrollments SET
+             payment_status    = 'paid',
+             payment_mode      = $1,
+             payment_reference = $2,
+             payment_amount    = COALESCE(payment_amount, $3),
+             paid_at           = NOW(),
+             revenue_channel   = 'revenue',
+             next_payment_date = $5
+           WHERE id = $4
+           RETURNING *`,
+          [rawMode, reference, amount, result.rows[0].id, nextPaymentDate]
+        );
+        await client.query('RELEASE SAVEPOINT nxt_pmt');
+      } catch (updErr) {
+        if (updErr?.code === '42703') {
+          // Column missing → rollback the failed UPDATE and re-run
+          // without next_payment_date so the enrolment still lands.
+          await client.query('ROLLBACK TO SAVEPOINT nxt_pmt');
+          if (nextPaymentDate) {
+            console.warn(
+              '[enroll] next_payment_date requested but column missing — apply migration 084.'
+            );
+          }
+          paid = await client.query(
+            `UPDATE enrollments SET
+               payment_status    = 'paid',
+               payment_mode      = $1,
+               payment_reference = $2,
+               payment_amount    = COALESCE(payment_amount, $3),
+               paid_at           = NOW(),
+               revenue_channel   = 'revenue'
+             WHERE id = $4
+             RETURNING *`,
+            [rawMode, reference, amount, result.rows[0].id]
+          );
+        } else {
+          throw updErr;
+        }
+      }
       // Replace the row we return below so the caller sees the paid state.
       result.rows[0] = paid.rows[0];
 
@@ -1323,6 +1497,43 @@ exports.resendPaymentLink = async (req, res) => {
     } catch (mailErr) {
       console.warn('[resendPaymentLink] mailer helper unavailable:', mailErr?.message);
     }
+
+    // ── WhatsApp: same freshly-minted link, spec-copy ─────────
+    // Same gate + message as the initial enrolment path. Fire-and-
+    // forget so a WA outage never fails the resend response.
+    (async () => {
+      try {
+        const { sendTextMessage } = require('../services/whatsapp.service');
+        const { isWhatsAppEnabledForUser } = require('../utils/planFeatureGuard');
+        const enabled = await isWhatsAppEnabledForUser(req.user.id);
+        if (!enabled) {
+          console.log(`[resendPaymentLink/wa] skip enrollment=${row.id} reason=plan-disabled`);
+          return;
+        }
+        if (!row.student_phone) {
+          console.log(`[resendPaymentLink/wa] skip enrollment=${row.id} reason=no-phone`);
+          return;
+        }
+        const message =
+          `Welcome to ${row.institution_name}!\n\n`
+          + `Your enrollment is successful.\n\n`
+          + `Complete your payment using the link below:\n`
+          + `${link.link.short_url}\n\n`
+          + `Thank you,\n`
+          + `${row.institution_name}`;
+        const r = await sendTextMessage(row.student_phone, message);
+        if (r?.ok) {
+          console.log(`[resendPaymentLink/wa] sent enrollment=${row.id} to=${row.student_phone}`);
+        } else {
+          console.warn(
+            `[resendPaymentLink/wa] send failed enrollment=${row.id} `
+            + `reason=${r?.error || 'unknown'}`,
+          );
+        }
+      } catch (waErr) {
+        console.warn('[resendPaymentLink/wa] unexpected error:', waErr?.message);
+      }
+    })();
 
     res.json({
       message:      'Payment link regenerated and emailed to the student.',
@@ -2004,6 +2215,13 @@ exports.getMyEnrollments = async (req, res) => {
     const result = await pool.query(
       `SELECT e.*,
               b.name AS batch_name, b.course_id, b.days_of_week, b.start_time, b.end_time, b.mode,
+              b.branch_id AS batch_branch_id,
+              -- Branch label: sub-branch name for pinned batches,
+              -- 'Main Institution' for batches whose branch_id IS NULL.
+              -- The mobile Batches screen renders this verbatim per
+              -- spec ("Display: Batch / Course / Trainer / Branch /
+              -- Schedule / Status").
+              COALESCE(br.name, 'Main Institution') AS batch_branch_name,
               c.name AS course_name, c.price AS course_price,
               c.image_url AS course_image_url,
               i.name AS institution_name, i.city AS institution_city,
@@ -2013,6 +2231,7 @@ exports.getMyEnrollments = async (req, res) => {
        JOIN batches b ON e.batch_id = b.id
        JOIN courses c ON b.course_id = c.id
        JOIN institutions i ON e.institution_id = i.id
+       LEFT JOIN institutions br ON br.id = b.branch_id
        LEFT JOIN trainers t ON b.trainer_id = t.id
        LEFT JOIN users u ON t.user_id = u.id
        WHERE e.student_id = $1
@@ -2655,6 +2874,12 @@ exports.updateStudentByAdmin = async (req, res) => {
     //   • explicit null      → clear photo_url (admin removed the photo)
     //   • undefined / omitted → don't touch photo_url at all
     photo_url,
+    // Next Payment Date — YYYY-MM-DD, empty string clears it. The
+    // update below only applies it to enrolments where
+    // payment_link_enabled=FALSE (the offline path); link-driven
+    // enrolments derive their next-due date from Razorpay and the
+    // manual field is read-only in the UI.
+    next_payment_date,
   } = req.body || {};
 
   try {
@@ -2789,6 +3014,45 @@ exports.updateStudentByAdmin = async (req, res) => {
         ],
       );
 
+      // ── Next Payment Date — enrolment-level, offline path only ──
+      // Payment-link enrolments derive their next due date from the
+      // Razorpay link lifecycle, so we deliberately skip those rows
+      // (the mobile also disables the field for them). The predicate
+      // scopes the UPDATE to enrolments under this student where
+      // payment_link_enabled = FALSE; if the caller passed a null /
+      // empty value we clear the column, otherwise we set it.
+      const wantsNextPaymentTouch = Object.prototype.hasOwnProperty.call(
+        req.body || {}, 'next_payment_date',
+      );
+      if (wantsNextPaymentTouch) {
+        let nextVal = null;
+        if (next_payment_date != null && String(next_payment_date).trim() !== '') {
+          const raw = String(next_payment_date).trim();
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({
+              field: 'next_payment_date',
+              message: 'next_payment_date must be YYYY-MM-DD',
+            });
+          }
+          nextVal = raw;
+        }
+        try {
+          await client.query(
+            `UPDATE enrollments SET next_payment_date = $2
+              WHERE student_id = $1
+                AND COALESCE(payment_link_enabled, FALSE) = FALSE`,
+            [studentId, nextVal],
+          );
+        } catch (err) {
+          // Pre-084 schema — swallow.
+          if (err?.code !== '42703') throw err;
+          console.warn(
+            '[updateStudent] next_payment_date requested but column missing — apply migration 084.'
+          );
+        }
+      }
+
       await client.query('COMMIT');
     } catch (txErr) {
       await client.query('ROLLBACK');
@@ -2800,18 +3064,43 @@ exports.updateStudentByAdmin = async (req, res) => {
     // Return the freshly-merged view so the mobile screen can refresh
     // its state without a second round-trip. Returns every column the
     // edit form knows how to render so the client can trust the
-    // server as its source of truth after Save.
+    // server as its source of truth after Save. next_payment_date +
+    // payment_link_enabled come from the student's most recent
+    // enrolment so the client knows whether the field should be
+    // editable on the Edit Student form.
     const merged = await pool.query(
       `SELECT u.id, u.name, u.email, u.phone,
               sp.full_name, sp.address, sp.father_name, sp.mother_name,
               sp.date_of_birth, sp.gender, sp.photo_url,
               sp.occupation, sp.height_cm, sp.weight_kg,
-              sp.disabilities, sp.blood_group, sp.belt_category
+              sp.disabilities, sp.blood_group, sp.belt_category,
+              e.next_payment_date, e.payment_link_enabled
          FROM users u
          LEFT JOIN student_profiles sp ON sp.user_id = u.id
+         LEFT JOIN LATERAL (
+           SELECT next_payment_date, payment_link_enabled
+             FROM enrollments
+            WHERE student_id = u.id
+            ORDER BY id DESC
+            LIMIT 1
+         ) e ON TRUE
         WHERE u.id = $1`,
       [studentId],
-    );
+    ).catch(async (err) => {
+      // Pre-084 fallback — re-run without the next_payment_date join.
+      if (err?.code !== '42703') throw err;
+      return pool.query(
+        `SELECT u.id, u.name, u.email, u.phone,
+                sp.full_name, sp.address, sp.father_name, sp.mother_name,
+                sp.date_of_birth, sp.gender, sp.photo_url,
+                sp.occupation, sp.height_cm, sp.weight_kg,
+                sp.disabilities, sp.blood_group, sp.belt_category
+           FROM users u
+           LEFT JOIN student_profiles sp ON sp.user_id = u.id
+          WHERE u.id = $1`,
+        [studentId],
+      );
+    });
     res.json({ message: 'Student updated', student: merged.rows[0] });
   } catch (err) {
     console.error('updateStudentByAdmin error:', err);

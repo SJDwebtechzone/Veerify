@@ -5,6 +5,7 @@ import apiClient from '../../api/client';
 import { useBellScrollHandler } from '../../components/bellScrollBus';
 import { useAuth } from '../../context/AuthContext';
 import { colors, commonStyles } from '../../utils/styles';
+import { formatBatchTime } from '../../utils/formatTime';
 
 export default function TrainerDashboardScreen({ navigation }) {
   const { user, logout } = useAuth();
@@ -69,7 +70,7 @@ export default function TrainerDashboardScreen({ navigation }) {
             <Text style={{ fontSize: 13, color: colors.primary, marginTop: 4 }}>{item.course_name}</Text>
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginTop: 8, gap: 12 }}>
               {item.days_of_week ? <Text style={{ fontSize: 12, color: colors.textLight }}>📆 {item.days_of_week}</Text> : null}
-              {item.start_time ? <Text style={{ fontSize: 12, color: colors.textLight }}>⏰ {item.start_time?.slice(0,5)}</Text> : null}
+              {item.start_time ? <Text style={{ fontSize: 12, color: colors.textLight }}>⏰ {formatBatchTime(item.start_time)}</Text> : null}
             </View>
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 10 }}>
               <Text style={{ fontSize: 12, color: colors.textLight }}>👥 {item.enrolled_count} students</Text>

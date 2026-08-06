@@ -1,188 +1,152 @@
 // src/screens/student/tabs/BatchesTabScreen.js
 //
-// Student-facing Batches tab — every batch at the currently-selected academy.
+// Student-facing Batches tab — the STUDENT'S OWN enrolled batches.
 //
-// Layout:
-//   1. Header with academy selector
-//   2. Search bar (name / program / trainer)
-//   3. Status filter pills (All / Upcoming / Running / Completed)
-//   4. Batch cards (program pill, name, trainer, schedule, online/offline mode,
-//      capacity progress, Join button)
+// Product rule (per spec):
+//   • Show only batches the student is actively enrolled in.
+//   • Never show other batches from the institution / branch.
+//   • Empty state reads "No enrolled batches found."
 //
-// Guests can view schedules; Join triggers a login popup. Free users get a
-// "subscribe to enroll" popup. Real enrollment lands in Phase 2.
+// Enforcement:
+//   • Data comes from GET /api/enrollments/my — a role-gated
+//     (`requireRole('student')`) endpoint that filters by
+//     `req.user.id` server-side. There is no way for the client to
+//     ask for another student's batches, and no institution-wide
+//     batch list is fetched here.
+//   • We further filter to payment_status === 'paid' so pending /
+//     failed enrolments (still on the Pay Now flow) don't surface
+//     as "your batches" — those live on the Enrolled Programs
+//     screen with a Pay Now CTA.
+//
+// Each card shows: Batch Name · Course · Trainer · Branch · Schedule
+// (days + time) · Status (Active / Completed).
 
-import React, { useState, useCallback, useMemo, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import {
-  View, Text, ScrollView, TouchableOpacity, RefreshControl,
-  TextInput, FlatList, ActivityIndicator, StyleSheet, Alert,
+  View, Text, TouchableOpacity, RefreshControl, FlatList,
+  ActivityIndicator, StyleSheet,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import {
-  Search, ChevronDown, ChevronRight, Clock, Calendar, User,
-  Users, Building2, Wifi, MapPin, GraduationCap,
+  Clock, Calendar, User, Building2, Wifi, MapPin, GraduationCap,
 } from 'lucide-react-native';
 
 import apiClient from '../../../api/client';
 import { useAuth } from '../../../context/AuthContext';
-import { useInstitution } from '../../../context/InstitutionContext';
 import { palette, spacing, radius, shadows, type } from '../../../theme';
 import { useBellScrollHandler } from '../../../components/bellScrollBus';
-import { confirm } from '../../../components/ConfirmDialog';
 import { formatBatchTimeRange } from '../../../utils/formatTime';
+import { partitionBatches } from '../../../utils/batchOccurrence';
 
 const ACCENTS = [palette.purple, palette.blue, palette.green, palette.orange, palette.pink, palette.teal];
 const cycleAccent = (i) => ACCENTS[i % ACCENTS.length];
 
-const FILTERS = ['All', 'Upcoming', 'Running', 'Completed'];
-
-// Derive a status bucket from the batch row. Tries common shapes:
-//   - explicit status field ('upcoming'/'running'/'active'/'completed'/'ended')
-//   - falls back to date comparison if start_date/end_date exist.
+// Derive a status for the batch — Active (currently running) or
+// Completed (course window elapsed). Prefers explicit batch.status
+// when the backend provides one; otherwise infers from start_date /
+// end_date when present.
 function deriveStatus(b) {
   const raw = (b.status || b.batch_status || '').toLowerCase();
-  if (['upcoming', 'scheduled', 'pending'].includes(raw)) return 'Upcoming';
-  if (['running', 'active', 'in_progress', 'ongoing'].includes(raw)) return 'Running';
   if (['completed', 'finished', 'ended', 'closed'].includes(raw)) return 'Completed';
-
+  if (['upcoming', 'scheduled', 'pending', 'running', 'active', 'in_progress', 'ongoing'].includes(raw)) return 'Active';
   const now = Date.now();
-  const start = b.start_date ? new Date(b.start_date).getTime() : null;
-  const end   = b.end_date   ? new Date(b.end_date).getTime()   : null;
-  if (start && start > now) return 'Upcoming';
+  const end = b.end_date ? new Date(b.end_date).getTime() : null;
   if (end && end < now) return 'Completed';
-  if (start && start <= now && (!end || end >= now)) return 'Running';
-  return 'Upcoming';
+  return 'Active';
 }
 
 function formatSchedule(b) {
-  // Try several common time-shape conventions. Raw DB values arrive as
-  // "HH:MM:SS" strings; formatBatchTimeRange normalises them to a
-  // friendly 12-hour label (e.g. "6:00 AM – 7:30 AM") without touching
-  // the stored value.
   const time =
     formatBatchTimeRange(b.start_time, b.end_time) ||
-    b.time ||
-    b.timing ||
-    '';
+    b.time || b.timing || '';
   const days = b.days || b.days_of_week || '';
   return { time, days };
 }
 
+// Transform an /enrollments/my row into the batch shape the card
+// renders. The backend already joins batches + courses + trainers +
+// branch, so we just pick the fields.
+function enrollmentToBatch(e) {
+  return {
+    id:             e.batch_id || e.id,
+    enrollment_id:  e.id,
+    name:           e.batch_name || `Batch ${e.batch_id || e.id}`,
+    course_name:    e.course_name || null,
+    trainer_name:   e.trainer_name || null,
+    branch_name:    e.batch_branch_name || 'Main Institution',
+    institution_name: e.institution_name || null,
+    days_of_week:   e.days_of_week || null,
+    start_time:     e.start_time || null,
+    end_time:       e.end_time || null,
+    mode:           e.mode || null,
+    end_date:       e.end_date || null,
+    status:         e.batch_status || null,
+  };
+}
+
 export default function BatchesTabScreen({ navigation }) {
   const { user } = useAuth();
-  const { selectedInstitution, loading: instLoading } = useInstitution();
-
   const [batches, setBatches] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState('All');
-
-  const isGuest = !user;
 
   const load = useCallback(async () => {
     try {
-      if (!selectedInstitution?.id) {
-        setBatches([]);
-        return;
-      }
-      const res = await apiClient
-        .get(`/institutions/${selectedInstitution.id}/batches`)
-        .catch(() => ({ data: { batches: [] } }));
-      setBatches(res.data.batches || []);
-    } catch (err) {
-      console.log('[StudentBatches] load error:', err?.message);
+      // Server-side filter: this endpoint returns ONLY the caller's
+      // own enrolments. Role gate + user_id read from the JWT.
+      const res = await apiClient.get('/enrollments/my').catch(() => ({ data: {} }));
+      const rows = (res.data?.enrollments || [])
+        // Client-side belt-and-suspenders: only surface PAID enrolments
+        // as "my batches". Pending / failed rows live on the Enrolled
+        // Programs screen with the Pay Now flow.
+        .filter((e) => e.payment_status === 'paid')
+        // De-duplicate — a student can occasionally have two enrolments
+        // pointing at the same batch (e.g. a resume after a refund).
+        // We keep the newest by enrolled_at.
+        .reduce((acc, e) => {
+          const key = e.batch_id || e.id;
+          if (!acc.has(key)) acc.set(key, e);
+          return acc;
+        }, new Map());
+      setBatches(Array.from(rows.values()).map(enrollmentToBatch));
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [selectedInstitution?.id]);
+  }, []);
 
   useFocusEffect(useCallback(() => { setLoading(true); load(); }, [load]));
-  useEffect(() => { setLoading(true); load(); }, [selectedInstitution?.id, load]);
 
-  const counts = useMemo(() => {
-    const c = { All: batches.length, Upcoming: 0, Running: 0, Completed: 0 };
-    batches.forEach((b) => { c[deriveStatus(b)] = (c[deriveStatus(b)] || 0) + 1; });
-    return c;
-  }, [batches]);
+  // Minute tick so a session that just started / just ended can move
+  // between Ongoing and Upcoming without a manual refresh.
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 60_000);
+    return () => clearInterval(id);
+  }, []);
 
-  const visible = useMemo(() => {
-    let arr = batches;
-    if (filter !== 'All') {
-      arr = arr.filter((b) => deriveStatus(b) === filter);
-    }
-    const q = search.trim().toLowerCase();
-    if (q) {
-      arr = arr.filter((b) =>
-        (b.name || b.batch_name || '').toLowerCase().includes(q) ||
-        (b.course_name || b.program || '').toLowerCase().includes(q) ||
-        (b.trainer_name || b.trainer || '').toLowerCase().includes(q),
-      );
-    }
-    return arr;
-  }, [batches, search, filter]);
+  // Ongoing = a session is live right now. Upcoming = the next
+  // occurrence is strictly in the future. Ongoing rows bubble to the
+  // top so a live class is one tap away.
+  const { ongoing, upcoming } = useMemo(
+    () => partitionBatches(batches, new Date(nowTick)),
+    [batches, nowTick],
+  );
+  const orderedBatches = useMemo(
+    () => [...ongoing, ...upcoming],
+    [ongoing, upcoming],
+  );
 
-  const handleJoin = (batch) => {
-    if (isGuest) {
-      confirm({
-        title: 'Login to Continue Learning',
-        message: 'Sign in to join this batch and unlock your training.',
-        variant: 'destructive',
-        confirmText: 'Login',
-        cancelText: 'Not now',
-        onConfirm: () => {
-          try { navigation.navigate('Login'); return; } catch {}
-          try { navigation.getParent()?.navigate('Login'); } catch {}
-        },
-      });
-      return;
-    }
+  const counts = useMemo(() => ({
+    Active:    batches.filter((b) => deriveStatus(b) === 'Active').length,
+    Completed: batches.filter((b) => deriveStatus(b) === 'Completed').length,
+  }), [batches]);
 
-    // ── Route directly to the Course Enrollment Form ─────────────────
-    // Previously we blocked here with a "Subscribe to a plan" popup,
-    // but the enrollment form + payment flow is the real entry point:
-    // the form auto-fills the student profile, shows a summary of the
-    // batch they picked, validates the mandatory fields, then either
-    // hands off to the Razorpay screen (paid course) or shows an
-    // enrollment-success state (free course). MyEnrollments refreshes
-    // on focus so the new row shows up in "Enrolled Programs" as soon
-    // as the user lands back on that tab.
-    //
-    // We pass a synthetic `course` alongside the batch so the header
-    // subtitle + summary card can render fee + course name without a
-    // second fetch — every batch row already carries course_name +
-    // course_price from /institutions/:id/batches.
-    const course = {
-      id:    batch.course_id,
-      name:  batch.course_name || batch.program || 'Course',
-      price: batch.course_price ?? batch.price ?? 0,
-    };
-    navigation.navigate('EnrollmentForm', { batch, course });
-  };
-
-  // ─── No academy chosen ───
-  if (!instLoading && !selectedInstitution) {
-    return (
-      <View style={[styles.screen, styles.center, { padding: spacing.xxl }]}>
-        <View style={styles.emptyIconWrap}>
-          <Building2 size={36} color={palette.purple.vivid} strokeWidth={2.2} />
-        </View>
-        <Text style={styles.emptyTitle}>Pick your academy first</Text>
-        <Text style={styles.emptyBody}>
-          Batches are scheduled per academy. Choose one to see what's running.
-        </Text>
-        <TouchableOpacity
-          style={styles.ctaButton}
-          onPress={() => navigation.navigate('SelectInstitution')}
-          activeOpacity={0.85}
-        >
-          <Text style={styles.ctaText}>Choose academy</Text>
-          <ChevronRight size={16} color="#fff" strokeWidth={2.6} />
-        </TouchableOpacity>
-      </View>
-    );
-  }
+  // Guest fallback — should never render for a signed-in student.
+  // The tab is only reachable inside the student stack, but a race
+  // during logout could momentarily land here with user=null. We
+  // treat that as "no enrolled batches" too.
+  const isGuest = !user;
 
   if (loading && batches.length === 0) {
     return (
@@ -194,66 +158,36 @@ export default function BatchesTabScreen({ navigation }) {
 
   return (
     <View style={styles.screen}>
-      {/* Header — just academy name + dropdown. Eyebrow line dropped to
-          match the simplified Programs tab layout; bottom padding bumped
-          so the search bar below has clear breathing room. */}
       <View style={styles.header}>
-        <TouchableOpacity
-          onPress={() => navigation.navigate('SelectInstitution')}
-          activeOpacity={0.85}
-          style={styles.instSelector}
-        >
-          <Text style={styles.instText} numberOfLines={1}>
-            {selectedInstitution?.name}
-          </Text>
-          <ChevronDown size={20} color={palette.purple.vivid} strokeWidth={2.4} />
-        </TouchableOpacity>
-      </View>
-
-      {/* Search */}
-      <View style={styles.searchWrap}>
-        <Search size={18} color={palette.textMuted} strokeWidth={2.2} />
-        <TextInput
-          value={search}
-          onChangeText={setSearch}
-          placeholder="Search by batch, program, or trainer"
-          placeholderTextColor={palette.textLight}
-          style={styles.searchInput}
-        />
-      </View>
-
-      {/* Filter pills */}
-      <View style={styles.filtersWrap}>
-        <FlatList
-          data={FILTERS}
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={{ paddingHorizontal: spacing.xl, gap: spacing.sm }}
-          keyExtractor={(f) => f}
-          renderItem={({ item: f }) => {
-            const focused = filter === f;
-            return (
-              <TouchableOpacity
-                onPress={() => setFilter(f)}
-                activeOpacity={0.85}
-                style={[styles.filterPill, focused && styles.filterPillFocused]}
-              >
-                <Text style={[styles.filterText, focused && styles.filterTextFocused]}>
-                  {f}
+        <Text style={styles.eyebrow}>My Batches</Text>
+        <Text style={styles.title}>
+          {batches.length === 0
+            ? 'Nothing enrolled yet'
+            : `${batches.length} enrolled batch${batches.length === 1 ? '' : 'es'}`}
+        </Text>
+        {batches.length > 0 ? (
+          <View style={styles.summaryChipRow}>
+            <View style={[styles.summaryChip, { backgroundColor: palette.green.soft }]}>
+              <View style={[styles.summaryDot, { backgroundColor: palette.green.vivid }]} />
+              <Text style={[styles.summaryChipText, { color: palette.green.on }]}>
+                {counts.Active} Active
+              </Text>
+            </View>
+            {counts.Completed > 0 ? (
+              <View style={[styles.summaryChip, { backgroundColor: palette.borderSoft }]}>
+                <View style={[styles.summaryDot, { backgroundColor: palette.textMuted }]} />
+                <Text style={[styles.summaryChipText, { color: palette.textMuted }]}>
+                  {counts.Completed} Completed
                 </Text>
-                <View style={[styles.filterBadge, focused && styles.filterBadgeFocused]}>
-                  <Text style={[styles.filterBadgeText, focused && styles.filterBadgeTextFocused]}>
-                    {counts[f] || 0}
-                  </Text>
-                </View>
-              </TouchableOpacity>
-            );
-          }}
-        />
+              </View>
+            ) : null}
+          </View>
+        ) : null}
       </View>
 
       <FlatList
-        data={visible}
+        data={orderedBatches}
+        extraData={nowTick}
         keyExtractor={(b) => String(b.id)}
         contentContainerStyle={{ padding: spacing.xl, paddingBottom: 40 }}
         ItemSeparatorComponent={() => <View style={{ height: spacing.md }} />}
@@ -267,75 +201,99 @@ export default function BatchesTabScreen({ navigation }) {
           />
         }
         ListEmptyComponent={
-          <View style={styles.emptyInline}>
-            <Calendar size={22} color={palette.textLight} strokeWidth={2} />
-            <Text style={styles.emptyInlineText}>
-              {search || filter !== 'All'
-                ? 'No batches match your filters. Try clearing them.'
-                : 'No batches scheduled yet. Check back soon.'}
+          <View style={styles.emptyCard}>
+            <View style={styles.emptyIconWrap}>
+              <GraduationCap size={28} color={palette.purple.vivid} strokeWidth={2.2} />
+            </View>
+            <Text style={styles.emptyTitle}>No enrolled batches found.</Text>
+            <Text style={styles.emptyBody}>
+              {isGuest
+                ? 'Sign in to see your batches.'
+                : 'Once you enrol in a course, your batch details will appear here.'}
             </Text>
           </View>
         }
         renderItem={({ item, index }) => (
-          <BatchCard
-            batch={item}
-            accent={cycleAccent(index)}
-            onJoin={() => handleJoin(item)}
-          />
+          <BatchCard batch={item} accent={cycleAccent(index)} />
         )}
       />
     </View>
   );
 }
 
-// ─── Card ────────────────────────────────────────────────────────────────────
-function BatchCard({ batch, accent, onJoin }) {
+// ─── Card ────────────────────────────────────────────────────────
+function BatchCard({ batch, accent }) {
   const status = deriveStatus(batch);
   const { time, days } = formatSchedule(batch);
-  const capacity = Number(batch.capacity || batch.max_students || 0);
-  const enrolled = Number(batch.enrolled || batch.current_students || 0);
-  const fillRatio = capacity > 0 ? Math.min(enrolled / capacity, 1) : 0;
-  const nearlyFull = fillRatio >= 0.85;
-
   const isOnline = (batch.mode || '').toLowerCase().includes('online');
-
-  const statusVisual = status === 'Running'
-    ? palette.green
-    : status === 'Upcoming'
-      ? palette.blue
-      : { soft: palette.borderSoft, vivid: palette.textMuted, on: palette.textMuted };
+  const isCompleted = status === 'Completed';
 
   return (
     <View style={styles.card}>
-      {/* Top row */}
+      {/* Top row — batch name + status pill */}
       <View style={styles.cardTop}>
         <View style={{ flex: 1, paddingRight: spacing.sm }}>
           <Text style={styles.batchName} numberOfLines={2}>
-            {batch.name || batch.batch_name || `Batch ${batch.id}`}
+            {batch.name}
           </Text>
-          {batch.course_name || batch.program ? (
-            <View style={{ flexDirection: 'row', marginTop: 6 }}>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginTop: 6, gap: 6 }}>
+            {batch.course_name ? (
               <View style={[styles.coursePill, { backgroundColor: accent.soft }]}>
-                <Text style={[styles.coursePillText, { color: accent.on }]}>
-                  {batch.course_name || batch.program}
+                <Text style={[styles.coursePillText, { color: accent.on }]} numberOfLines={1}>
+                  {batch.course_name}
                 </Text>
               </View>
-            </View>
-          ) : null}
+            ) : null}
+            {batch._next?.isOngoing ? (
+              <View style={[styles.coursePill, { backgroundColor: palette.green.soft }]}>
+                <Text style={[styles.coursePillText, { color: palette.green.on }]}>
+                  IN PROGRESS
+                </Text>
+              </View>
+            ) : null}
+          </View>
         </View>
-        <View style={[styles.statusBadge, { backgroundColor: statusVisual.soft }]}>
-          <View style={[styles.statusDot, { backgroundColor: statusVisual.vivid }]} />
-          <Text style={[styles.statusBadgeText, { color: statusVisual.on }]}>{status}</Text>
+        <View
+          style={[
+            styles.statusBadge,
+            {
+              backgroundColor: isCompleted ? palette.borderSoft : palette.green.soft,
+            },
+          ]}
+        >
+          <View
+            style={[
+              styles.statusDot,
+              { backgroundColor: isCompleted ? palette.textMuted : palette.green.vivid },
+            ]}
+          />
+          <Text
+            style={[
+              styles.statusBadgeText,
+              { color: isCompleted ? palette.textMuted : palette.green.on },
+            ]}
+          >
+            {status}
+          </Text>
         </View>
       </View>
 
-      {/* Meta */}
+      {/* Meta — Trainer / Branch / Schedule */}
       <View style={styles.metaList}>
-        {batch.trainer_name || batch.trainer ? (
-          <MetaRow icon={User} label="Trainer" value={batch.trainer_name || batch.trainer} />
+        {batch.trainer_name ? (
+          <MetaRow icon={User}       label="Trainer" value={batch.trainer_name} />
         ) : null}
-        {time ? <MetaRow icon={Clock} label="Time" value={time} /> : null}
-        {days ? <MetaRow icon={Calendar} label="Days" value={days} /> : null}
+        {batch.branch_name ? (
+          <MetaRow icon={Building2}  label="Branch"  value={batch.branch_name} />
+        ) : null}
+        {days ? (
+          <MetaRow icon={Calendar}   label="Days"    value={days} />
+        ) : null}
+        {time ? (
+          <MetaRow icon={Clock}      label="Time"    value={time} />
+        ) : null}
+
+        {/* Mode pill — online vs in-person */}
         <View style={styles.modeRow}>
           {isOnline ? (
             <View style={[styles.modePill, { backgroundColor: palette.blue.soft }]}>
@@ -350,56 +308,6 @@ function BatchCard({ batch, accent, onJoin }) {
           )}
         </View>
       </View>
-
-      {/* Capacity */}
-      {capacity > 0 ? (
-        <View style={styles.capacityWrap}>
-          <View style={styles.capacityRow}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-              <Users size={12} color={palette.textMuted} strokeWidth={2.2} />
-              <Text style={styles.capacityText}>{enrolled} / {capacity} students</Text>
-            </View>
-            <Text
-              style={[
-                styles.capacityPercent,
-                { color: nearlyFull ? palette.orange.on : palette.textMuted },
-              ]}
-            >
-              {Math.round(fillRatio * 100)}%
-            </Text>
-          </View>
-          <View style={styles.barTrack}>
-            <View
-              style={[
-                styles.barFill,
-                {
-                  width: `${fillRatio * 100}%`,
-                  backgroundColor: nearlyFull ? palette.orange.vivid : accent.vivid,
-                },
-              ]}
-            />
-          </View>
-        </View>
-      ) : null}
-
-      {/* Join action */}
-      <TouchableOpacity
-        onPress={onJoin}
-        activeOpacity={0.85}
-        style={[
-          styles.joinBtn,
-          status === 'Completed' && { backgroundColor: palette.borderSoft },
-        ]}
-        disabled={status === 'Completed'}
-      >
-        <Text style={[
-          styles.joinBtnText,
-          status === 'Completed' && { color: palette.textMuted },
-        ]}>
-          {status === 'Completed' ? 'Ended' : 'Join Batch'}
-        </Text>
-        {status !== 'Completed' && <ChevronRight size={14} color="#fff" strokeWidth={2.6} />}
-      </TouchableOpacity>
     </View>
   );
 }
@@ -409,54 +317,43 @@ function MetaRow({ icon: Icon, label, value }) {
     <View style={styles.metaRow}>
       <Icon size={13} color={palette.textMuted} strokeWidth={2.2} />
       <Text style={styles.metaLabel}>{label}</Text>
-      <Text style={styles.metaValue} numberOfLines={1}>{value}</Text>
+      <Text style={styles.metaValue} numberOfLines={2}>{value}</Text>
     </View>
   );
 }
 
-// ─── Styles ──────────────────────────────────────────────────────────────────
+// ─── Styles ──────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: palette.bg },
   center: { alignItems: 'center', justifyContent: 'center' },
 
-  // Header
-  header: { paddingHorizontal: spacing.xl, paddingTop: spacing.xxl, paddingBottom: spacing.xl },
-  eyebrow: { ...type.caption, color: palette.textMuted },
-  instSelector: { flexDirection: 'row', alignItems: 'center', gap: 4, alignSelf: 'flex-start', marginTop: 2 },
-  instText: { ...type.display, color: palette.text, maxWidth: 260 },
-
-  // Search
-  searchWrap: {
-    flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
-    marginHorizontal: spacing.xl,
+  header: {
+    paddingHorizontal: spacing.xl,
+    paddingTop: spacing.xxl,
+    paddingBottom: spacing.md,
     backgroundColor: palette.surface,
-    borderRadius: radius.lg, paddingHorizontal: spacing.lg,
-    height: 48, ...shadows.card,
+    ...shadows.card,
+    gap: 2,
   },
-  searchInput: { flex: 1, ...type.body, color: palette.text, padding: 0 },
-
-  // Filters
-  filtersWrap: { paddingVertical: spacing.lg },
-  filterPill: {
+  eyebrow: {
+    ...type.micro, color: palette.textMuted,
+    letterSpacing: 0.4, textTransform: 'uppercase', fontWeight: '700',
+  },
+  title: {
+    ...type.h1, color: palette.text, fontSize: 20, marginTop: 2,
+  },
+  summaryChipRow: {
+    flexDirection: 'row', gap: spacing.sm,
+    marginTop: spacing.sm,
+  },
+  summaryChip: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
-    paddingHorizontal: spacing.lg, height: 36,
-    borderRadius: radius.pill,
-    backgroundColor: palette.surface,
+    paddingHorizontal: 10, paddingVertical: 4,
+    borderRadius: 999,
   },
-  filterPillFocused: { backgroundColor: palette.purple.vivid },
-  filterText: { ...type.caption, color: palette.textMuted, fontWeight: '600' },
-  filterTextFocused: { color: '#fff' },
-  filterBadge: {
-    minWidth: 22, height: 20, paddingHorizontal: 6,
-    borderRadius: 10,
-    backgroundColor: palette.borderSoft,
-    alignItems: 'center', justifyContent: 'center',
-  },
-  filterBadgeFocused: { backgroundColor: 'rgba(255,255,255,0.25)' },
-  filterBadgeText: { ...type.micro, color: palette.textMuted },
-  filterBadgeTextFocused: { color: '#fff' },
+  summaryDot: { width: 7, height: 7, borderRadius: 4 },
+  summaryChipText: { fontSize: 11, fontWeight: '800', letterSpacing: 0.3 },
 
-  // Card
   card: {
     backgroundColor: palette.surface,
     borderRadius: radius.lg,
@@ -468,6 +365,7 @@ const styles = StyleSheet.create({
   coursePill: {
     paddingHorizontal: spacing.sm, paddingVertical: 3,
     borderRadius: radius.pill,
+    maxWidth: '90%',
   },
   coursePillText: { ...type.micro, fontWeight: '700' },
   statusBadge: {
@@ -476,7 +374,7 @@ const styles = StyleSheet.create({
     borderRadius: radius.pill,
   },
   statusDot: { width: 6, height: 6, borderRadius: 3 },
-  statusBadgeText: { ...type.micro, fontWeight: '700' },
+  statusBadgeText: { ...type.micro, fontWeight: '800' },
 
   metaList: { marginTop: spacing.md, gap: 6 },
   metaRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
@@ -490,51 +388,26 @@ const styles = StyleSheet.create({
   },
   modePillText: { fontSize: 10, fontWeight: '700' },
 
-  // Capacity
-  capacityWrap: { marginTop: spacing.md },
-  capacityRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
-  capacityText: { ...type.caption, color: palette.textMuted, fontWeight: '600' },
-  capacityPercent: { ...type.caption, fontWeight: '700' },
-  barTrack: {
-    height: 6, borderRadius: 3,
-    backgroundColor: palette.borderSoft,
-    overflow: 'hidden',
-  },
-  barFill: { height: '100%', borderRadius: 3 },
-
-  joinBtn: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
-    backgroundColor: palette.purple.vivid,
-    paddingVertical: spacing.md,
-    borderRadius: radius.md,
-    marginTop: spacing.md,
-  },
-  joinBtnText: { ...type.bodyBold, color: '#fff' },
-
-  // Empty
-  emptyIconWrap: {
-    width: 72, height: 72, borderRadius: 36,
-    backgroundColor: palette.purple.soft,
-    alignItems: 'center', justifyContent: 'center',
-    marginBottom: spacing.lg,
-  },
-  emptyTitle: { ...type.h1, color: palette.text, marginBottom: spacing.sm, textAlign: 'center' },
-  emptyBody: { ...type.body, color: palette.textMuted, textAlign: 'center', maxWidth: 320 },
-  ctaButton: {
-    flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
-    backgroundColor: palette.purple.vivid,
-    paddingHorizontal: spacing.xl, paddingVertical: spacing.md,
-    borderRadius: radius.pill, marginTop: spacing.xl,
-    ...shadows.raised,
-  },
-  ctaText: { ...type.bodyBold, color: '#fff' },
-
-  emptyInline: {
-    flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
-    padding: spacing.lg,
+  emptyCard: {
+    marginTop: spacing.xxl,
+    marginHorizontal: 0,
     backgroundColor: palette.surface,
     borderRadius: radius.lg,
-    borderWidth: 1, borderColor: palette.borderSoft,
+    padding: spacing.xxl,
+    alignItems: 'center', gap: 6,
+    ...shadows.card,
   },
-  emptyInlineText: { ...type.body, color: palette.textMuted, flex: 1 },
+  emptyIconWrap: {
+    width: 60, height: 60, borderRadius: 30,
+    backgroundColor: palette.purple.soft,
+    alignItems: 'center', justifyContent: 'center',
+    marginBottom: spacing.sm,
+  },
+  emptyTitle: {
+    ...type.h2, color: palette.text, fontSize: 16, textAlign: 'center',
+  },
+  emptyBody: {
+    ...type.caption, color: palette.textMuted, textAlign: 'center',
+    maxWidth: 280, lineHeight: 18,
+  },
 });

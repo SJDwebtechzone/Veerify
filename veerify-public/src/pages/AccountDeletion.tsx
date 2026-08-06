@@ -63,7 +63,7 @@ export default function AccountDeletion() {
           <p style={{ marginTop: 12 }}>
             We verify the request by sending a confirmation email to the same address. Once confirmed, we complete the deletion within <strong>3 business days</strong>.
           </p>
-        </Section> */}
+        </Section>  */}
 
         <Section title="2. What is Deleted">
           <p>Immediately anonymised — irrecoverable:</p>

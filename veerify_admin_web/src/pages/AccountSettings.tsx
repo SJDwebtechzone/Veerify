@@ -41,9 +41,11 @@ const ACTION_LABEL: Record<string, string> = {
 function fmtWhen(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
+  // 12-hour clock (Veerify house style). Locked to hour12: true so a
+  // 24-hour browser locale still renders AM/PM per spec.
   return d.toLocaleString('en-IN', {
     day: '2-digit', month: 'short', year: 'numeric',
-    hour: '2-digit', minute: '2-digit',
+    hour: 'numeric', minute: '2-digit', hour12: true,
   });
 }
 

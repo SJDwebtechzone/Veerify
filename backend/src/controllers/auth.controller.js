@@ -659,7 +659,7 @@ exports.changePassword = async (req, res) => {
     const ctx = reqContext(req);
     const when = new Date().toLocaleString('en-IN', {
       day: '2-digit', month: 'short', year: 'numeric',
-      hour: '2-digit', minute: '2-digit',
+      hour: 'numeric', minute: '2-digit', hour12: true,
     });
     sendPasswordChangedNotice({ to: user.email, name: user.name, when })
       .catch(() => { /* logged inside mailer */ });
@@ -902,7 +902,7 @@ exports.verifyEmailChange = async (req, res) => {
 
     const when = new Date().toLocaleString('en-IN', {
       day: '2-digit', month: 'short', year: 'numeric',
-      hour: '2-digit', minute: '2-digit',
+      hour: 'numeric', minute: '2-digit', hour12: true,
     });
     // Notify BOTH addresses per spec.
     sendEmailChangedNotice({

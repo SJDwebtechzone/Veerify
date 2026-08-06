@@ -76,4 +76,70 @@ export function formatBatchTimeRange(start, end) {
   return a || b || '';
 }
 
+// ── Generic 12-hour helpers ─────────────────────────────────────
+//
+// Every place in the app that shows a time-of-day should go through
+// one of the two helpers below so the format stays consistent:
+//
+//   formatTime12h("2026-08-05T14:30:00Z")     → "2:30 PM"
+//   formatTime12h(new Date())                 → "9:07 AM"
+//   formatTime12h("18:30:00")                 → "6:30 PM"
+//   formatTime12h(null / bad)                 → ''
+//
+//   formatDateTime12h("2026-08-05T14:30:00Z") → "05 Aug 2026, 2:30 PM"
+//   formatDateTime12h(new Date())             → "05 Aug 2026, 9:07 AM"
+//
+// Both are hour12: true regardless of the device locale — the spec
+// mandates AM/PM everywhere in the app, so we never let the system's
+// 24-hour preference leak through.
+
+/**
+ * 12-hour time-of-day. Accepts a Date, an ISO string, a Postgres
+ * TIME string, or a raw HH:MM. Empty string on unparseable input so
+ * a broken row can never crash a list.
+ */
+export function formatTime12h(input) {
+  if (input == null || input === '') return '';
+
+  // Date object.
+  if (input instanceof Date) {
+    if (Number.isNaN(input.getTime())) return '';
+    return input.toLocaleTimeString('en-US', {
+      hour: 'numeric', minute: '2-digit', hour12: true,
+    });
+  }
+
+  // HH:MM or HH:MM:SS — Postgres TIME column.
+  const s = String(input).trim();
+  const m = /^(\d{1,2}):(\d{2})(?::\d{2})?$/.exec(s);
+  if (m) return formatBatchTime(s);
+
+  // Fall through: parse as full Date.
+  const d = new Date(s);
+  if (!Number.isNaN(d.getTime())) {
+    return d.toLocaleTimeString('en-US', {
+      hour: 'numeric', minute: '2-digit', hour12: true,
+    });
+  }
+  return '';
+}
+
+/**
+ * Date + 12-hour time in one line. Used across list rows, activity
+ * feeds, notification cards, payment history, etc.
+ */
+export function formatDateTime12h(input, opts = {}) {
+  if (input == null || input === '') return '';
+  const d = input instanceof Date ? input : new Date(input);
+  if (Number.isNaN(d.getTime())) return '';
+  const dateOpts = opts.longMonth
+    ? { day: '2-digit', month: 'long',  year: 'numeric' }
+    : { day: '2-digit', month: 'short', year: 'numeric' };
+  const datePart = d.toLocaleDateString('en-IN', dateOpts);
+  const timePart = d.toLocaleTimeString('en-US', {
+    hour: 'numeric', minute: '2-digit', hour12: true,
+  });
+  return `${datePart}, ${timePart}`;
+}
+
 export default formatBatchTime;

@@ -22,7 +22,7 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, ActivityIndicator,
-  StyleSheet, Linking, TextInput, Image, Alert,
+  StyleSheet, Linking, TextInput, Image, Alert, Modal,
 } from 'react-native';
 import resolveAssetUrl from '../../utils/assetUrl';
 import Avatar from '../../components/Avatar';
@@ -30,6 +30,7 @@ import {
   ArrowLeft, Phone, Mail, Award, TrendingUp, TrendingDown, Minus,
   Calendar, Users, ClipboardList, FileText, Pencil,
   Plane, Clock, X as XIcon, Check, BookOpen, CalendarDays, Star,
+  ChevronDown, ChevronUp,
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
@@ -47,6 +48,37 @@ const BELTS = [
   { key: 'brown',  label: 'Brown',  bg: '#FAEDD5', fg: '#7C2D12', border: '#A16207' },
   { key: 'black',  label: 'Black',  bg: '#1F2937', fg: '#FFFFFF', border: '#0F172A' },
 ];
+
+// Promote-belt dropdown options — MUST stay in sync with the belt
+// category picker on the enrollment form (EnrollmentFormScreen.js
+// BELT_OPTIONS). "Other" from that list is deliberately excluded per
+// the Promote Belt spec — trainers pick from the canonical rank
+// sequence only; freeform belts are for enrolment-time exceptions,
+// not promotion targets.
+const PROMOTE_BELT_OPTIONS = [
+  'White',
+  'Yellow',
+  'Orange',
+  'Green',
+  'Blue',
+  'Blue I',
+  'Blue II',
+  'Gray',
+  'Brown I',
+  'Brown II',
+  'Brown III',
+  'Black',
+];
+
+// Colour swatch for each promote option. Derived by matching the
+// option's colour word against the BELTS palette so the dropdown row
+// carries a real belt-colour dot. "Blue I / Blue II" all inherit
+// blue; "Brown I / II / III" all inherit brown.
+function beltSwatchFor(label) {
+  const first = String(label || '').trim().toLowerCase().split(/\s+/)[0];
+  const hit = BELTS.find((b) => b.key === first);
+  return hit?.border || palette.borderSoft;
+}
 
 // Same alias table the list screen uses — British "grey" → American
 // "gray", "New student" / "None" → no belt, etc. Keeping the mapping
@@ -143,6 +175,46 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
   const [progressByIdx, setProgressByIdx] = useState({});
   const [pickerForIdx, setPickerForIdx] = useState(null);
   const [savingIdx, setSavingIdx] = useState(null);
+
+  // ── Belt Promotion Request ──
+  // Trainer submits a request; institution approves or notifies with
+  // remarks. State surfaces:
+  //   • the LATEST request for this student across ANY status —
+  //     drives the per-lesson badge (Pending / Approved / Rejected)
+  //     and whether the Promote Belt button is enabled.
+  //   • the promote modal (form state).
+  //   • the belt levels catalogue (best-effort, used to enrich the
+  //     dropdown but not required — the dropdown always renders the
+  //     canonical 12-belt list either way).
+  //
+  // Lock rules (per Trainer App spec):
+  //   • Pending  → button DISABLED, badge "Pending Institution
+  //                Approval". Backend also blocks a duplicate
+  //                submit with 409 via the partial unique index
+  //                (uq_belt_promo_requests_open_per_student).
+  //   • Approved → button DISABLED, badge "Approved". Trainer
+  //                cannot resubmit an already-approved promotion.
+  //                A future request for the NEXT belt happens
+  //                naturally once the badge is dismissed by moving
+  //                forward — kept simple: no re-open until the
+  //                admin ships the next lifecycle.
+  //   • Rejected → button ENABLED, badge "Rejected — <remarks>".
+  //                Only rejected promotions can be resubmitted.
+  const [latestPromoRequest, setLatestPromoRequest] = useState(null);
+  const [promoteModalOpen, setPromoteModalOpen] = useState(false);
+  const [promoteBelt, setPromoteBelt] = useState('');           // target belt name (string)
+  const [promoteRemarks, setPromoteRemarks] = useState('');
+  const [promoteSubmitting, setPromoteSubmitting] = useState(false);
+  const [beltLevels, setBeltLevels] = useState([]);
+  const [beltDropdownOpen, setBeltDropdownOpen] = useState(false);
+
+  // Derived — lock the trainer's Promote Belt button while a request
+  // is Pending or Approved. Rejected/declined and no-request unlock
+  // it. The backend enforces the same rule server-side (409 on
+  // duplicate pending); this is UI-side belt + suspenders.
+  const promoLocked = latestPromoRequest
+    && (latestPromoRequest.status === 'pending'
+        || latestPromoRequest.status === 'approved');
 
   const courseId = passedStudent?.course_id || null;
   const courseName = passedStudent?.course_name || null;
@@ -280,6 +352,106 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
     }
   }, [studentId, courseId]);
   useEffect(() => { loadCurriculum(); }, [loadCurriculum]);
+
+  // Load the LATEST promotion request for this student (any status)
+  // + belt levels for the Promote Belt modal. Both are cheap
+  // single-row / small-list reads. The latest is what drives the
+  // per-lesson badge — Pending / Approved / Rejected — and whether
+  // the button is enabled. Also refetches after every submit +
+  // whenever the screen regains focus (see useFocusEffect below), so
+  // the UI reflects the locked state within one round-trip.
+  const loadPromotionState = useCallback(async () => {
+    if (!studentId) return;
+    try {
+      const [mineRes, levelsRes] = await Promise.all([
+        apiClient.get('/belt-promotion-requests/mine').catch(() => ({ data: {} })),
+        apiClient.get('/belts/levels').catch(() => ({ data: {} })),
+      ]);
+      const requests = mineRes.data?.requests || [];
+      // Sort by created_at DESC (with id as tie-breaker) so the
+      // freshest request wins even if the server changes ordering.
+      const forThis = requests
+        .filter((r) => r.student_id === studentId)
+        .sort((a, b) => {
+          const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
+          const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
+          if (tb !== ta) return tb - ta;
+          return (b.id || 0) - (a.id || 0);
+        });
+      setLatestPromoRequest(forThis[0] || null);
+      setBeltLevels(levelsRes.data?.levels || levelsRes.data?.beltLevels || []);
+    } catch (err) {
+      // Fail-open — button stays enabled; a duplicate submit gets a
+      // clean 409 from the backend.
+    }
+  }, [studentId]);
+  useEffect(() => { loadPromotionState(); }, [loadPromotionState]);
+  // Also refresh whenever the screen regains focus. The trainer may
+  // have popped back after an institution admin approved/rejected
+  // the request (push notification lands in the meantime), so the
+  // badge state needs to catch up without a manual pull-to-refresh.
+  useFocusEffect(useCallback(() => { loadPromotionState(); }, [loadPromotionState]));
+
+  const submitPromotionRequest = async () => {
+    if (!promoteBelt.trim()) {
+      Alert.alert('Pick a belt', 'Please select the belt you want to promote to.');
+      return;
+    }
+    confirm({
+      title:       'Submit for institution approval?',
+      message:     `Are you sure you want to promote ${passedStudent?.student_name || 'this student'} to ${promoteBelt}? The institution admin will review and issue the certificate.`,
+      variant:     'info',
+      confirmText: 'Yes, submit',
+      cancelText:  'Cancel',
+      onConfirm: async () => {
+        try {
+          setPromoteSubmitting(true);
+          const res = await apiClient.post('/belt-promotion-requests', {
+            student_id:     studentId,
+            requested_belt: promoteBelt.trim(),
+            remarks:        promoteRemarks.trim() || null,
+          });
+          // Optimistic update — flip local state to 'pending' so the
+          // per-lesson badges lock instantly, then re-fetch to
+          // pull the server-side row (with its real id + timestamps).
+          setLatestPromoRequest(res.data?.request || {
+            status: 'pending',
+            requested_belt: promoteBelt.trim(),
+            student_id: studentId,
+          });
+          loadPromotionState();
+          setPromoteModalOpen(false);
+          setPromoteBelt('');
+          setPromoteRemarks('');
+          setBeltDropdownOpen(false);
+          confirm({
+            title:       'Request submitted',
+            message:     'The institution has been notified and will review your request.',
+            variant:     'success',
+            confirmText: 'OK',
+            hideCancel:  true,
+          });
+        } catch (err) {
+          const status = err?.response?.status;
+          const msg = err?.response?.data?.message || 'Please try again.';
+          if (status === 409) {
+            // Server has an existing pending row we didn't see — sync
+            // state and inform the user.
+            loadPromotionState();
+          }
+          confirm({
+            title:       status === 409 ? 'Already pending' : 'Could not submit',
+            message:     msg,
+            variant:     'warning',
+            confirmText: 'OK',
+            hideCancel:  true,
+          });
+        } finally {
+          setPromoteSubmitting(false);
+        }
+      },
+    });
+  };
 
   // Toggle a lesson. If already completed → DELETE. Otherwise → upsert
   // with the picked date (or today as the fallback when no date picker
@@ -818,6 +990,70 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
                       <Text style={styles.lessonDateBtnText}>Pick date</Text>
                     </TouchableOpacity>
 
+                    {/* ── Promote Belt (per-lesson) ──
+                        One badge/button per curriculum item. State
+                        derives from the LATEST promotion request for
+                        this student:
+                          • Pending  → "Pending Approval" pill
+                                       (amber, disabled)
+                          • Approved → "Approved" pill
+                                       (green,  disabled)
+                          • Rejected → "Rejected" pill
+                                       (red)   button ENABLED so
+                                       the trainer can resubmit
+                                       after seeing the institution's
+                                       remarks.
+                          • Nothing  → plain "Promote Belt" purple
+                                       pill (enabled)
+                        Backend enforces the same lock via the
+                        partial unique index on student_id — a
+                        duplicate submit while pending returns 409. */}
+                    {(() => {
+                      const status = latestPromoRequest?.status;
+                      if (status === 'pending') {
+                        return (
+                          <View style={[styles.lessonPromoteBtn, styles.lessonPromoteBtnPending]}>
+                            <Clock size={12} color={palette.orange.on} strokeWidth={2.4} />
+                            <Text style={[styles.lessonPromoteBtnText, { color: palette.orange.on }]}>
+                              Pending Approval
+                            </Text>
+                          </View>
+                        );
+                      }
+                      if (status === 'approved') {
+                        return (
+                          <View style={[styles.lessonPromoteBtn, styles.lessonPromoteBtnApproved]}>
+                            <Check size={12} color={palette.green.on} strokeWidth={2.4} />
+                            <Text style={[styles.lessonPromoteBtnText, { color: palette.green.on }]}>
+                              Approved
+                            </Text>
+                          </View>
+                        );
+                      }
+                      // Declined / rejected OR no request → interactive.
+                      const wasRejected = status === 'declined';
+                      return (
+                        <TouchableOpacity
+                          style={[
+                            styles.lessonPromoteBtn,
+                            wasRejected && styles.lessonPromoteBtnRejected,
+                          ]}
+                          onPress={() => {
+                            setPromoteBelt('');
+                            setPromoteRemarks('');
+                            setBeltDropdownOpen(false);
+                            setPromoteModalOpen(true);
+                          }}
+                          activeOpacity={0.85}
+                        >
+                          <Award size={12} color="#fff" strokeWidth={2.4} />
+                          <Text style={styles.lessonPromoteBtnText}>
+                            {wasRejected ? 'Resubmit' : 'Promote Belt'}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })()}
+
                     {/* Inline date picker — last 30 days as quick-pick
                         chips. Keeps things native-feeling without
                         pulling in a DateTimePicker dependency. */}
@@ -859,6 +1095,190 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
             </View>
           )}
         </Card>
+
+        {/* Promotion status card — sits below Curriculum progress
+            and summarises the LATEST request:
+              • Pending  → yellow: awaiting institution review
+              • Approved → green : belt issued
+              • Rejected → red  : shows the institution's remarks so
+                           the trainer knows what to revise before
+                           tapping Resubmit on any lesson row.
+            No card renders when there's no request on file. */}
+        {latestPromoRequest ? (
+          <View
+            style={[
+              styles.promotePendingCard,
+              latestPromoRequest.status === 'approved' && styles.promoteApprovedCard,
+              latestPromoRequest.status === 'declined' && styles.promoteRejectedCard,
+            ]}
+          >
+            {latestPromoRequest.status === 'pending' ? (
+              <Clock size={14} color={palette.orange.on} strokeWidth={2.4} />
+            ) : latestPromoRequest.status === 'approved' ? (
+              <Check size={14} color={palette.green.vivid} strokeWidth={2.6} />
+            ) : (
+              <XIcon size={14} color={palette.rose.vivid} strokeWidth={2.6} />
+            )}
+            <View style={{ flex: 1 }}>
+              <Text
+                style={[
+                  styles.promotePendingCardText,
+                  latestPromoRequest.status === 'pending' && { color: palette.orange.on },
+                  latestPromoRequest.status === 'approved' && { color: palette.green.on },
+                  latestPromoRequest.status === 'declined' && { color: palette.rose.on },
+                  { fontWeight: '800' },
+                ]}
+              >
+                {latestPromoRequest.status === 'pending'
+                  ? 'Pending Institution Approval'
+                  : latestPromoRequest.status === 'approved'
+                    ? 'Approved by Institution'
+                    : 'Returned by Institution'}
+              </Text>
+              <Text style={styles.promotePendingCardText}>
+                {latestPromoRequest.status === 'pending'
+                  ? `Requested ${latestPromoRequest.requested_belt}${latestPromoRequest.current_belt ? ` (from ${latestPromoRequest.current_belt})` : ''}. The admin will review and issue the certificate.`
+                  : latestPromoRequest.status === 'approved'
+                    ? `Student promoted to ${latestPromoRequest.requested_belt}. Certificate delivered.`
+                    : `Requested ${latestPromoRequest.requested_belt}. ${latestPromoRequest.institution_remarks || 'The institution asked for changes before approving.'} You can revise and tap Resubmit below.`}
+              </Text>
+            </View>
+          </View>
+        ) : null}
+
+        {/* Promote Belt modal — read-only current belt + dropdown
+            promote-to (institution's belt sequence) + remarks. */}
+        <Modal
+          visible={promoteModalOpen}
+          transparent
+          animationType="fade"
+          onRequestClose={() => !promoteSubmitting && setPromoteModalOpen(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalCard}>
+              <View style={styles.modalHead}>
+                <Award size={18} color={palette.purple.vivid} strokeWidth={2.4} />
+                <Text style={styles.modalTitle}>Promote Belt</Text>
+                <TouchableOpacity
+                  onPress={() => !promoteSubmitting && setPromoteModalOpen(false)}
+                  style={styles.modalCloseBtn}
+                  hitSlop={8}
+                >
+                  <XIcon size={16} color={palette.textMuted} strokeWidth={2.4} />
+                </TouchableOpacity>
+              </View>
+
+              {/* Current belt — read-only. */}
+              <Text style={styles.modalLabel}>Current Belt</Text>
+              <View style={styles.modalRoField}>
+                <Text style={styles.modalRoText}>
+                  {passedStudent?.belt_category || 'Not set'}
+                </Text>
+              </View>
+
+              {/* Promote to — dropdown with ALL belt colors. We show
+                  the full curated palette (White → Black) by default
+                  so a fresh institution without a custom belt_levels
+                  sequence still lets the trainer pick. When the
+                  institution HAS defined levels via /belts/levels
+                  they merge in first (in their configured order),
+                  followed by any curated colors the institution
+                  didn't customise. Selection is by string label so
+                  the backend request carries a plain belt name. */}
+              <Text style={[styles.modalLabel, { marginTop: spacing.md }]}>
+                Promote Belt
+              </Text>
+              {/* Options list matches the enrollment form's belt
+                  category picker (BELT_OPTIONS) minus 'Other', per
+                  spec. Colour swatch is derived from the label's
+                  first colour word so the dropdown reads as a belt
+                  palette even when the rank carries a suffix like
+                  "Blue II" or "Brown III". */}
+              <View>
+                <TouchableOpacity
+                  style={styles.modalField}
+                  onPress={() => setBeltDropdownOpen((v) => !v)}
+                  activeOpacity={0.85}
+                >
+                  <Text
+                    style={[
+                      styles.modalFieldText,
+                      !promoteBelt && { color: palette.textLight },
+                    ]}
+                  >
+                    {promoteBelt || 'Select a belt'}
+                  </Text>
+                  {beltDropdownOpen
+                    ? <ChevronUp   size={14} color={palette.textMuted} strokeWidth={2.4} />
+                    : <ChevronDown size={14} color={palette.textMuted} strokeWidth={2.4} />}
+                </TouchableOpacity>
+                {beltDropdownOpen ? (
+                  <ScrollView style={styles.modalMenu} nestedScrollEnabled>
+                    {PROMOTE_BELT_OPTIONS.map((label) => {
+                      const isSel = promoteBelt === label;
+                      return (
+                        <TouchableOpacity
+                          key={label}
+                          style={[styles.modalMenuItem, isSel && styles.modalMenuItemSel]}
+                          onPress={() => {
+                            setPromoteBelt(label);
+                            setBeltDropdownOpen(false);
+                          }}
+                          activeOpacity={0.85}
+                        >
+                          <View
+                            style={[
+                              styles.modalBeltSwatch,
+                              { backgroundColor: beltSwatchFor(label) },
+                            ]}
+                          />
+                          <Text style={styles.modalMenuItemText}>{label}</Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </ScrollView>
+                ) : null}
+              </View>
+
+              <Text style={[styles.modalLabel, { marginTop: spacing.md }]}>
+                Remarks
+              </Text>
+              <TextInput
+                value={promoteRemarks}
+                onChangeText={setPromoteRemarks}
+                placeholder="Add belt-test remarks (technique, consistency, sparring...)."
+                placeholderTextColor={palette.textLight}
+                multiline
+                style={[styles.modalTextInput, { minHeight: 90, textAlignVertical: 'top' }]}
+              />
+
+              <View style={styles.modalFooter}>
+                <TouchableOpacity
+                  style={styles.modalCancelBtn}
+                  onPress={() => !promoteSubmitting && setPromoteModalOpen(false)}
+                  activeOpacity={0.85}
+                >
+                  <Text style={styles.modalCancelText}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.modalSubmitBtn,
+                    (!promoteBelt.trim() || promoteSubmitting) && { opacity: 0.6 },
+                  ]}
+                  onPress={submitPromotionRequest}
+                  disabled={!promoteBelt.trim() || promoteSubmitting}
+                  activeOpacity={0.85}
+                >
+                  {promoteSubmitting ? (
+                    <ActivityIndicator color="#fff" size="small" />
+                  ) : (
+                    <Text style={styles.modalSubmitText}>Submit</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
 
         {/* Notes */}
         <Card
@@ -972,6 +1392,146 @@ function LegendItem({ label, value, status }) {
 // ─── Styles ────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: palette.bg },
+
+  // ── Promote Belt (per-lesson pill + shared modal) ───────────
+  // The per-lesson button lives INSIDE the Curriculum progress card,
+  // one per lesson row (see the TouchableOpacity next to Pick date).
+  // It's a compact solid-purple pill that flips to a muted "Pending"
+  // state when any promotion request for this student is open.
+  lessonPromoteBtn: {
+    flexDirection: 'row', alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8, paddingVertical: 5,
+    backgroundColor: palette.purple.vivid,
+    borderRadius: 999,
+    marginTop: 2,
+  },
+  lessonPromoteBtnDisabled: {
+    backgroundColor: palette.borderSoft,
+  },
+  lessonPromoteBtnPending: {
+    backgroundColor: palette.orange.soft,
+    borderWidth: 1, borderColor: palette.orange.soft,
+  },
+  lessonPromoteBtnApproved: {
+    backgroundColor: palette.green.soft,
+    borderWidth: 1, borderColor: palette.green.soft,
+  },
+  lessonPromoteBtnRejected: {
+    backgroundColor: palette.rose.vivid,
+  },
+  lessonPromoteBtnText: {
+    ...type.micro, color: '#fff', fontWeight: '800',
+  },
+  // Shown below the Curriculum card only when a request is open —
+  // consolidates the "Awaiting institution approval" state so the
+  // trainer sees WHY every per-lesson button flipped to Pending.
+  promotePendingCard: {
+    marginHorizontal: spacing.lg,
+    marginBottom: spacing.md,
+    padding: spacing.md,
+    borderRadius: radius.md,
+    // Default (pending) tone — amber; the two variants below swap
+    // it to green (approved) or red (rejected).
+    backgroundColor: palette.orange.soft,
+    borderWidth: 1, borderColor: palette.orange.soft,
+    flexDirection: 'row', alignItems: 'flex-start',
+    gap: spacing.sm,
+  },
+  promoteApprovedCard: {
+    backgroundColor: palette.green.soft,
+    borderColor: palette.green.soft,
+  },
+  promoteRejectedCard: {
+    backgroundColor: palette.rose.soft,
+    borderColor: palette.rose.soft,
+  },
+  promotePendingCardText: {
+    ...type.caption, color: palette.textMuted, lineHeight: 18,
+  },
+  // Belt colour swatch shown next to each dropdown option so the
+  // trainer picks by colour, not just label.
+  modalBeltSwatch: {
+    width: 14, height: 14, borderRadius: 3,
+    borderWidth: 1, borderColor: palette.borderSoft,
+    marginRight: 10,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center', alignItems: 'center',
+    padding: spacing.lg,
+  },
+  modalCard: {
+    width: '100%', maxWidth: 440,
+    backgroundColor: palette.surface,
+    borderRadius: radius.xl,
+    padding: spacing.lg,
+    ...shadows.raised,
+  },
+  modalHead: {
+    flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
+    marginBottom: spacing.md,
+    paddingBottom: spacing.sm,
+    borderBottomWidth: 1, borderBottomColor: palette.borderSoft,
+  },
+  modalTitle: { flex: 1, fontSize: 16, fontWeight: '800', color: palette.text },
+  modalCloseBtn: { padding: 4 },
+  modalLabel: {
+    fontSize: 11, fontWeight: '800', letterSpacing: 0.4,
+    color: palette.textMuted, textTransform: 'uppercase',
+    marginBottom: 6,
+  },
+  modalRoField: {
+    paddingHorizontal: 12, paddingVertical: 10,
+    borderRadius: radius.md,
+    backgroundColor: palette.bg,
+    borderWidth: 1, borderColor: palette.borderSoft,
+  },
+  modalRoText: { fontSize: 13, color: palette.text, fontWeight: '600' },
+  modalField: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: 12, paddingVertical: 10,
+    borderRadius: radius.md,
+    backgroundColor: palette.surface,
+    borderWidth: 1, borderColor: palette.borderSoft,
+    gap: 6,
+  },
+  modalFieldText: { flex: 1, fontSize: 13, color: palette.text, fontWeight: '600' },
+  modalMenu: {
+    marginTop: 4,
+    borderRadius: radius.md,
+    borderWidth: 1, borderColor: palette.borderSoft,
+    backgroundColor: palette.surface,
+    maxHeight: 220,
+    overflow: 'hidden',
+  },
+  modalMenuItem: {
+    paddingHorizontal: 12, paddingVertical: 10,
+    flexDirection: 'row', alignItems: 'center',
+  },
+  modalMenuItemSel: { backgroundColor: palette.purple.soft },
+  modalMenuItemText: { fontSize: 13, color: palette.text, fontWeight: '600' },
+  modalTextInput: {
+    paddingHorizontal: 12, paddingVertical: 10,
+    borderRadius: radius.md,
+    backgroundColor: palette.surface,
+    borderWidth: 1, borderColor: palette.borderSoft,
+    fontSize: 13, color: palette.text,
+  },
+  modalFooter: {
+    flexDirection: 'row', justifyContent: 'flex-end', gap: spacing.sm,
+    marginTop: spacing.lg,
+  },
+  modalCancelBtn: { paddingHorizontal: 14, paddingVertical: 10, borderRadius: radius.md },
+  modalCancelText: { fontSize: 13, fontWeight: '700', color: palette.textMuted },
+  modalSubmitBtn: {
+    paddingHorizontal: 18, paddingVertical: 10,
+    borderRadius: radius.md,
+    backgroundColor: palette.purple.vivid,
+    minWidth: 96, alignItems: 'center',
+  },
+  modalSubmitText: { color: '#fff', fontWeight: '800', fontSize: 13 },
 
   // Hero — normal padding, pills no longer overlap so the red card
   // ends cleanly and every pill icon stays fully visible.

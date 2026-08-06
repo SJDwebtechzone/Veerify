@@ -60,6 +60,7 @@ const BELT_OPTIONS = [
   'Yellow',
   'Orange',
   'Green',
+  'Blue',
   'Blue I',
   'Blue II',
   'Gray',

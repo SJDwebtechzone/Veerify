@@ -35,8 +35,8 @@ const STAR_ON     = '#F59E0B';
 const STAR_OFF    = '#E5E7EB';
 
 const BELT_LEVELS = [
-  'White Belt', 'Yellow Belt', 'Orange Belt', 'Green Belt',
-  'Blue Belt', 'Brown Belt', 'Black Belt',
+  'White', 'Yellow', 'Orange', 'Green',
+  'Blue', 'Blue I', 'Blue II', 'Gray', 'Brown I', 'Brown II', 'Brown III', 'Black',
 ];
 
 const RATING_FIELDS = [

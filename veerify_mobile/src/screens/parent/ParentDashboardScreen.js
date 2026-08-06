@@ -31,6 +31,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useChild } from '../../context/ChildContext';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 import { useBellScrollHandler } from '../../components/bellScrollBus';
+import { formatBatchTime } from '../../utils/formatTime';
 
 const BELTS = [
   { key: 'white',  label: 'White',  bg: '#FFFFFF', fg: '#111827', border: '#E5E7EB' },
@@ -302,8 +303,8 @@ export default function ParentDashboardScreen({ navigation }) {
                 <View style={styles.classTime}>
                   <Clock size={11} color="#fff" strokeWidth={2.4} />
                   <Text style={styles.classTimeText}>
-                    {todayClass.start_time?.slice(0, 5) || '—'}
-                    {todayClass.end_time ? ` – ${todayClass.end_time.slice(0, 5)}` : ''}
+                    {formatBatchTime(todayClass.start_time) || '—'}
+                    {todayClass.end_time ? ` – ${formatBatchTime(todayClass.end_time)}` : ''}
                   </Text>
                 </View>
                 <Text style={styles.classBatch} numberOfLines={2}>{todayClass.batch_name || 'Class'}</Text>

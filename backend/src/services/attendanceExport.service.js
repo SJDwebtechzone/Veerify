@@ -23,7 +23,7 @@ function fmtDateTimeDisplay(d = new Date()) {
   try {
     return d.toLocaleString('en-IN', {
       day: '2-digit', month: 'short', year: 'numeric',
-      hour: '2-digit', minute: '2-digit', hour12: true,
+      hour: 'numeric', minute: '2-digit', hour12: true,
     });
   } catch {
     return d.toISOString();
