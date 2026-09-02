@@ -14,10 +14,10 @@
 //   POST /api/trainer-leave-requests/:id/approve
 //   POST /api/trainer-leave-requests/:id/reject
 
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useMemo, useState } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, ActivityIndicator,
-  StyleSheet, RefreshControl, Alert, Image,
+  StyleSheet, RefreshControl, Alert,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import {
@@ -27,6 +27,50 @@ import {
 
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
+// Shared circular avatar — enforces square container, overflow
+// hidden, resizeMode=cover, and centered placement so the face stays
+// visible instead of being shifted / clipped by a raw <Image>.
+import Avatar from '../../components/Avatar';
+// Institution Home visual system — ambient blue wash + glass
+// cards + navy accents. Reused verbatim so this screen belongs to
+// the same design language as the rest of the institution UI.
+import InstitutionScreenBackground, {
+  INSTITUTION_BG_BASE,
+} from '../../components/InstitutionScreenBackground';
+import { useTheme } from '../../theme/ThemeContext';
+
+// ── Institution-Home glass tokens ─────────────────────────────
+const GLASS_FILL         = 'rgba(255,255,255,0.72)';
+const GLASS_FILL_STRONG  = 'rgba(255,255,255,0.88)';
+const GLASS_BORDER_LIGHT = 'rgba(255,255,255,0.55)';
+const GLASS_HIGHLIGHT    = 'rgba(255,255,255,0.9)';
+const GLASS_SHADOW       = '#1E40AF';
+const BRAND_DARK_BLUE    = '#1E3A8A';
+const BRAND_ACCENT_SOFT  = 'rgba(30,58,138,0.10)';
+const HEADER_NAVY        = '#0F172A';
+
+// Local context so nested sub-components pick up dark-mode
+// overrides without prop-drilling.
+const TrainerLeavesCtx = createContext({ isDark: false, dark: {} });
+
+function buildDarkOverrides(pal) {
+  return StyleSheet.create({
+    screen:        { backgroundColor: pal.bg },
+    header:        { backgroundColor: pal.surface, borderBottomColor: pal.border },
+    headerTitle:   { color: pal.text },
+    headerSubtitle:{ color: pal.textMuted },
+    iconBtn:       { backgroundColor: pal.border },
+    card:          { backgroundColor: pal.surface, borderColor: pal.border },
+    countersCard:  { backgroundColor: pal.surface, borderColor: pal.border },
+    countersLabel: { color: pal.textMuted },
+    filterChip:    { backgroundColor: pal.surface, borderColor: pal.border },
+    filterChipText:{ color: pal.text },
+    listCard:      { backgroundColor: pal.surface, borderColor: pal.border },
+    trainerName:   { color: pal.text },
+    label:         { color: pal.textMuted },
+    value:         { color: pal.text },
+  });
+}
 
 const STATUS_META = {
   pending:  { label: 'Pending',  color: palette.orange.vivid, bg: palette.orange.soft, icon: Clock },
@@ -127,21 +171,31 @@ export default function AdminTrainerLeavesScreen({ navigation }) {
     );
   };
 
+  // Dark-mode overrides pulled from the shared ThemeContext.
+  // Institution Home's ambient background is skipped in dark mode.
+  const { mode, palette: themePalette } = useTheme();
+  const isDark = mode === 'dark';
+  const dark   = useMemo(() => (isDark ? buildDarkOverrides(themePalette) : {}), [isDark, themePalette]);
+
   return (
-    <View style={styles.screen}>
+    <TrainerLeavesCtx.Provider value={{ isDark, dark }}>
+    <View style={[styles.screen, isDark && dark.screen]}>
+      {/* Institution Home ambient wash — sits behind all content. */}
+      {!isDark ? <InstitutionScreenBackground layer /> : null}
+
       {/* Header */}
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn} activeOpacity={0.7}>
-          <ArrowLeft size={20} color={palette.dark} />
+      <View style={[styles.header, isDark && dark.header]}>
+        <TouchableOpacity onPress={() => navigation.goBack()} style={[styles.backBtn, isDark && dark.iconBtn]} activeOpacity={0.7}>
+          <ArrowLeft size={20} color={isDark ? themePalette.text : HEADER_NAVY} />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
-          <Text style={styles.headerTitle}>Trainer Leaves</Text>
-          <Text style={styles.headerSubtitle}>
+          <Text style={[styles.headerTitle, isDark && dark.headerTitle]}>Trainer Leaves</Text>
+          <Text style={[styles.headerSubtitle, isDark && dark.headerSubtitle]}>
             {counts.total} total · {counts.pending} pending
           </Text>
         </View>
-        <View style={[styles.headerIcon, { backgroundColor: palette.purple.soft }]}>
-          <ClipboardList size={18} color={palette.purple.vivid} />
+        <View style={[styles.headerIcon, { backgroundColor: BRAND_ACCENT_SOFT }]}>
+          <ClipboardList size={18} color={BRAND_DARK_BLUE} />
         </View>
       </View>
 
@@ -211,6 +265,7 @@ export default function AdminTrainerLeavesScreen({ navigation }) {
         <View style={{ height: 30 }} />
       </ScrollView>
     </View>
+    </TrainerLeavesCtx.Provider>
   );
 }
 
@@ -233,13 +288,12 @@ function LeaveCard({ item, busy, onApprove, onReject }) {
     <View style={styles.card}>
       {/* Trainer row */}
       <View style={styles.cardTop}>
-        {photoUrl ? (
-          <Image source={{ uri: photoUrl }} style={styles.avatar} />
-        ) : (
-          <View style={[styles.avatar, styles.avatarFallback]}>
-            <User size={18} color={palette.textLight} />
-          </View>
-        )}
+        <Avatar
+          uri={photoUrl}
+          name={item.trainer_name}
+          size={38}
+          tone="slate"
+        />
         <View style={{ flex: 1 }}>
           <Text style={styles.trainerName}>{item.trainer_name || 'Trainer'}</Text>
           {item.trainer_skills ? (
@@ -321,28 +375,37 @@ function LeaveCard({ item, busy, onApprove, onReject }) {
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: palette.bg },
+  // Institution Home ambient page base — the wash SVG paints on top.
+  screen: { flex: 1, backgroundColor: INSTITUTION_BG_BASE },
+  // Header — glass slab with navy title and a soft blue lift shadow.
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingTop: 48,
     paddingHorizontal: spacing.xl,
     paddingBottom: spacing.lg,
-    backgroundColor: palette.surface,
+    backgroundColor: GLASS_FILL_STRONG,
     borderBottomWidth: 1,
-    borderBottomColor: palette.borderSoft,
+    borderBottomColor: GLASS_BORDER_LIGHT,
     gap: 12,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
   },
   backBtn: {
     width: 36, height: 36, borderRadius: 18,
     alignItems: 'center', justifyContent: 'center',
-    backgroundColor: palette.surfaceAlt,
+    backgroundColor: BRAND_ACCENT_SOFT,
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
   },
-  headerTitle: { fontSize: 18, fontWeight: '700', color: palette.dark },
-  headerSubtitle: { fontSize: 12, color: palette.textLight, marginTop: 1 },
+  headerTitle: { fontSize: 18, fontWeight: '800', color: HEADER_NAVY, letterSpacing: 0.2 },
+  headerSubtitle: { fontSize: 12, color: palette.textLight, marginTop: 1, fontWeight: '600' },
   headerIcon: {
     width: 36, height: 36, borderRadius: 18,
     alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
   },
 
   countsRow: {
@@ -388,12 +451,20 @@ const styles = StyleSheet.create({
   },
   emptyTitle: { fontSize: 14, fontWeight: '700', color: palette.dark, marginTop: 4 },
 
+  // Leave card — translucent glass fill + light glass border +
+  // soft blue lift shadow so each card reads as a glass panel on
+  // the Institution Home ambient wash.
   card: {
-    backgroundColor: palette.surface,
-    borderRadius: radius.lg,
+    backgroundColor: GLASS_FILL_STRONG,
+    borderRadius: 16,
     padding: 14,
     marginBottom: 12,
-    ...shadows.soft,
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
   },
   cardTop: {
     flexDirection: 'row',

@@ -64,6 +64,11 @@ interface NotificationsContextValue {
   recentPending: RecentPending[];
   inbox: InboxItem[];
   unreadInbox: number;
+  // Intra-Level event approval queue length. Powered by
+  // /api/intra-events/pending-count. Populated on every poll so the
+  // sidebar badge, the "Event Approvals" tab-header, and the bell
+  // count stay in sync with the DB without extra plumbing.
+  intraPendingCount: number;
   refresh: () => Promise<void>;
   markInboxRead: (id: number) => Promise<void>;
   markAllInboxRead: () => Promise<void>;
@@ -86,6 +91,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   const [counts, setCounts] = useState<OnboardingCounts>(EMPTY);
   const [recentPending, setRecentPending] = useState<RecentPending[]>([]);
   const [inbox, setInbox] = useState<InboxItem[]>([]);
+  const [intraPendingCount, setIntraPendingCount] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -105,13 +111,18 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       // The inbox is what carries the "Institution profile updated" ping we
       // fire from the backend when an admin edits their profile. Catching
       // errors on the inbox call so a 401/500 doesn't wipe out the counts.
-      const [countsRes, inboxRes] = await Promise.all([
+      const [countsRes, inboxRes, intraRes] = await Promise.all([
         apiClient.get('/onboarding/counts'),
         apiClient.get('/notifications?limit=50').catch(() => ({ data: { notifications: [] } })),
+        // Intra-Level event approval queue length. Non-super-admin
+        // roles get a 403 here — we swallow so the rest of the
+        // context still hydrates cleanly.
+        apiClient.get('/intra-events/pending-count').catch(() => ({ data: { total: 0 } })),
       ]);
       setCounts({ ...EMPTY, ...(countsRes.data.counts || {}) });
       setRecentPending(countsRes.data.recent_pending || []);
       setInbox(inboxRes.data.notifications || []);
+      setIntraPendingCount(intraRes.data?.total || 0);
     } catch (err: any) {
       setError(err.response?.data?.message || 'Failed to load notifications');
     } finally {
@@ -147,6 +158,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       setCounts(EMPTY);
       setRecentPending([]);
       setInbox([]);
+      setIntraPendingCount(0);
       return;
     }
     // Fetch immediately on auth, then every POLL_INTERVAL_MS.
@@ -168,6 +180,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       value={{
         counts, recentPending,
         inbox, unreadInbox,
+        intraPendingCount,
         markInboxRead, markAllInboxRead,
         refresh, loading, error,
       }}

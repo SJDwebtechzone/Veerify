@@ -119,7 +119,50 @@ async function registerTokenWithBackend(token, meta = {}) {
 // Called from AuthContext right after login. Requests permission,
 // pulls the FCM token, ships it to the backend, and subscribes to
 // onTokenRefresh so Firebase-driven rotations land automatically.
-export async function requestPermissionAndRegister() {a}
+//
+// Fail-open at every step: a missing native module, a denied
+// permission, or a backend hiccup returns cleanly without ever
+// throwing back to the caller — the auth flow keeps working and
+// the in-app notification bell (which doesn't need FCM) is
+// unaffected.
+export async function requestPermissionAndRegister() {
+  try {
+    const m = getMessaging();
+    if (!m) return { ok: false, skipped: 'firebase-native-module-missing' };
+
+    const granted = await ensurePermission();
+    if (!granted) return { ok: false, skipped: 'permission-denied' };
+
+    let token = null;
+    try { token = await m().getToken(); }
+    catch (err) {
+      console.warn('[fcm] getToken failed:', err?.message);
+      return { ok: false, skipped: 'get-token-failed' };
+    }
+    if (!token) return { ok: false, skipped: 'no-token' };
+
+    await registerTokenWithBackend(token);
+
+    // Subscribe to Firebase-driven token rotations so a refreshed
+    // token lands on the backend automatically. Guarded against
+    // duplicate subscriptions across hot-reload / re-login.
+    try {
+      if (typeof unsubscribeTokenRefresh === 'function') {
+        try { unsubscribeTokenRefresh(); } catch {}
+      }
+      unsubscribeTokenRefresh = m().onTokenRefresh((next) => {
+        registerTokenWithBackend(next).catch(() => {});
+      });
+    } catch (err) {
+      console.warn('[fcm] onTokenRefresh subscribe failed:', err?.message);
+    }
+
+    return { ok: true };
+  } catch (err) {
+    console.warn('[fcm] requestPermissionAndRegister threw:', err?.message);
+    return { ok: false, skipped: 'threw' };
+  }
+}
 
 // Reset the token registration + logout ex-user's push subscription
 // so the next login owner starts fresh.

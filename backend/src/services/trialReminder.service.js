@@ -35,6 +35,7 @@
 const pool = require('../config/db');
 const { createPaymentLink } = require('../utils/razorpay');
 const { sendTrialEndingSoonEmail } = require('../utils/mailer');
+const { insertNotification } = require('../controllers/notification.controller');
 
 // One hour. QA can shorten via env var. We deliberately don't allow
 // less than 5 seconds — anything shorter is almost certainly a typo
@@ -52,11 +53,20 @@ let timer = null;
 let running = false;
 
 async function findCandidates() {
+  // Candidates are institutions that:
+  //   • are approved,
+  //   • haven't paid yet,
+  //   • have a trial window with <= REMIND_BEFORE_DAYS days left,
+  //   • AND either have never been reminded, or were last reminded
+  //     >= 20 hours ago (so daily reminders can go out — the 20 h
+  //     window avoids a race with clock drift when the operator
+  //     restarts the process mid-day).
   const r = await pool.query(
     `SELECT i.id, i.name, i.owner_user_id, i.plan_id,
             i.trial_starts_at, i.trial_ends_at, i.grace_ends_at,
             i.payment_link_id, i.payment_link_url,
             i.payment_amount,
+            i.trial_reminder_sent_at,
             u.email AS owner_email, u.name AS owner_name, u.phone AS owner_phone,
             sp.name             AS plan_name,
             sp.price            AS plan_price,
@@ -68,8 +78,11 @@ async function findCandidates() {
       WHERE i.onboarding_status = 'approved'
         AND i.paid_at IS NULL
         AND i.trial_ends_at IS NOT NULL
-        AND i.trial_reminder_sent_at IS NULL
         AND i.trial_ends_at <= NOW() + ($1 || ' days')::interval
+        AND (
+          i.trial_reminder_sent_at IS NULL
+          OR i.trial_reminder_sent_at <= NOW() - INTERVAL '20 hours'
+        )
       ORDER BY i.trial_ends_at ASC`,
     [REMIND_BEFORE_DAYS],
   );
@@ -162,8 +175,33 @@ async function processOne(row) {
     console.warn(`[trialReminder] email send failed for institution=${row.id}: ${mail.error}`);
     return { ok: false, error: mail.error };
   }
-  // Idempotency stamp — happens ONLY after a successful mail send so
-  // a transient SMTP hiccup lets the next tick retry cleanly.
+  // In-app notification alongside the email so the admin sees a
+  // bell entry when they open the app. Best-effort — a
+  // notification blip never blocks the idempotency stamp.
+  try {
+    await insertNotification({
+      user_id:        row.owner_user_id,
+      institution_id: row.id,
+      category:       'system',
+      title:          daysLeft <= 0
+        ? 'Free trial ended — subscribe to continue'
+        : `Free trial ends in ${daysLeft} day${daysLeft === 1 ? '' : 's'}`,
+      message:        daysLeft <= 0
+        ? 'Your trial has ended. Subscribe now to restore full access to Veerify.'
+        : `Your free trial ends soon. Subscribe now to keep uninterrupted access. Tap to pay.`,
+      data: {
+        screen:      'PaymentScreen',
+        kind:        'trial_reminder',
+        payment_url: linkResult.url,
+        days_left:   daysLeft,
+      },
+    });
+  } catch (err) {
+    console.warn('[trialReminder] in-app notify failed:', err?.message);
+  }
+  // Idempotency stamp — refreshed to NOW() every successful send so
+  // the next 20-hour+ tick picks the row up again for a fresh daily
+  // reminder until the trial expires or the institution pays.
   await pool.query(
     `UPDATE institutions
         SET trial_reminder_sent_at = NOW()

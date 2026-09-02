@@ -33,6 +33,10 @@ import { useBellScrollHandler } from '../../../components/bellScrollBus';
 import { confirm } from '../../../components/ConfirmDialog';
 import resolveAssetUrl from '../../../utils/assetUrl';
 import Avatar from '../../../components/Avatar';
+import ThemeToggle from '../../../components/ThemeToggle';
+// Shared Institution-admin ambient background — same light-blue
+// wash + soft glow blobs as the Home screen.
+import InstitutionScreenBackground from '../../../components/InstitutionScreenBackground';
 
 // ─── Menu definition ─────────────────────────────────────────────────────────
 //
@@ -239,6 +243,7 @@ export default function MoreTabScreen({ navigation }) {
   const showLogo = !!logoUrl && !logoError;
 
   return (
+    <InstitutionScreenBackground>
     <ScrollView
       style={styles.screen}
       contentContainerStyle={styles.scrollContent}
@@ -292,6 +297,22 @@ export default function MoreTabScreen({ navigation }) {
           <Edit3 size={16} color={palette.purple.vivid} strokeWidth={2.4} />
         </View>
       </TouchableOpacity>
+
+      {/* ───── Preferences ─────
+          App-wide toggles that don't warrant their own screen. First
+          citizen is the dark-mode switch, driven by the shared
+          ThemeContext + persisted to AsyncStorage. */}
+      <Text style={styles.sectionLabel}>Preferences</Text>
+      {/* Wrapped so the shadow beneath the ThemeToggle row has
+          breathing room from the grid card below. Without the
+          bottom margin the two shadows stacked and read as a
+          single overflowing card. */}
+      <View style={{ marginBottom: spacing.md }}>
+        <ThemeToggle
+          label="Dark Mode"
+          hint="Switch between light and dark theme. Your choice is saved and re-applied on next launch."
+        />
+      </View>
 
       {/* ───── Grid menu ─────
           Sub-branch admins get a trimmed menu — tiles that belong to
@@ -440,6 +461,7 @@ export default function MoreTabScreen({ navigation }) {
 
       <View style={{ height: 100 }} />
     </ScrollView>
+    </InstitutionScreenBackground>
   );
 }
 
@@ -477,7 +499,9 @@ function ListRow({ icon: Icon, label, accent, onPress }) {
 
 // ─── Styles ──────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: palette.bg },
+  // Transparent — the ambient background component painted behind
+  // this ScrollView is what shows through in the empty areas.
+  screen: { flex: 1, backgroundColor: 'transparent' },
   scrollContent: { paddingHorizontal: spacing.xl, paddingTop: spacing.xxl },
 
   // Header
@@ -485,16 +509,30 @@ const styles = StyleSheet.create({
   title: { ...type.display, color: palette.text },
   subtitle: { ...type.caption, color: palette.textMuted, marginTop: 2 },
 
-  // Profile card
+  // Profile card — hero of the More tab, gets premium glass with
+  // a slightly stronger fill so it reads as the top of the visual
+  // hierarchy (same treatment as the Home identity card).
   profileCard: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.md,
-    backgroundColor: palette.surface,
+    backgroundColor: 'rgba(255,255,255,0.68)',
+    borderTopWidth: 1.5,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderLeftWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.95)',
+    borderRightColor: 'rgba(255,255,255,0.6)',
+    borderBottomColor: 'rgba(255,255,255,0.6)',
+    borderLeftColor: 'rgba(255,255,255,0.6)',
     borderRadius: radius.xl,
     padding: spacing.lg,
     marginBottom: spacing.xxl,
-    ...shadows.card,
+    shadowColor: '#1E40AF',
+    shadowOpacity: 0.13,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 5,
   },
   profileAvatar: {
     width: 56, height: 56, borderRadius: 28,
@@ -538,19 +576,46 @@ const styles = StyleSheet.create({
   },
   profileEditButton: {
     width: 36, height: 36, borderRadius: 18,
-    backgroundColor: palette.borderSoft,
+    backgroundColor: 'rgba(148,163,184,0.22)',
     alignItems: 'center', justifyContent: 'center',
   },
 
-  // Grid
+  sectionLabel: {
+    ...type.caption,
+    color: palette.textMuted,
+    fontWeight: '700',
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+    marginTop: spacing.lg,
+    marginBottom: spacing.sm,
+  },
+
+  // Grid — glass panel that hosts the 3-per-row quick tiles.
+  // Explicit marginTop separates the grid from whatever section
+  // sits above it (Dark Mode preferences card in the current
+  // layout). Without it the Dark Mode row's shadow bled into the
+  // Trainers tile at the top of the grid.
   grid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    backgroundColor: palette.surface,
-    borderRadius: radius.lg,
+    backgroundColor: 'rgba(255,255,255,0.6)',
+    borderTopWidth: 1.5,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderLeftWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.95)',
+    borderRightColor: 'rgba(255,255,255,0.6)',
+    borderBottomColor: 'rgba(255,255,255,0.6)',
+    borderLeftColor: 'rgba(255,255,255,0.6)',
+    borderRadius: radius.xl,
     padding: spacing.md,
+    marginTop: spacing.xl,
     marginBottom: spacing.xxl,
-    ...shadows.card,
+    shadowColor: '#1E40AF',
+    shadowOpacity: 0.11,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 4,
   },
   tile: {
     width: '33.33%',
@@ -582,12 +647,24 @@ const styles = StyleSheet.create({
     marginTop: spacing.md,
   },
 
-  // List card
+  // List card — glass panel wrapping the stacked menu rows.
   listCard: {
-    backgroundColor: palette.surface,
-    borderRadius: radius.lg,
+    backgroundColor: 'rgba(255,255,255,0.6)',
+    borderTopWidth: 1.5,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderLeftWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.95)',
+    borderRightColor: 'rgba(255,255,255,0.6)',
+    borderBottomColor: 'rgba(255,255,255,0.6)',
+    borderLeftColor: 'rgba(255,255,255,0.6)',
+    borderRadius: radius.xl,
     marginBottom: spacing.xxl,
-    ...shadows.card,
+    shadowColor: '#1E40AF',
+    shadowOpacity: 0.11,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 4,
   },
   listRow: {
     flexDirection: 'row',
@@ -603,7 +680,9 @@ const styles = StyleSheet.create({
   listLabel: { ...type.bodyBold, color: palette.text, flex: 1 },
   divider: {
     height: 1,
-    backgroundColor: palette.borderSoft,
+    // Softer hairline so internal dividers don't outshine the
+    // glass card's outer border.
+    backgroundColor: 'rgba(148,163,184,0.22)',
     marginHorizontal: spacing.lg,
   },
 

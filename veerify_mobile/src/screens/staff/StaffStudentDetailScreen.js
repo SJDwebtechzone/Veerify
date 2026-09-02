@@ -143,6 +143,26 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
   const params = route?.params || {};
   const studentId = params.studentId;
   const batchId = params.batchId;
+  // Deep-link focus from the trainer's notification bell. When a
+  // "Sent for Recheck" notification is tapped the payload carries the
+  // exact curriculum_item_id (or legacy null → lesson_index 0/1/2)
+  // that the institution wants re-reviewed. We use it to (a) briefly
+  // highlight the row so the trainer's eye lands on it, and (b) — for
+  // long courses — scroll it into view.
+  const focusCurriculumItemId = params.focusCurriculumItemId ?? null;
+  const [highlightKey, setHighlightKey] = useState(focusCurriculumItemId);
+  // Auto-clear the highlight after a beat so the row doesn't stay
+  // permanently tinted after the trainer looks at it.
+  useEffect(() => {
+    if (highlightKey == null) return undefined;
+    const t = setTimeout(() => setHighlightKey(null), 3500);
+    return () => clearTimeout(t);
+  }, [highlightKey]);
+  // Route params can update on re-navigate — keep the highlight in sync
+  // if the trainer taps another notification while this screen is up.
+  useEffect(() => {
+    if (focusCurriculumItemId != null) setHighlightKey(focusCurriculumItemId);
+  }, [focusCurriculumItemId]);
   // The list passes a snapshot on navigate — but it can drift from
   // the DB (admin edits a profile, payment webhook fires, etc.). We
   // keep the snapshot for the initial paint but replace it with a
@@ -201,6 +221,15 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
   //   • Rejected → button ENABLED, badge "Rejected — <remarks>".
   //                Only rejected promotions can be resubmitted.
   const [latestPromoRequest, setLatestPromoRequest] = useState(null);
+  // BUG FIX: per-curriculum-item promotion state so promoting Level 1
+  // no longer paints Level 2/3 as "Pending Approval". Keyed by
+  // curriculum_item_id → { status, requested_belt, id, ... }. The
+  // top-of-screen banner still reads latestPromoRequest for the
+  // student-level summary; the per-lesson badges below use this map.
+  const [promoByItem, setPromoByItem] = useState({});
+  // Track WHICH curriculum item's Promote button opened the modal so
+  // the POST can attach curriculum_item_id.
+  const [promoteItemId, setPromoteItemId] = useState(null);
   const [promoteModalOpen, setPromoteModalOpen] = useState(false);
   const [promoteBelt, setPromoteBelt] = useState('');           // target belt name (string)
   const [promoteRemarks, setPromoteRemarks] = useState('');
@@ -379,6 +408,37 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
           return (b.id || 0) - (a.id || 0);
         });
       setLatestPromoRequest(forThis[0] || null);
+      // Build the per-curriculum-item map. `forThis` is already
+      // sorted newest-first, so the first request we see for any
+      // given item wins — subsequent (older) rows are skipped.
+      const map = {};
+      forThis.forEach((r) => {
+        const key = r.curriculum_item_id;
+        if (key != null && !map[key]) map[key] = r;
+      });
+
+      // ── Legacy compatibility ──
+      // Requests submitted BEFORE migration 093 have
+      // curriculum_item_id = NULL. To keep per-item pills showing
+      // for those historical rows, we assign every null-item
+      // legacy request (approved, pending, or declined) to the next
+      // available lesson index (0, 1, 2, ...), oldest first.
+      // Requests that already carry a real curriculum_item_id are
+      // untouched. Going forward every new request has a real id,
+      // so this fallback only touches historical data.
+      const legacyAsc = forThis
+        .filter((r) => r.curriculum_item_id == null
+          && (r.status === 'approved' || r.status === 'pending' || r.status === 'declined'))
+        .slice()
+        .reverse(); // forThis is DESC; oldest-first for stable assignment
+      let idxCursor = 0;
+      legacyAsc.forEach((r) => {
+        // Skip any slot the new-per-item flow already occupies.
+        while (map[idxCursor] != null) idxCursor += 1;
+        map[idxCursor] = r;
+        idxCursor += 1;
+      });
+      setPromoByItem(map);
       setBeltLevels(levelsRes.data?.levels || levelsRes.data?.beltLevels || []);
     } catch (err) {
       // Fail-open — button stays enabled; a duplicate submit gets a
@@ -407,18 +467,29 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
         try {
           setPromoteSubmitting(true);
           const res = await apiClient.post('/belt-promotion-requests', {
-            student_id:     studentId,
-            requested_belt: promoteBelt.trim(),
-            remarks:        promoteRemarks.trim() || null,
+            student_id:         studentId,
+            requested_belt:     promoteBelt.trim(),
+            remarks:            promoteRemarks.trim() || null,
+            // BUG FIX: send the exact curriculum item id so the
+            // backend can scope the request. If the trainer opened
+            // the modal from the top-of-screen banner instead of a
+            // per-lesson row, promoteItemId is null and the row is
+            // stored as legacy student-level (backward compat).
+            curriculum_item_id: promoteItemId,
           });
           // Optimistic update — flip local state to 'pending' so the
           // per-lesson badges lock instantly, then re-fetch to
           // pull the server-side row (with its real id + timestamps).
-          setLatestPromoRequest(res.data?.request || {
+          const optimistic = res.data?.request || {
             status: 'pending',
             requested_belt: promoteBelt.trim(),
             student_id: studentId,
-          });
+            curriculum_item_id: promoteItemId,
+          };
+          setLatestPromoRequest(optimistic);
+          if (promoteItemId != null) {
+            setPromoByItem((prev) => ({ ...prev, [promoteItemId]: optimistic }));
+          }
           loadPromotionState();
           setPromoteModalOpen(false);
           setPromoteBelt('');
@@ -908,8 +979,15 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
                 const sRemarks = (progressByIdx[idx]?.student_remarks || '').toString().trim();
                 const sUpdated = progressByIdx[idx]?.student_remarked_at || null;
                 const hasFeedback = sRating > 0 || sRemarks.length > 0;
+                const itemFocusKey = (typeof lesson !== 'undefined' && lesson?.id != null)
+                  ? lesson.id : idx;
+                const isFocused = highlightKey != null
+                  && String(highlightKey) === String(itemFocusKey);
                 return (
-                  <View key={idx} style={styles.lessonRow}>
+                  <View
+                    key={idx}
+                    style={[styles.lessonRow, isFocused && styles.lessonRowFocused]}
+                  >
                     <TouchableOpacity
                       style={[styles.lessonCheckbox, done && styles.lessonCheckboxOn]}
                       onPress={() => toggleLesson(idx)}
@@ -1009,7 +1087,45 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
                         partial unique index on student_id — a
                         duplicate submit while pending returns 409. */}
                     {(() => {
-                      const status = latestPromoRequest?.status;
+                      // BUG FIX: read status PER curriculum item so
+                      // promoting one row (e.g. Level 1) doesn't
+                      // paint every other row as Pending. The
+                      // curriculum lives as a JSONB blob on
+                      // courses.curriculum — items have no DB id, so
+                      // the stable key is the lesson's zero-based
+                      // index (matches student_curriculum_progress.
+                      // lesson_index). Falls back to lesson.id if the
+                      // future refactor gives items real ids.
+                      const itemKey = lesson.id != null ? lesson.id : idx;
+                      const req = promoByItem[itemKey] || null;
+                      const status = req?.status;
+                      // MODULE FIX — a request the institution "sent
+                      // for recheck" behaves exactly like no request
+                      // exists yet: the trainer must be able to
+                      // review the student and submit a fresh Promote
+                      // Belt request. Falls through to the interactive
+                      // branch below with wasRejected=false so the
+                      // pill reads "Promote Belt" (not "Resubmit").
+                      if (status === 'sent_for_recheck') {
+                        return (
+                          <TouchableOpacity
+                            style={styles.lessonPromoteBtn}
+                            onPress={() => {
+                              setPromoteBelt('');
+                              setPromoteRemarks('');
+                              setBeltDropdownOpen(false);
+                              setPromoteItemId(itemKey);
+                              setPromoteModalOpen(true);
+                            }}
+                            activeOpacity={0.85}
+                          >
+                            <Award size={12} color="#fff" strokeWidth={2.4} />
+                            <Text style={styles.lessonPromoteBtnText}>
+                              Promote Belt
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      }
                       if (status === 'pending') {
                         return (
                           <View style={[styles.lessonPromoteBtn, styles.lessonPromoteBtnPending]}>
@@ -1025,7 +1141,7 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
                           <View style={[styles.lessonPromoteBtn, styles.lessonPromoteBtnApproved]}>
                             <Check size={12} color={palette.green.on} strokeWidth={2.4} />
                             <Text style={[styles.lessonPromoteBtnText, { color: palette.green.on }]}>
-                              Approved
+                              Promoted
                             </Text>
                           </View>
                         );
@@ -1042,6 +1158,12 @@ export default function StaffStudentDetailScreen({ navigation, route }) {
                             setPromoteBelt('');
                             setPromoteRemarks('');
                             setBeltDropdownOpen(false);
+                            // Remember which item's button opened
+                            // the modal so submit can attach the id.
+                            // Uses the same itemKey (lesson.id when
+                            // present, else 0-based lesson_index) so
+                            // the round-trip stays consistent.
+                            setPromoteItemId(itemKey);
                             setPromoteModalOpen(true);
                           }}
                           activeOpacity={0.85}
@@ -1428,6 +1550,13 @@ const styles = StyleSheet.create({
   // trainer sees WHY every per-lesson button flipped to Pending.
   promotePendingCard: {
     marginHorizontal: spacing.lg,
+    // Clear vertical breathing room above so this banner never
+    // butts up against the Curriculum Progress card above it, and
+    // below so the Notes card that follows stays cleanly separated.
+    // Normal vertical flow — no absolute positioning, no negative
+    // margins, no fixed height. Scales with any card content above
+    // because siblings just shift down.
+    marginTop: spacing.md,
     marginBottom: spacing.md,
     padding: spacing.md,
     borderRadius: radius.md,
@@ -1704,6 +1833,18 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: palette.borderSoft,
     flexWrap: 'wrap',
+  },
+  // Applied when the trainer opened this screen from a "Sent for
+  // Recheck" notification. A soft amber tint + left accent bar so the
+  // eye lands on the exact lesson without changing layout metrics.
+  // Auto-clears after 3.5s (see the highlightKey effect above).
+  lessonRowFocused: {
+    backgroundColor: 'rgba(251, 191, 36, 0.12)',
+    borderLeftWidth: 3,
+    borderLeftColor: '#F59E0B',
+    paddingLeft: spacing.sm,
+    marginLeft: -spacing.sm,
+    borderRadius: radius.md,
   },
   lessonCheckbox: {
     width: 22, height: 22, borderRadius: 6,

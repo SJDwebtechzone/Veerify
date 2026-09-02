@@ -16,7 +16,7 @@
 //   GET /api/enrollments/my     (already exists)
 //   GET /api/students/my-videos (added in this round)
 
-import React, { useEffect, useMemo, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useState, useCallback, useContext, createContext } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, Image, ActivityIndicator,
   StyleSheet, RefreshControl, Linking, Dimensions, Modal, TextInput,
@@ -36,20 +36,65 @@ import { useAuth } from '../../context/AuthContext';
 import resolveAssetUrl from '../../utils/assetUrl';
 import { formatBatchTime } from '../../utils/formatTime';
 import { useBellScrollHandler } from '../../components/bellScrollBus';
+// Global light/dark theme. Home is the tab most students spend the
+// most time on, so it MUST honour the theme setting — otherwise dark
+// mode is broken (only bottom nav flips).
+import { useTheme } from '../../theme/ThemeContext';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const VIDEO_CARD_WIDTH = Math.round(SCREEN_WIDTH * 0.65);
 
-// ─── Theme tokens (kept local so the screen renders without the global theme) ───
-const BRAND = '#E63946';
+// ─── Brand-fixed accents (light-mode defaults) ───
+// Restored so the module-level `styles = StyleSheet.create({...})`
+// below keeps compiling with its bare identifier references (TEXT,
+// BG, SURFACE, ...). Dark mode is layered on via inline overrides
+// inside the component using `useTheme()` — see darkOverrides below.
+const BRAND      = '#E63946';
 const BRAND_SOFT = '#FFE4E6';
-const TEXT = '#111827';
+const TEXT       = '#111827';
 const TEXT_MUTED = '#6B7280';
 const TEXT_LIGHT = '#9CA3AF';
-const SURFACE = '#FFFFFF';
-const BG = '#F4F4F8';
-const BORDER = '#E5E7EB';
-const GREEN = '#10B981';
+const SURFACE    = '#FFFFFF';
+const BG         = '#F4F4F8';
+const BORDER     = '#E5E7EB';
+const GREEN      = '#10B981';
+
+// Dark-mode inline overrides — layered on top of the light styles via
+// `style={[styles.foo, isDark && darkOverrides.foo]}` at every
+// user-visible surface. Light mode: `isDark === false` so no override
+// applies and the screen renders exactly as before.
+function buildDarkOverrides(palette) {
+  return StyleSheet.create({
+    screen:            { backgroundColor: palette.bg },
+    // Stat strip
+    statTile:          { backgroundColor: palette.surface, borderWidth: 1, borderColor: palette.border },
+    statValue:         { color: palette.text },
+    statLabel:         { color: palette.textMuted },
+    // Section header
+    sectionTitle:      { color: palette.text },
+    sectionSub:        { color: palette.textMuted },
+    // Course card
+    courseCard:        { backgroundColor: palette.surface, borderColor: palette.border },
+    courseName:        { color: palette.text },
+    metaText:          { color: palette.textMuted },
+    // Course progress card
+    progressCard:      { backgroundColor: palette.surface, borderColor: palette.border },
+    progressCourse:    { color: palette.text },
+    progressSummary:   { color: palette.textMuted },
+    progressItemTitle: { color: palette.text },
+    progressBarTrack:  { backgroundColor: palette.border },
+    progressDateChip:  { backgroundColor: palette.border },
+    progressDateText:  { color: palette.textMuted },
+    progressMore:      { color: palette.textMuted },
+    // Video card
+    videoCard:         { backgroundColor: palette.surface },
+    videoTitle:        { color: palette.text },
+    videoCourse:       { color: palette.textMuted },
+    // Empty inline
+    emptyInline:       { backgroundColor: palette.surface, borderColor: palette.border },
+    emptyInlineText:   { color: palette.textMuted },
+  });
+}
 
 function fmtINR(n) {
   const v = Number(n) || 0;
@@ -70,8 +115,17 @@ function fmtDuration(seconds) {
   return `${h}h ${m % 60}m`;
 }
 
+// Local context — sub-components consume `isDark` + the resolved
+// darkOverrides bag so they can layer overrides on their inline
+// `style={[styles.foo, ...]}` arrays without prop-drilling.
+const DashCtx = createContext({ isDark: false, dark: {}, palette: null });
+
 export default function MyDashboard({ navigation }) {
   const { user } = useAuth();
+  const { mode, palette } = useTheme();
+  const isDark = mode === 'dark';
+  const dark   = useMemo(() => buildDarkOverrides(palette), [palette]);
+  const themeCtx = useMemo(() => ({ isDark, dark, palette }), [isDark, dark, palette]);
   const [enrollments, setEnrollments] = useState([]);
   const [videos, setVideos] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -168,7 +222,8 @@ export default function MyDashboard({ navigation }) {
   const bellScroll = useBellScrollHandler();
 
   return (
-    <View style={styles.screen}>
+    <DashCtx.Provider value={themeCtx}>
+    <View style={[styles.screen, isDark && dark.screen]}>
       <ScrollView
         contentContainerStyle={{ paddingBottom: 120 }}
         showsVerticalScrollIndicator={false}
@@ -236,9 +291,9 @@ export default function MyDashboard({ navigation }) {
         {loading && paidEnrollments.length === 0 ? (
           <ActivityIndicator color={BRAND} style={{ marginVertical: 24 }} />
         ) : paidEnrollments.length === 0 ? (
-          <View style={styles.emptyInline}>
-            <BookOpen size={20} color={TEXT_LIGHT} strokeWidth={2} />
-            <Text style={styles.emptyInlineText}>
+          <View style={[styles.emptyInline, isDark && dark.emptyInline]}>
+            <BookOpen size={20} color={isDark ? palette.textLight : TEXT_LIGHT} strokeWidth={2} />
+            <Text style={[styles.emptyInlineText, isDark && dark.emptyInlineText]}>
               No paid courses yet. Complete payment to access full course content.
             </Text>
           </View>
@@ -319,9 +374,9 @@ export default function MyDashboard({ navigation }) {
         <SectionHeader title="Recorded Videos" subtitle="Shared by your trainers" />
 
         {videos.length === 0 ? (
-          <View style={styles.emptyInline}>
-            <Video size={20} color={TEXT_LIGHT} strokeWidth={2} />
-            <Text style={styles.emptyInlineText}>
+          <View style={[styles.emptyInline, isDark && dark.emptyInline]}>
+            <Video size={20} color={isDark ? palette.textLight : TEXT_LIGHT} strokeWidth={2} />
+            <Text style={[styles.emptyInlineText, isDark && dark.emptyInlineText]}>
               Your trainer hasn't shared any videos yet. Check back later.
             </Text>
           </View>
@@ -354,16 +409,18 @@ export default function MyDashboard({ navigation }) {
         />
       ) : null}
     </View>
+    </DashCtx.Provider>
   );
 }
 
 // ─── Sub-components ─────────────────────────────────────────────────────
 function SectionHeader({ title, subtitle }) {
+  const { isDark, dark } = useContext(DashCtx);
   return (
     <View style={styles.sectionHeader}>
       <View style={{ flex: 1 }}>
-        <Text style={styles.sectionTitle}>{title}</Text>
-        {subtitle ? <Text style={styles.sectionSub}>{subtitle}</Text> : null}
+        <Text style={[styles.sectionTitle, isDark && dark.sectionTitle]}>{title}</Text>
+        {subtitle ? <Text style={[styles.sectionSub, isDark && dark.sectionSub]}>{subtitle}</Text> : null}
       </View>
     </View>
   );
@@ -407,6 +464,20 @@ function EventRow({ event, onPress }) {
             {event.subtitle}
           </Text>
         ) : null}
+        {/* Organizer line — cross-institution intras + any event
+            the backend has already flagged source='global'. Falls
+            back to institution_name if organizing_institution_name
+            isn't populated (older API version). */}
+        {(() => {
+          const org = event.organizing_institution_name || event.institution_name || null;
+          const isGlobalish = event.event_type === 'intra' || event.source === 'global';
+          if (!org || !isGlobalish) return null;
+          return (
+            <Text style={{ fontSize: 11, color: BRAND, marginTop: 2, fontWeight: '700' }} numberOfLines={1}>
+              Organized by {org}
+            </Text>
+          );
+        })()}
         {event.location ? (
           <Text style={{ fontSize: 11, color: '#9CA3AF', marginTop: 2 }} numberOfLines={1}>
             📍 {event.location}
@@ -439,18 +510,21 @@ function EventRow({ event, onPress }) {
 }
 
 function Stat({ icon: Icon, label, value, accent }) {
+  const { isDark, dark } = useContext(DashCtx);
   return (
-    <View style={styles.statTile}>
-      <View style={[styles.statIconWrap, { backgroundColor: `${accent}15` }]}>
+    <View style={[styles.statTile, isDark && dark.statTile]}>
+      <View style={[styles.statIconWrap, { backgroundColor: `${accent}${isDark ? '33' : '15'}` }]}>
         <Icon size={16} color={accent} strokeWidth={2.4} />
       </View>
-      <Text style={styles.statValue}>{value}</Text>
-      <Text style={styles.statLabel}>{label}</Text>
+      <Text style={[styles.statValue, isDark && dark.statValue]}>{value}</Text>
+      <Text style={[styles.statLabel, isDark && dark.statLabel]}>{label}</Text>
     </View>
   );
 }
 
 function CourseCard({ enrollment, onPress }) {
+  const { isDark, dark, palette: p } = useContext(DashCtx);
+  const mutedColor = isDark ? p.textMuted : TEXT_MUTED;
   const banner = resolveAssetUrl(enrollment.course_image_url || enrollment.image_url);
   const courseName = enrollment.course_name || 'Course';
   const batchName = enrollment.batch_name || '';
@@ -461,7 +535,7 @@ function CourseCard({ enrollment, onPress }) {
 
   return (
     <TouchableOpacity
-      style={styles.courseCard}
+      style={[styles.courseCard, isDark && dark.courseCard]}
       onPress={onPress}
       activeOpacity={0.85}
     >
@@ -483,31 +557,31 @@ function CourseCard({ enrollment, onPress }) {
 
       {/* Content stacked below the banner */}
       <View style={styles.courseBody}>
-        <Text style={styles.courseName} numberOfLines={2}>{courseName}</Text>
+        <Text style={[styles.courseName, isDark && dark.courseName]} numberOfLines={2}>{courseName}</Text>
         {institution ? (
           <View style={styles.metaRow}>
-            <Building2 size={12} color={TEXT_MUTED} strokeWidth={2.2} />
-            <Text style={styles.metaText} numberOfLines={1}>{institution}</Text>
+            <Building2 size={12} color={mutedColor} strokeWidth={2.2} />
+            <Text style={[styles.metaText, isDark && dark.metaText]} numberOfLines={1}>{institution}</Text>
           </View>
         ) : null}
         {batchName ? (
           <View style={styles.metaRow}>
-            <GraduationCap size={12} color={TEXT_MUTED} strokeWidth={2.2} />
-            <Text style={styles.metaText} numberOfLines={1}>{batchName}</Text>
+            <GraduationCap size={12} color={mutedColor} strokeWidth={2.2} />
+            <Text style={[styles.metaText, isDark && dark.metaText]} numberOfLines={1}>{batchName}</Text>
           </View>
         ) : null}
         {(days || time) ? (
           <View style={styles.metaRow}>
-            <Calendar size={12} color={TEXT_MUTED} strokeWidth={2.2} />
-            <Text style={styles.metaText} numberOfLines={1}>
+            <Calendar size={12} color={mutedColor} strokeWidth={2.2} />
+            <Text style={[styles.metaText, isDark && dark.metaText]} numberOfLines={1}>
               {days}{days && time ? ' · ' : ''}{time}
             </Text>
           </View>
         ) : null}
         {trainer ? (
           <View style={styles.metaRow}>
-            <User size={12} color={TEXT_MUTED} strokeWidth={2.2} />
-            <Text style={styles.metaText} numberOfLines={1}>{trainer}</Text>
+            <User size={12} color={mutedColor} strokeWidth={2.2} />
+            <Text style={[styles.metaText, isDark && dark.metaText]} numberOfLines={1}>{trainer}</Text>
           </View>
         ) : null}
       </View>
@@ -519,6 +593,8 @@ function CourseCard({ enrollment, onPress }) {
 // this student in this course. Shows a percentage ring + the dated
 // list. Tapping opens the EnrolledCourseScreen for full course detail.
 function CourseProgressCard({ enrollment, progress, onPress, onRate }) {
+  const { isDark, dark, palette: p } = useContext(DashCtx);
+  const mutedColor = isDark ? p.textMuted : TEXT_MUTED;
   const total = progress.lessons.length;
   const done  = progress.completed.length;
   const pct   = total > 0 ? Math.round((done / total) * 100) : 0;
@@ -534,7 +610,7 @@ function CourseProgressCard({ enrollment, progress, onPress, onRate }) {
 
   return (
     <TouchableOpacity
-      style={styles.progressCard}
+      style={[styles.progressCard, isDark && dark.progressCard]}
       onPress={onPress}
       activeOpacity={0.85}
     >
@@ -543,10 +619,10 @@ function CourseProgressCard({ enrollment, progress, onPress, onRate }) {
           <Target size={16} color={BRAND} strokeWidth={2.4} />
         </View>
         <View style={{ flex: 1 }}>
-          <Text style={styles.progressCourse} numberOfLines={1}>
+          <Text style={[styles.progressCourse, isDark && dark.progressCourse]} numberOfLines={1}>
             {enrollment.course_name || 'Course'}
           </Text>
-          <Text style={styles.progressSummary}>
+          <Text style={[styles.progressSummary, isDark && dark.progressSummary]}>
             {done} of {total} completed
           </Text>
         </View>
@@ -556,7 +632,7 @@ function CourseProgressCard({ enrollment, progress, onPress, onRate }) {
       </View>
 
       {/* Progress bar */}
-      <View style={styles.progressBarTrack}>
+      <View style={[styles.progressBarTrack, isDark && dark.progressBarTrack]}>
         <View style={[styles.progressBarFill, { width: `${pct}%` }]} />
       </View>
 
@@ -572,12 +648,12 @@ function CourseProgressCard({ enrollment, progress, onPress, onRate }) {
                 <View style={styles.progressCheck}>
                   <CheckCircle2 size={12} color={GREEN} strokeWidth={2.6} />
                 </View>
-                <Text style={styles.progressItemTitle} numberOfLines={1}>
+                <Text style={[styles.progressItemTitle, isDark && dark.progressItemTitle]} numberOfLines={1}>
                   {lesson.title || `Lesson ${lesson.idx + 1}`}
                 </Text>
-                <View style={styles.progressDateChip}>
-                  <CalendarDays size={9} color={TEXT_MUTED} strokeWidth={2.4} />
-                  <Text style={styles.progressDateText}>{fmt(lesson.completed_at)}</Text>
+                <View style={[styles.progressDateChip, isDark && dark.progressDateChip]}>
+                  <CalendarDays size={9} color={mutedColor} strokeWidth={2.4} />
+                  <Text style={[styles.progressDateText, isDark && dark.progressDateText]}>{fmt(lesson.completed_at)}</Text>
                 </View>
               </View>
 
@@ -623,7 +699,7 @@ function CourseProgressCard({ enrollment, progress, onPress, onRate }) {
             </View>
           ))}
         {progress.completed.length > 5 ? (
-          <Text style={styles.progressMore}>
+          <Text style={[styles.progressMore, isDark && dark.progressMore]}>
             + {progress.completed.length - 5} more completed
           </Text>
         ) : null}
@@ -633,11 +709,12 @@ function CourseProgressCard({ enrollment, progress, onPress, onRate }) {
 }
 
 function VideoCard({ video, onPress }) {
+  const { isDark, dark } = useContext(DashCtx);
   const thumb = resolveAssetUrl(video.thumbnail_url || video.course_image);
   const duration = fmtDuration(video.duration_seconds);
   return (
     <TouchableOpacity
-      style={styles.videoCard}
+      style={[styles.videoCard, isDark && dark.videoCard]}
       onPress={onPress}
       activeOpacity={0.85}
     >
@@ -661,8 +738,8 @@ function VideoCard({ video, onPress }) {
       </View>
 
       <View style={styles.videoBody}>
-        <Text style={styles.videoTitle} numberOfLines={2}>{video.title}</Text>
-        <Text style={styles.videoCourse} numberOfLines={1}>{video.course_name}</Text>
+        <Text style={[styles.videoTitle, isDark && dark.videoTitle]} numberOfLines={2}>{video.title}</Text>
+        <Text style={[styles.videoCourse, isDark && dark.videoCourse]} numberOfLines={1}>{video.course_name}</Text>
       </View>
     </TouchableOpacity>
   );

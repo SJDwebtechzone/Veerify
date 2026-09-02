@@ -16,7 +16,7 @@
 // the requested "Branch limit reached. Please upgrade your plan…" copy
 // (a hard block; the user has to upgrade or delete a branch).
 
-import React, { useMemo, useState } from 'react';
+import React, { createContext, useMemo, useState } from 'react';
 import {
   View, Text, ScrollView, TextInput, TouchableOpacity, ActivityIndicator,
   StyleSheet, Alert, KeyboardAvoidingView, Platform, PermissionsAndroid,
@@ -38,15 +38,53 @@ try {
   Geolocation = null;
 }
 
+// Institution Home visual system — ambient blue wash + glass
+// cards + navy accents. Reused verbatim so this screen belongs to
+// the same design language as the rest of the institution UI.
+import InstitutionScreenBackground, {
+  INSTITUTION_BG_BASE,
+} from '../../components/InstitutionScreenBackground';
+import { useTheme } from '../../theme/ThemeContext';
+
+// ── Institution-Home glass tokens ─────────────────────────────
+const GLASS_FILL         = 'rgba(255,255,255,0.72)';
+const GLASS_FILL_STRONG  = 'rgba(255,255,255,0.88)';
+const GLASS_BORDER_LIGHT = 'rgba(255,255,255,0.55)';
+const GLASS_HIGHLIGHT    = 'rgba(255,255,255,0.9)';
+const GLASS_SHADOW       = '#1E40AF';
+const BRAND_DARK_BLUE    = '#1E3A8A';
+const BRAND_ACCENT_SOFT  = 'rgba(30,58,138,0.10)';
+const HEADER_NAVY        = '#0F172A';
+
+// Local tokens — names kept unchanged so every existing card /
+// border / text style inherits the Institution Home look
+// automatically.
 const BRAND      = '#E63946';
 const BRAND_SOFT = '#FFE4E6';
-const TEXT       = '#111827';
+const TEXT       = HEADER_NAVY;
 const TEXT_MUTED = '#6B7280';
 const TEXT_LIGHT = '#9CA3AF';
-const SURFACE    = '#FFFFFF';
-const BG         = '#F4F4F8';
-const BORDER     = '#E5E7EB';
+const SURFACE    = GLASS_FILL_STRONG;
+const BG         = INSTITUTION_BG_BASE;
+const BORDER     = GLASS_BORDER_LIGHT;
 const GREEN      = '#10B981';
+
+// Local context so nested sub-components pick up dark-mode
+// overrides without prop-drilling.
+const CreateBranchCtx = createContext({ isDark: false, dark: {} });
+
+function buildDarkOverrides(pal) {
+  return StyleSheet.create({
+    screen:      { backgroundColor: pal.bg },
+    header:      { backgroundColor: pal.surface, borderBottomColor: pal.border },
+    headerTitle: { color: pal.text },
+    headerSub:   { color: pal.textMuted },
+    iconBtn:     { backgroundColor: pal.border },
+    section:     { backgroundColor: pal.surface, borderColor: pal.border },
+    sectionTitle:{ color: pal.textMuted },
+    label:       { color: pal.textMuted },
+  });
+}
 
 export default function CreateBranchScreen({ navigation, route }) {
   // Edit mode when we were passed an existing branch.
@@ -198,20 +236,29 @@ export default function CreateBranchScreen({ navigation, route }) {
 
   const hasCoords = form.latitude && form.longitude;
 
+  // Dark-mode overrides pulled from the shared ThemeContext.
+  // Institution Home's ambient background is skipped in dark mode.
+  const { mode, palette: themePalette } = useTheme();
+  const isDark = mode === 'dark';
+  const dark   = useMemo(() => (isDark ? buildDarkOverrides(themePalette) : {}), [isDark, themePalette]);
+
   return (
+    <CreateBranchCtx.Provider value={{ isDark, dark }}>
     <KeyboardAvoidingView
-      style={styles.screen}
+      style={[styles.screen, isDark && dark.screen]}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.iconBtn} hitSlop={8}>
-          <ArrowLeft size={20} color={TEXT} strokeWidth={2.4} />
+      {/* Institution Home ambient wash — sits behind all content. */}
+      {!isDark ? <InstitutionScreenBackground layer /> : null}
+      <View style={[styles.header, isDark && dark.header]}>
+        <TouchableOpacity onPress={() => navigation.goBack()} style={[styles.iconBtn, isDark && dark.iconBtn]} hitSlop={8}>
+          <ArrowLeft size={20} color={isDark ? themePalette.text : TEXT} strokeWidth={2.4} />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
-          <Text style={styles.headerTitle}>
+          <Text style={[styles.headerTitle, isDark && dark.headerTitle]}>
             {isSubBranch ? 'Edit sub-branch' : isEdit ? 'Edit branch' : 'New branch'}
           </Text>
-          <Text style={styles.headerSub}>
+          <Text style={[styles.headerSub, isDark && dark.headerSub]}>
             {isSubBranch
               ? 'Update this sub-branch academy\'s details.'
               : isEdit
@@ -498,6 +545,7 @@ export default function CreateBranchScreen({ navigation, route }) {
         </TouchableOpacity>
       </View>
     </KeyboardAvoidingView>
+    </CreateBranchCtx.Provider>
   );
 }
 
@@ -515,16 +563,23 @@ function Field({ label, children }) {
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: BG },
 
+  // Header — glass slab with navy title + soft blue lift shadow.
   header: {
-    backgroundColor: SURFACE, paddingTop: 48, paddingBottom: 14, paddingHorizontal: 16,
-    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: BORDER,
+    backgroundColor: GLASS_FILL_STRONG, paddingTop: 48, paddingBottom: 14, paddingHorizontal: 16,
+    borderBottomWidth: 1, borderBottomColor: GLASS_BORDER_LIGHT,
     flexDirection: 'row', alignItems: 'center', gap: 12,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
   },
   iconBtn: {
-    width: 36, height: 36, borderRadius: 18, backgroundColor: BG,
+    width: 36, height: 36, borderRadius: 18, backgroundColor: BRAND_ACCENT_SOFT,
     alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
   },
-  headerTitle: { fontSize: 17, fontWeight: '800', color: TEXT },
+  headerTitle: { fontSize: 17, fontWeight: '800', color: HEADER_NAVY, letterSpacing: 0.2 },
   headerSub:   { fontSize: 11, color: TEXT_MUTED, fontWeight: '600', marginTop: 2 },
 
   body: { padding: 16, paddingBottom: 40 },

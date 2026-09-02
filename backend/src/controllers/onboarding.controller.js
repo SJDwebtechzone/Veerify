@@ -11,6 +11,10 @@ const { dispatchWelcomeSms } = require('../utils/smsService');
 // linked yet at register time; the plan gate can only be evaluated
 // after approval. See services/whatsapp.service.js for the guards.
 const { sendWelcomeMessage: sendWelcomeWhatsApp } = require('../services/whatsapp.service');
+// Renewal confirmation WhatsApp — fire-and-forget after any successful
+// renewal payment. Dedupes by payment reference so webhook + self-heal
+// can both call it without producing a double message. Never throws.
+const { sendRenewalConfirmationWA } = require('../services/subscriptionRenewalWA.service');
 const { createPaymentLink, verifyWebhookSignature } = require('../utils/razorpay');
 const { computeGst, totalPayable, GST_PERCENT_DEFAULT } = require('../utils/gst');
 // Resume Registration completion stamp — swallows 42703 when
@@ -650,9 +654,88 @@ exports.setupAcademy = async (req, res) => {
       console.error('[setup] branch provisioning loop failed:', err?.message);
     }
 
+    // ── Free-trial auto-approve ─────────────────────────────────
+    // If the selected plan carries a free trial (plan.trial_days > 0)
+    // the institution is granted IMMEDIATE app access — no
+    // super-admin approval needed. We flip onboarding_status +
+    // status to 'approved', stamp approved_at, and open the trial
+    // window right here so requireActiveSubscription lets writes
+    // through and getMyStatus routes them straight to the admin
+    // dashboard on their next fetch. Falls back to the historical
+    // pending_approval flow when the plan has zero trial days
+    // (paid-only plan).
+    let finalInst = updated.rows[0];
+    try {
+      const inst = updated.rows[0];
+      if (inst?.plan_id) {
+        const planRow = await pool.query(
+          `SELECT trial_days, grace_days FROM subscription_plans WHERE id = $1`,
+          [inst.plan_id],
+        );
+        const trialDays = Number(planRow.rows[0]?.trial_days) || 0;
+        const graceDays = Number(planRow.rows[0]?.grace_days) || 0;
+        if (trialDays > 0) {
+          const promoted = await pool.query(
+            `UPDATE institutions SET
+               onboarding_status = 'approved',
+               status            = 'approved',
+               approved_at       = NOW(),
+               trial_starts_at   = NOW(),
+               trial_ends_at     = NOW() + ($2 || ' days')::interval,
+               grace_ends_at     = NOW() + (($2::int + $3::int) || ' days')::interval
+             WHERE id = $1
+             RETURNING *`,
+            [inst.id, trialDays, graceDays],
+          );
+          if (promoted.rows[0]) finalInst = promoted.rows[0];
+          // Best-effort: tell the admin their trial started so they
+          // see an in-app notification banner right after landing.
+          try {
+            await insertNotification({
+              user_id:        req.user.id,
+              institution_id: inst.id,
+              category:       'system',
+              title:          'Free trial started',
+              message:        `Your ${trialDays}-day free trial is live. You have full access to Veerify. Pay before the trial ends to keep your subscription active.`,
+              data: { screen: 'AdminDashboard', kind: 'trial_started' },
+              created_by: req.user.id,
+            });
+          } catch (err) {
+            console.warn('[setup/auto-approve] notify failed:', err?.message);
+          }
+          // Also promote any child branches provisioned above so
+          // sub-branch admins land on their dashboards too — they
+          // inherit the parent's lifecycle columns via the same
+          // UPDATE.
+          try {
+            await pool.query(
+              `UPDATE institutions SET
+                 onboarding_status = 'approved',
+                 status            = 'approved',
+                 approved_at       = NOW(),
+                 trial_starts_at   = $2,
+                 trial_ends_at     = $3,
+                 grace_ends_at     = $4
+               WHERE parent_institution_id = $1`,
+              [
+                inst.id,
+                finalInst.trial_starts_at,
+                finalInst.trial_ends_at,
+                finalInst.grace_ends_at,
+              ],
+            );
+          } catch (err) {
+            console.warn('[setup/auto-approve] child promote failed:', err?.message);
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[setup/auto-approve] trial promotion failed:', err?.message);
+    }
+
     res.json({
       message: 'Academy details submitted successfully',
-      institution: updated.rows[0]
+      institution: finalInst,
     });
   } catch (err) {
     console.error('Setup academy error:', err);
@@ -2706,6 +2789,15 @@ exports.handlePaymentWebhook = async (req, res) => {
       }
     })();
 
+    // Renewal confirmation WhatsApp — plan-gated, once per payment
+    // reference. Never affects the webhook response even if the send
+    // fails or WhatsApp is unreachable.
+    sendRenewalConfirmationWA(institution.id, {
+      paymentReference: paymentId || linkId,
+      subscriptionEnd:  updated.rows[0]?.subscription_end || null,
+      planName:         institution.plan_name || null,
+    }).catch(() => { /* swallowed inside the helper */ });
+
     console.log(`[webhook] ${action} institution ${institution.id} → ${updated.rows[0].subscription_end}`);
     return res.json({ ok: true, action, institution_id: institution.id });
   } catch (err) {
@@ -3255,6 +3347,131 @@ exports.getRecentInstitutionPayments = async (_req, res) => {
     });
   } catch (err) {
     console.error('getRecentInstitutionPayments error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// GET /api/onboarding/growth
+//
+// Web-admin dashboard "Institution & Student Growth" chart data.
+// Returns exactly 12 rows — one per calendar month for the past year,
+// oldest first — with the number of NEW institutions and NEW students
+// created that month. Months with zero new records still return with
+// count=0 so the chart renders a continuous X axis instead of
+// collapsing gaps.
+//
+//   [
+//     { month: 'Jan', month_start: '2026-01-01', institutions: 3, students: 47 },
+//     ...
+//     { month: 'Dec', month_start: '2026-12-01', institutions: 8, students: 120 }
+//   ]
+//
+// Institutions: counts main institutions only (parent_institution_id
+// IS NULL) so sub-branches don't inflate the growth number.
+// Students: role = 'student', excludes soft-deleted rows.
+//
+// Auth-only (verifyToken) — the payload doesn't leak PII, just
+// aggregates by month, but we keep the gate to match every other
+// dashboard endpoint.
+exports.getGrowthSeries = async (_req, res) => {
+  try {
+    // We build the 12-month scaffold with generate_series so months
+    // that have zero new records still land in the response. Then two
+    // LEFT JOINs count new institutions + new students per month.
+    // A single query keeps the round-trip cost low.
+    const sql = `
+      WITH months AS (
+        SELECT generate_series(
+          date_trunc('month', NOW()) - INTERVAL '11 months',
+          date_trunc('month', NOW()),
+          INTERVAL '1 month'
+        ) AS m
+      ),
+      inst AS (
+        SELECT date_trunc('month', created_at) AS m, COUNT(*)::int AS n
+          FROM institutions
+         WHERE parent_institution_id IS NULL
+           AND deleted_at IS NULL
+           AND created_at >= date_trunc('month', NOW()) - INTERVAL '11 months'
+         GROUP BY 1
+      ),
+      stu AS (
+        SELECT date_trunc('month', created_at) AS m, COUNT(*)::int AS n
+          FROM users
+         WHERE role = 'student'
+           AND COALESCE(is_deleted, FALSE) = FALSE
+           AND created_at >= date_trunc('month', NOW()) - INTERVAL '11 months'
+         GROUP BY 1
+      )
+      SELECT
+        to_char(mo.m, 'Mon')       AS month,
+        mo.m                       AS month_start,
+        COALESCE(inst.n, 0)::int   AS institutions,
+        COALESCE(stu.n,  0)::int   AS students
+      FROM months mo
+      LEFT JOIN inst  ON inst.m = mo.m
+      LEFT JOIN stu   ON stu.m  = mo.m
+      ORDER BY mo.m ASC
+    `;
+
+    // Schema-tolerant read: an older schema without users.is_deleted
+    // (pre-013) or institutions.parent_institution_id (pre-035) would
+    // 42703 the query above. Fall back to a relaxed variant so the
+    // dashboard still renders on legacy DBs.
+    let rows;
+    try {
+      const r = await pool.query(sql);
+      rows = r.rows;
+    } catch (err) {
+      if (err && err.code === '42703') {
+        const relaxed = `
+          WITH months AS (
+            SELECT generate_series(
+              date_trunc('month', NOW()) - INTERVAL '11 months',
+              date_trunc('month', NOW()),
+              INTERVAL '1 month'
+            ) AS m
+          ),
+          inst AS (
+            SELECT date_trunc('month', created_at) AS m, COUNT(*)::int AS n
+              FROM institutions
+             WHERE created_at >= date_trunc('month', NOW()) - INTERVAL '11 months'
+             GROUP BY 1
+          ),
+          stu AS (
+            SELECT date_trunc('month', created_at) AS m, COUNT(*)::int AS n
+              FROM users
+             WHERE role = 'student'
+               AND created_at >= date_trunc('month', NOW()) - INTERVAL '11 months'
+             GROUP BY 1
+          )
+          SELECT
+            to_char(mo.m, 'Mon')       AS month,
+            mo.m                       AS month_start,
+            COALESCE(inst.n, 0)::int   AS institutions,
+            COALESCE(stu.n,  0)::int   AS students
+          FROM months mo
+          LEFT JOIN inst  ON inst.m = mo.m
+          LEFT JOIN stu   ON stu.m  = mo.m
+          ORDER BY mo.m ASC
+        `;
+        const r = await pool.query(relaxed);
+        rows = r.rows;
+      } else {
+        throw err;
+      }
+    }
+
+    res.json({
+      months: rows.map((r) => ({
+        month:        r.month,
+        month_start:  r.month_start,
+        institutions: Number(r.institutions) || 0,
+        students:     Number(r.students) || 0,
+      })),
+    });
+  } catch (err) {
+    console.error('getGrowthSeries error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
@@ -4014,6 +4231,22 @@ async function activateInstitutionIfPaid(institutionId) {
         inst.payment_link_id,
       ],
     ).catch(() => {});
+
+    // Renewal confirmation WhatsApp — self-heal path. Dedupes on
+    // payment reference via subscription_renewal_wa, so if the
+    // webhook also fired (or fires later) only one WA goes out per
+    // successful transaction. Fire-and-forget so this path stays
+    // clean even when WhatsApp is down.
+    if (isRenewal && status.paymentId) {
+      // Grab the plan name lazily — the row we already have doesn't
+      // carry it, and the helper re-reads it internally, so we only
+      // pass what's cheap to include.
+      sendRenewalConfirmationWA(institutionId, {
+        paymentReference: status.paymentId,
+        subscriptionEnd:  activated.rows[0]?.subscription_end || null,
+        planName:         null,
+      }).catch(() => { /* swallowed inside the helper */ });
+    }
 
     console.log(
       `[payment] institution ${institutionId} ${isRenewal ? 'renewed' : 'activated'} via self-heal (payment=${status.paymentId || 'n/a'})`,

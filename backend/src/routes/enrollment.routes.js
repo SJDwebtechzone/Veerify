@@ -110,6 +110,22 @@ router.patch('/student/:userId',
   requireActiveSubscription,
   enrollmentController.updateStudentByAdmin);
 
+// Admin-only — transfer a student's enrollment to a different course
+// or a different batch within the same institution. Both write only
+// the affected column on the enrollments row; attendance, payments,
+// certificates, and belt history all reference the enrollment id so
+// they remain intact after the swap.
+router.patch('/:id/course',
+  verifyToken,
+  requireRole('admin'),
+  requireActiveSubscription,
+  enrollmentController.changeEnrollmentCourse);
+router.patch('/:id/batch',
+  verifyToken,
+  requireRole('admin'),
+  requireActiveSubscription,
+  enrollmentController.transferEnrollmentBatch);
+
 // Admin-only — soft-delete a student (institution + branch login).
 // Used by the Students tab delete action. Mirrors the trainer-delete
 // pattern (marks users.is_deleted = TRUE, status = 'inactive') so

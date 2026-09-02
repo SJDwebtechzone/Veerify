@@ -1,4 +1,8 @@
 const pool = require('../config/db');
+// Fire-and-forget WhatsApp fan-out for globally-published events.
+// Never throws — the CMS create flow stays clean even when WA is
+// unreachable.
+const { notifyEventCreatedWA } = require('../services/eventWhatsApp.service');
 
 /**
  * Generic CMS table helper. Each resource has the same CRUD shape
@@ -131,14 +135,43 @@ const videos = makeCrud({
   cols: ['title', 'trainer', 'duration', 'video_url', 'thumbnail_url', 'is_free', 'is_active', 'sort_order'],
 });
 
-const events = makeCrud({
+const eventsBase = makeCrud({
   table: 'mobile_events',
   cols: [
-    'title', 'subtitle', 'image_url', 'link',
+    'title', 'subtitle', 'description', 'image_url', 'link',
     'location', 'event_date', 'registration_closing_date',
     'is_active', 'sort_order',
   ],
   dateCols: ['event_date', 'registration_closing_date'],
 });
+
+// Wrap the CMS `create` so a successful Web Admin insert also fires a
+// scope='global' WhatsApp fan-out to every eligible student across
+// every institution. Same fire-and-forget pattern the institution
+// path uses — WA failures never fail the API response.
+const events = {
+  ...eventsBase,
+  create: async (req, res) => {
+    // Preserve the standard create path (validation, insert, response)
+    // by delegating to the underlying helper via a fake res that
+    // captures the payload it would have returned, then re-emits it.
+    let statusCode = 200;
+    let payload = null;
+    const captureRes = {
+      status(code) { statusCode = code; return this; },
+      json(body)   { payload = body; return this; },
+    };
+    await eventsBase.create(req, captureRes);
+    // Success case → the underlying create replied 201 with an item.
+    // Every other case (400 / 500) short-circuits without WhatsApp.
+    if (statusCode >= 200 && statusCode < 300 && payload && payload.item) {
+      notifyEventCreatedWA(payload.item, {
+        scope: 'global',
+        institutionName: null,
+      }).catch(() => { /* swallowed inside the helper */ });
+    }
+    return res.status(statusCode).json(payload);
+  },
+};
 
 module.exports = { banners, categories, videos, events };

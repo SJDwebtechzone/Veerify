@@ -20,6 +20,17 @@ import {
   Dimensions, Image, Alert, ActivityIndicator, RefreshControl,
   Linking, Modal, FlatList,
 } from 'react-native';
+// SVG powers the subtle blue-glass atmosphere behind the dashboard
+// (vertical gradient wash + three low-opacity radial "blobs") and the
+// warm red gradient inside the greeting card. No new native module
+// required — react-native-svg is already a project dep.
+import Svg, {
+  Defs,
+  LinearGradient as SvgLinearGradient,
+  RadialGradient as SvgRadialGradient,
+  Stop,
+  Rect,
+} from 'react-native-svg';
 import { useFocusEffect } from '@react-navigation/native';
 import {
   Bell, Users, GraduationCap, Calendar, Wallet,
@@ -166,6 +177,16 @@ export default function AdminDashboardScreen({ navigation }) {
   const [branches, setBranches] = useState([]);
   const [selectedBranch, setSelectedBranch] = useState(null);
   const [branchPickerOpen, setBranchPickerOpen] = useState(false);
+  // Event-type modal — asks the admin to pick Inter-Level or
+  // Intra-Level before opening the shared CreateEventScreen form.
+  const [eventTypeModalOpen, setEventTypeModalOpen] = useState(false);
+
+  // Upcoming events surfaced on the admin Home. Includes the
+  // institution's own approved events AND every approved Intra-Level
+  // event submitted by other institutions (fanned out by the
+  // /institutions/me/events endpoint). Kept as its own piece of
+  // state so a failed events fetch doesn't wipe the other data.
+  const [eventsFeed, setEventsFeed] = useState([]);
 
   const load = useCallback(async (branchIdArg) => {
     try {
@@ -180,7 +201,7 @@ export default function AdminDashboardScreen({ navigation }) {
       // All three ride the same refresh so pull-to-refresh updates
       // everything at once. .catch on the non-critical ones keeps the
       // dashboard from failing entirely if any single endpoint hiccups.
-      const [dashRes, subRes, attRes] = await Promise.all([
+      const [dashRes, subRes, attRes, evtRes] = await Promise.all([
         apiClient.get(dashUrl),
         apiClient.get('/onboarding/subscription-status').catch((err) => {
           console.log('[AdminDashboard] subscription-status error:', err.message);
@@ -190,10 +211,41 @@ export default function AdminDashboardScreen({ navigation }) {
           console.log('[AdminDashboard] today attendance error:', err.message);
           return null;
         }),
+        // Upcoming approved events — same endpoint the trainer /
+        // student Home tabs consume. Returns this institution's own
+        // approved events + every approved Intra-Level event from
+        // other institutions (backend OR-ins e.event_type='intra').
+        // We filter locally to keep ONLY the cross-institution
+        // Intra-Level rows so the Home surfaces the "other academy"
+        // events specifically — the admin already manages their own
+        // via More → Events.
+        apiClient.get('/institutions/me/events').catch((err) => {
+          console.log('[AdminDashboard] events fetch error:', err.message);
+          return { data: { events: [] } };
+        }),
       ]);
       setData(dashRes.data || {});
       if (subRes && subRes.data) setSubscription(subRes.data);
       setTodayAtt(attRes?.data?.today || null);
+
+      // Keep only Intra-Level events submitted by OTHER institutions.
+      // The dashboard fetch returns institution_id on every row and
+      // the current admin's institution_id lives on `institution` /
+      // `user`. Fallback: also treat rows where source='global' as
+      // cross-institution when institution_id isn't populated.
+      const myInstId =
+        institution?.id ||
+        user?.institution_id ||
+        null;
+      const otherIntras = (evtRes?.data?.events || []).filter((e) => {
+        const isIntra = e.event_type === 'intra' || e.source === 'global';
+        if (!isIntra) return false;
+        if (myInstId && e.institution_id && Number(e.institution_id) === Number(myInstId)) {
+          return false;
+        }
+        return true;
+      });
+      setEventsFeed(otherIntras);
 
       // Populate the branch list when the dashboard says branches are
       // enabled AND we don't already have them. Sub-branch admins
@@ -254,7 +306,8 @@ export default function AdminDashboardScreen({ navigation }) {
     setSelectedBranch(branch);
     load(branch?.id ?? null);
   }, [load]);
-
+  
+  
   // Greeting prefers the academy name; falls back to the owner's first name
   // if for any reason the institution row hasn't loaded yet.
   const academyName = institution?.name || (user?.name || 'Academy').split(' ')[0];
@@ -408,6 +461,50 @@ export default function AdminDashboardScreen({ navigation }) {
 
   return (
     <View style={styles.screen}>
+      {/* ── Ambient background layer ──
+          A single SVG paints the whole screen: a very soft vertical
+          blue wash + three low-opacity radial "blobs" placed in the
+          top-left, mid-right, and bottom center. Reads as a premium
+          fintech / fitness-app atmosphere without stealing focus
+          from the cards. pointerEvents="none" so it never eats taps
+          bound for the ScrollView above. */}
+      <View style={StyleSheet.absoluteFill} pointerEvents="none">
+        <Svg
+          style={StyleSheet.absoluteFill}
+          preserveAspectRatio="none"
+          viewBox="0 0 100 100"
+        >
+          <Defs>
+            <SvgLinearGradient id="dashBgWash" x1="0" y1="0" x2="0" y2="1">
+              <Stop offset="0"    stopColor="#EAF2FB" />
+              <Stop offset="0.55" stopColor="#E1ECF8" />
+              <Stop offset="1"    stopColor="#D8E5F4" />
+            </SvgLinearGradient>
+            {/* Two very low-opacity abstract blue "glow" blobs — one
+                cool blue in the top-right echoing the navy header
+                above, one soft periwinkle at bottom-left. Both fade
+                to fully transparent so they read as "atmosphere"
+                rather than "graphics". */}
+            <SvgRadialGradient id="dashBlobTR" cx="0.9" cy="0.1" rx="0.6" ry="0.45">
+              <Stop offset="0"   stopColor="#93C5FD" stopOpacity="0.22" />
+              <Stop offset="1"   stopColor="#93C5FD" stopOpacity="0" />
+            </SvgRadialGradient>
+            <SvgRadialGradient id="dashBlobBL" cx="0.1" cy="0.9" rx="0.6" ry="0.45">
+              <Stop offset="0"   stopColor="#A5B4FC" stopOpacity="0.22" />
+              <Stop offset="1"   stopColor="#A5B4FC" stopOpacity="0" />
+            </SvgRadialGradient>
+            <SvgRadialGradient id="dashBlobMid" cx="0.5" cy="0.5" rx="0.5" ry="0.35">
+              <Stop offset="0"   stopColor="#BAE6FD" stopOpacity="0.12" />
+              <Stop offset="1"   stopColor="#BAE6FD" stopOpacity="0" />
+            </SvgRadialGradient>
+          </Defs>
+          <Rect x="0" y="0" width="100" height="100" fill="url(#dashBgWash)" />
+          <Rect x="0" y="0" width="100" height="100" fill="url(#dashBlobTR)" />
+          <Rect x="0" y="0" width="100" height="100" fill="url(#dashBlobBL)" />
+          <Rect x="0" y="0" width="100" height="100" fill="url(#dashBlobMid)" />
+        </Svg>
+      </View>
+
       <ScrollView
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
@@ -425,6 +522,50 @@ export default function AdminDashboardScreen({ navigation }) {
             a member-since line, and the notification bell. Replaces the
             old solid-red hero. */}
         <View style={styles.topBar}>
+          {/* Deep navy → royal-blue gradient with a soft cyan glow.
+              Matches the Veerify brand blue in the reference. A very
+              subtle diagonal white "gloss" line hints at glass caught
+              light without going full skeuomorphic. Painted with SVG
+              so no extra native module is required. */}
+          <View style={StyleSheet.absoluteFill} pointerEvents="none">
+            <Svg
+              style={StyleSheet.absoluteFill}
+              preserveAspectRatio="none"
+              viewBox="0 0 100 100"
+            >
+              <Defs>
+                <SvgLinearGradient id="topBarWash" x1="0" y1="0" x2="1" y2="1">
+                  <Stop offset="0"    stopColor="#1E3A8A" stopOpacity="1" />
+                  <Stop offset="0.55" stopColor="#1D4ED8" stopOpacity="1" />
+                  <Stop offset="1"    stopColor="#0F172A" stopOpacity="1" />
+                </SvgLinearGradient>
+                {/* Cool cyan highlight in the top-right → depth + a
+                    hint of the brand's electric-blue accent. */}
+                <SvgRadialGradient id="topBarCyanGlow" cx="0.85" cy="0.15" rx="0.55" ry="0.5">
+                  <Stop offset="0"   stopColor="#60A5FA" stopOpacity="0.28" />
+                  <Stop offset="1"   stopColor="#60A5FA" stopOpacity="0" />
+                </SvgRadialGradient>
+                {/* Ultra-faint white gloss diagonal — the "wet glass"
+                    highlight along the panel's curve. */}
+                <SvgLinearGradient id="topBarGloss" x1="0" y1="0" x2="1" y2="0.4">
+                  <Stop offset="0"    stopColor="#FFFFFF" stopOpacity="0" />
+                  <Stop offset="0.45" stopColor="#FFFFFF" stopOpacity="0.08" />
+                  <Stop offset="0.55" stopColor="#FFFFFF" stopOpacity="0.06" />
+                  <Stop offset="1"    stopColor="#FFFFFF" stopOpacity="0" />
+                </SvgLinearGradient>
+                {/* Deeper navy pool in the bottom-left — grounds the
+                    panel and reads as ambient shadow. */}
+                <SvgRadialGradient id="topBarShade" cx="0.1" cy="0.9" rx="0.5" ry="0.5">
+                  <Stop offset="0"   stopColor="#0B1120" stopOpacity="0.35" />
+                  <Stop offset="1"   stopColor="#0B1120" stopOpacity="0" />
+                </SvgRadialGradient>
+              </Defs>
+              <Rect x="0" y="0" width="100" height="100" fill="url(#topBarWash)" />
+              <Rect x="0" y="0" width="100" height="100" fill="url(#topBarCyanGlow)" />
+              <Rect x="0" y="0" width="100" height="100" fill="url(#topBarShade)" />
+              <Rect x="0" y="0" width="100" height="100" fill="url(#topBarGloss)" />
+            </Svg>
+          </View>
           {/* Notification bell anchored to the top-right of the
               Welcome card so it visually reads as part of the
               greeting. Unread badge + tap-to-notifications behavior
@@ -592,7 +733,12 @@ export default function AdminDashboardScreen({ navigation }) {
             ];
             return branchView ? branchTiles : stats;
           })().reduce((rows, stat, idx) => {
-            if (idx % 2 === 0) rows.push([stat]);
+            // Group into rows of 3 so the stats grid renders as a
+            // three-column layout (was two-column). The trailing
+            // padding view below fills empty cells when the total
+            // isn't divisible by 3 so the last row's tiles keep
+            // their intrinsic width.
+            if (idx % 3 === 0) rows.push([stat]);
             else rows[rows.length - 1].push(stat);
             return rows;
           }, []).map((row, ri) => (
@@ -608,8 +754,12 @@ export default function AdminDashboardScreen({ navigation }) {
                   onPress={s.onPress}
                 />
               ))}
-              {/* Pad odd-count rows so the last tile keeps its width. */}
-              {row.length === 1 ? <View style={{ flex: 1 }} /> : null}
+              {/* Pad short rows so the last tile keeps its width. */}
+              {row.length < 3
+                ? Array.from({ length: 3 - row.length }).map((_, i) => (
+                    <View key={`pad-${i}`} style={{ flex: 1 }} />
+                  ))
+                : null}
             </View>
           ))}
         </View>
@@ -642,7 +792,11 @@ export default function AdminDashboardScreen({ navigation }) {
               {
                 icon: GraduationCap,
                 label: 'Trainers',
-                accent: palette.rose,
+                // Switched from rose → pink so Add Student (red)
+                // and Trainers no longer read as the same hue at
+                // a glance. Pink is the brightest distinctly non-
+                // red option in the palette.
+                accent: palette.pink,
                 onPress: () => navigation.navigate('TrainersList'),
               },
               // Add Course / Create Batch / Trainer Approvals / Refer & Earn
@@ -652,7 +806,7 @@ export default function AdminDashboardScreen({ navigation }) {
               // `mainOnly` flag — filtered out below).
               { icon: BookOpen,     label: 'Add Course',       accent: palette.teal,   mainOnly: true, onPress: () => navigation.navigate('CreateCourse') },
               { icon: CalendarPlus, label: 'Create Batch',     accent: palette.blue,   mainOnly: true, onPress: () => navigation.navigate('CreateBatch') },
-              { icon: BellPlus,     label: 'Add Event',        accent: palette.green,  onPress: () => navigation.navigate('CreateEvent') },
+              { icon: BellPlus,     label: 'Add Event',        accent: palette.green,  onPress: () => setEventTypeModalOpen(true) },
               { icon: Megaphone,    label: 'Send Notice',      accent: palette.orange, onPress: () => navigation.navigate('SendAnnouncement') },
               // Trainer Leaves — main-institution only. Leave
               // approval / rejection is a parent-academy
@@ -661,8 +815,13 @@ export default function AdminDashboardScreen({ navigation }) {
               // below drops the row entirely, and the grid
               // reflows automatically because it's built by
               // chunking the surviving actions into rows of 3).
-              { icon: CalendarOff,  label: 'Trainer Leaves',   accent: palette.rose,   mainOnly: true, onPress: () => navigation.navigate('AdminTrainerLeaves') },
-              { icon: Megaphone,    label: 'Trainer Approvals', accent: palette.purple, mainOnly: true, onPress: () => navigation.navigate('PendingAnnouncements') },
+              // Trainer Leaves reads as an "unavailable" state —
+              // amber/orange matches the semantic of a leave/warning.
+              { icon: CalendarOff,  label: 'Trainer Leaves',   accent: palette.orange, mainOnly: true, onPress: () => navigation.navigate('AdminTrainerLeaves') },
+              // Trainer Approvals is a positive review action — teal
+              // reads distinctly against Add Student (red) that
+              // used to share the same purple accent.
+              { icon: Megaphone,    label: 'Trainer Approvals', accent: palette.teal,   mainOnly: true, onPress: () => navigation.navigate('PendingAnnouncements') },
               { icon: Gift,         label: 'Refer & Earn',     accent: palette.green,  mainOnly: true, onPress: () => navigation.navigate('AdminReferEarn') },
             ].filter((qa) => !(qa.mainOnly && data.is_sub_branch))
              .reduce((rows, qa, idx) => {
@@ -739,6 +898,86 @@ export default function AdminDashboardScreen({ navigation }) {
         </View>
         )}
 
+        {/* ───── Community Events (approved intras from OTHER academies) ─────
+            Cross-institution events promoted by the super-admin fan
+            out to every academy's Home. This section renders only
+            those rows — the admin's own events live under More →
+            Events, unchanged. Hidden in Branch View to keep the
+            trimmed analytics layout, and hidden entirely when the
+            feed is empty so the Home doesn't grow a placeholder. */}
+        {branchView || eventsFeed.length === 0 ? null : (
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Community Events</Text>
+              {/* <Text style={styles.sectionSubtitle}>
+                Approved by Veerify · from other academies
+              </Text> */}
+            </View>
+            <View style={styles.activityCard}>
+              {eventsFeed.slice(0, 6).map((e, i) => {
+                const d = e.event_date ? new Date(e.event_date) : null;
+                const day = d ? String(d.getDate()).padStart(2, '0') : '--';
+                const mon = d ? d.toLocaleString('en-US', { month: 'short' }).toUpperCase() : '---';
+                const org = e.organizing_institution_name || e.institution_name || null;
+                return (
+                  <TouchableOpacity
+                    key={e.id || i}
+                    activeOpacity={0.85}
+                    onPress={() => navigation.navigate('EventDetail', { event: e })}
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: spacing.md,
+                      paddingVertical: spacing.sm,
+                      borderBottomWidth: i < Math.min(6, eventsFeed.length) - 1 ? 1 : 0,
+                      borderBottomColor: 'rgba(148,163,184,0.22)',
+                    }}
+                  >
+                    {/* Date block — same visual language as the
+                        EventsListScreen card. */}
+                    <View style={{
+                      width: 44, height: 44, borderRadius: radius.md,
+                      backgroundColor: palette.purple.soft,
+                      alignItems: 'center', justifyContent: 'center',
+                    }}>
+                      <Text style={{ ...type.bodyBold, color: palette.purple.vivid, fontSize: 14, lineHeight: 16 }}>
+                        {day}
+                      </Text>
+                      <Text style={{ ...type.micro, color: palette.purple.vivid, fontSize: 9 }}>
+                        {mon}
+                      </Text>
+                    </View>
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text style={{ ...type.bodyBold, color: palette.text }} numberOfLines={1}>
+                        {e.title}
+                      </Text>
+                      {org ? (
+                        <Text
+                          style={{
+                            ...type.caption,
+                            color: palette.purple.vivid,
+                            fontWeight: '700',
+                            marginTop: 2,
+                          }}
+                          numberOfLines={1}
+                        >
+                          Organized by {org}
+                        </Text>
+                      ) : null}
+                      {e.location ? (
+                        <Text style={{ ...type.caption, color: palette.textMuted, marginTop: 1 }} numberOfLines={1}>
+                          {e.location}
+                        </Text>
+                      ) : null}
+                    </View>
+                    <ChevronRight size={16} color={palette.textLight} strokeWidth={2.2} />
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+        )}
+
         {/* ───── Recent activity teaser (hidden in Branch View) ───── */}
         {branchView ? null : (
         <View style={styles.section}>
@@ -787,6 +1026,89 @@ export default function AdminDashboardScreen({ navigation }) {
         {/* Footer spacer so content clears the floating tab bar + FAB */}
         <View style={{ height: 110 }} />
       </ScrollView>
+
+      {/* ───── Event-type picker modal ─────
+          Opened by the "Add Event" quick-action tile above. The admin
+          picks Inter-Level (institution-local, publishes immediately)
+          or Intra-Level (cross-institution, goes to super-admin
+          approval queue). Both routes lead to the SAME
+          CreateEventScreen; the type is forwarded as a route param
+          and read by the form on submit. No layout impact — the
+          Modal renders in a portal above everything else. */}
+      <Modal
+        visible={eventTypeModalOpen}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setEventTypeModalOpen(false)}
+      >
+        <TouchableOpacity
+          style={eventTypePickerStyles.backdrop}
+          activeOpacity={1}
+          onPress={() => setEventTypeModalOpen(false)}
+        >
+          <TouchableOpacity
+            style={eventTypePickerStyles.sheet}
+            activeOpacity={1}
+            onPress={() => {}}
+          >
+            <Text style={eventTypePickerStyles.title}>Select Event Type</Text>
+            {/* <Text style={eventTypePickerStyles.subtitle}>
+              Where should this event appear?
+            </Text> */}
+
+            {/* Display order swapped — Intra-Level tile now renders
+                first, Inter-Level second. Underlying navigation params
+                (`eventType: 'intra' | 'inter'`) are unchanged so the
+                CreateEventScreen + backend approval routing behave
+                exactly as before. */}
+            <TouchableOpacity
+              style={eventTypePickerStyles.option}
+              activeOpacity={0.85}
+              onPress={() => {
+                setEventTypeModalOpen(false);
+                navigation.navigate('CreateEvent', { eventType: 'intra' });
+              }}
+            >
+              <View style={[eventTypePickerStyles.optIcon, { backgroundColor: palette.orange.soft }]}>
+                <Megaphone size={22} color={palette.orange.vivid} strokeWidth={2.2} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={eventTypePickerStyles.optTitle}>Inter-Level Event</Text>
+                <Text style={eventTypePickerStyles.optDesc}>
+                  Promoted to all institutions, Students and Trainers after Veerify review. Acknowledged within 24 hours.
+                </Text>
+              </View>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={eventTypePickerStyles.option}
+              activeOpacity={0.85}
+              onPress={() => {
+                setEventTypeModalOpen(false);
+                navigation.navigate('CreateEvent', { eventType: 'inter' });
+              }}
+            >
+              <View style={[eventTypePickerStyles.optIcon, { backgroundColor: palette.blue.soft }]}>
+                <BellPlus size={22} color={palette.blue.vivid} strokeWidth={2.2} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={eventTypePickerStyles.optTitle}>Intra-Level Event</Text>
+                <Text style={eventTypePickerStyles.optDesc}>
+                  Visible only to your institution's students and trainers. Publishes immediately.
+                </Text>
+              </View>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={eventTypePickerStyles.cancel}
+              activeOpacity={0.7}
+              onPress={() => setEventTypeModalOpen(false)}
+            >
+              <Text style={eventTypePickerStyles.cancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
 
       {/* Branch picker is now an inline expanding dropdown rendered
           inside BranchPickerBar above — no bottom-sheet modal. */}
@@ -1034,7 +1356,16 @@ const subStyles = StyleSheet.create({
     gap: 12,
     padding: 14,
     borderRadius: radius.lg,
-    marginTop: spacing.lg,
+    // Extra breathing room above the banner. The navy topBar
+    // above has a large blue drop shadow (elevation 10 + a soft
+    // outward glow) that was bleeding into this card at the
+    // previous `spacing.lg` gap — the two elements read as a
+    // single overlapping block. Bumping to `xxl` clears the
+    // shadow zone completely.
+    marginTop: spacing.xxl,
+    // Symmetric bottom gap so the banner's own drop shadow
+    // doesn't collide with the stats-tile row that follows.
+    marginBottom: spacing.lg,
     borderWidth: 1,
   },
   iconWrap: {
@@ -1081,8 +1412,23 @@ const subStyles = StyleSheet.create({
   },
 });
 
+// ── Glassmorphism tokens (scoped to this screen only) ──────────────
+// Frosted white surface + light hairline border + soft outward shadow
+// sits over the light-blue ambient background paint to read as
+// "frosted glass". No native blur (that would need a new native
+// module) — depth comes from opacity + border + shadow. The top
+// highlight is a slightly brighter inner border along the top edge
+// that mimics light catching the rim of a glass panel.
+const GLASS_FILL         = 'rgba(255,255,255,0.72)';   // stat / quick / chart / activity cards
+const GLASS_FILL_STRONG  = 'rgba(255,255,255,0.88)';   // identity card — more prominent
+const GLASS_BORDER_LIGHT = 'rgba(255,255,255,0.55)';   // hairline light border
+const GLASS_HIGHLIGHT    = 'rgba(255,255,255,0.9)';    // top-edge highlight
+
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: palette.bg },
+  // Very light blue-tinted base sits UNDER the SVG ambient layer
+  // painted in the render. Kept as a fallback so there's no flash
+  // of pure white before the SVG mounts on first frame.
+  screen: { flex: 1, backgroundColor: '#DCEBFF' },
   scrollContent: {
     // Hero bleeds to the very top of the screen — the hero itself
     // handles status-bar padding so the brand-red panel runs edge to
@@ -1102,10 +1448,23 @@ const styles = StyleSheet.create({
     paddingTop: spacing.xxxl,
     paddingBottom: spacing.lg,
     marginBottom: spacing.lg,
-    backgroundColor: palette.purple.soft,
+    // Deep navy base fill kept in case the SVG gradient wash fails
+    // to mount on very old Android GPUs — the greeting text still
+    // reads (white on navy).
+    backgroundColor: '#1E3A8A',
     borderBottomLeftRadius: radius.xxl,
     borderBottomRightRadius: radius.xxl,
     position: 'relative',
+    // Hard-clip the SVG gradient wash to the rounded footprint so
+    // the navy doesn't spill past the header's curved corners.
+    overflow: 'hidden',
+    // Deep blue outward shadow so the header lifts off the pale-blue
+    // background — reads as a premium glass slab.
+    shadowColor: '#1E40AF',
+    shadowOpacity: 0.28,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 10,
   },
   // Top-right anchor for the notification bell inside the greeting
   // area. Vertically nudged so it lines up with the "Good morning"
@@ -1116,37 +1475,65 @@ const styles = StyleSheet.create({
     right: spacing.xl,
     zIndex: 2,
   },
+  // Greeting text now sits on the dark navy header, so both lines
+  // are painted in near-white with soft opacity for the eyebrow
+  // and full opacity for the name.
   greeting: {
     ...type.caption,
-    color: palette.purple.on,
+    color: 'rgba(255,255,255,0.82)',
     fontWeight: '700',
-    letterSpacing: 0.3,
+    letterSpacing: 0.4,
   },
   greetingName: {
     ...type.h1,
-    color: palette.text,
+    color: '#FFFFFF',
     marginTop: 2,
     marginBottom: spacing.lg,
     // Reserve space for the absolutely-positioned bell in the
     // top-right so a long first name never runs under the icon.
     paddingRight: 48,
+    // Subtle text-shadow so the white name reads sharply against
+    // the mid-blue gradient stop even at small sizes.
+    textShadowColor: 'rgba(0,0,0,0.25)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
   },
 
-  // Identity card that holds the logo + name + bell
+  // Identity card that holds the logo + name + bell.
+  // Sits INSIDE the dark navy header, so it uses a translucent
+  // white glass overlay (low opacity) with a bright white top-edge
+  // highlight. Reads as "glass slab" caught in the navy header's
+  // ambient light — the visual anchor of the screen.
   identityCard: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.md,
-    backgroundColor: palette.surface,
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    borderTopWidth: 1.5,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderLeftWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.55)',
+    borderRightColor: 'rgba(255,255,255,0.22)',
+    borderBottomColor: 'rgba(255,255,255,0.22)',
+    borderLeftColor: 'rgba(255,255,255,0.22)',
     borderRadius: radius.xl,
     padding: spacing.md,
-    ...shadows.card,
+    // Soft cyan inner glow via shadow — reinforces the "premium
+    // glass caught in blue light" look from the reference.
+    shadowColor: '#60A5FA',
+    shadowOpacity: 0.30,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 6,
   },
   logoWrap: { padding: 0 },
   logoRing: {
     width: 56, height: 56, borderRadius: 28,
     padding: 3,
-    backgroundColor: palette.purple.soft,
+    // Light glass ring around the logo so a dark logo reads on the
+    // navy header. Same padding + size as before → logo pixel-perfect.
+    backgroundColor: 'rgba(255,255,255,0.9)',
     alignItems: 'center', justifyContent: 'center',
   },
   topBarLogo: {
@@ -1161,10 +1548,13 @@ const styles = StyleSheet.create({
   topBarLogoInitial: { fontSize: 20, fontWeight: '800', color: '#fff' },
 
   nameRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  topBarName: { ...type.h2, color: palette.text, flexShrink: 1 },
+  // Academy name + sub-line render on the translucent identity
+  // glass over the navy header. Repainted white / light for
+  // contrast — same content, high readability.
+  topBarName: { ...type.h2, color: '#FFFFFF', flexShrink: 1 },
   topBarSub: {
     ...type.caption,
-    color: palette.textMuted,
+    color: 'rgba(255,255,255,0.78)',
     marginTop: 2,
     fontWeight: '600',
   },
@@ -1257,8 +1647,11 @@ const styles = StyleSheet.create({
   dotText: { color: palette.rose.vivid, fontSize: 9, fontWeight: '800' },
 
   // Stats grid (legacy - kept in case anything else references it)
-  statsGrid: { gap: spacing.md, marginBottom: spacing.xxl },
-  statsRow: { flexDirection: 'row', gap: spacing.md },
+  // Stats grid switched to 3-per-row. Slightly tighter gap so all
+  // three tiles fit comfortably on a portrait phone (~360dp) once
+  // the outer 20dp horizontal padding is subtracted.
+  statsGrid: { gap: spacing.sm + 2, marginBottom: spacing.xxl },
+  statsRow: { flexDirection: 'row', gap: spacing.sm + 2 },
 
   // ── Branch picker bar ──────────────────────────────────────────
   branchBar: {
@@ -1475,10 +1868,20 @@ const styles = StyleSheet.create({
   linkText: { ...type.caption, color: palette.purple.vivid, fontWeight: '700' },
 
   // Quick actions — outer card stacks the rows vertically.
+  // Frosted-glass panel: translucent white + subtly brighter top
+  // border (fake light "catching" the top edge of the panel).
   quickActions: {
-    backgroundColor: palette.surface,
+    backgroundColor: GLASS_FILL,
+    borderTopWidth: 1.5,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderLeftWidth: 1,
+    borderTopColor: GLASS_HIGHLIGHT,
+    borderRightColor: GLASS_BORDER_LIGHT,
+    borderBottomColor: GLASS_BORDER_LIGHT,
+    borderLeftColor: GLASS_BORDER_LIGHT,
     padding: spacing.lg,
-    borderRadius: radius.lg,
+    borderRadius: radius.xl,
     gap: spacing.lg,
     ...shadows.card,
   },
@@ -1489,10 +1892,18 @@ const styles = StyleSheet.create({
     gap: spacing.md,
   },
 
-  // Chart
+  // Chart — glass surface over the ambient blue backdrop.
   chartCard: {
-    backgroundColor: palette.surface,
-    borderRadius: radius.lg,
+    backgroundColor: GLASS_FILL,
+    borderTopWidth: 1.5,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderLeftWidth: 1,
+    borderTopColor: GLASS_HIGHLIGHT,
+    borderRightColor: GLASS_BORDER_LIGHT,
+    borderBottomColor: GLASS_BORDER_LIGHT,
+    borderLeftColor: GLASS_BORDER_LIGHT,
+    borderRadius: radius.xl,
     padding: spacing.lg,
     paddingRight: spacing.sm,
     minHeight: 200,
@@ -1516,10 +1927,18 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
   },
 
-  // Activity
+  // Activity — glass surface matching the chart / quick-actions card.
   activityCard: {
-    backgroundColor: palette.surface,
-    borderRadius: radius.lg,
+    backgroundColor: GLASS_FILL,
+    borderTopWidth: 1.5,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderLeftWidth: 1,
+    borderTopColor: GLASS_HIGHLIGHT,
+    borderRightColor: GLASS_BORDER_LIGHT,
+    borderBottomColor: GLASS_BORDER_LIGHT,
+    borderLeftColor: GLASS_BORDER_LIGHT,
+    borderRadius: radius.xl,
     padding: spacing.lg,
     ...shadows.card,
   },
@@ -1533,4 +1952,53 @@ const styles = StyleSheet.create({
   activityTitle: { ...type.bodyBold, color: palette.text },
   activityMeta: { ...type.caption, color: palette.textMuted, marginTop: 2 },
   divider: { height: 1, backgroundColor: palette.borderSoft },
+});
+
+// Event-type picker modal — scoped to the AdminDashboard so it can
+// reuse the app palette / spacing tokens without adding a whole new
+// shared component just for two options.
+const eventTypePickerStyles = StyleSheet.create({
+  backdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(15,23,42,0.55)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: spacing.xl,
+  },
+  sheet: {
+    width: '100%',
+    maxWidth: 400,
+    backgroundColor: '#FFFFFF',
+    borderRadius: radius.xl,
+    padding: spacing.xl,
+    gap: spacing.md,
+    shadowColor: '#0F172A',
+    shadowOpacity: 0.20,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 12 },
+    elevation: 12,
+  },
+  title:    { ...type.h2, color: palette.text, textAlign: 'center' },
+  subtitle: { ...type.caption, color: palette.textMuted, textAlign: 'center', marginBottom: spacing.sm },
+  option: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    padding: spacing.md,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: palette.borderSoft,
+  },
+  optIcon: {
+    width: 44, height: 44, borderRadius: radius.md,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  optTitle: { ...type.bodyBold, color: palette.text },
+  optDesc:  { ...type.caption, color: palette.textMuted, marginTop: 2 },
+  cancel: {
+    marginTop: spacing.sm,
+    paddingVertical: spacing.md,
+    alignItems: 'center',
+  },
+  cancelText: { ...type.bodyBold, color: palette.textMuted },
 });

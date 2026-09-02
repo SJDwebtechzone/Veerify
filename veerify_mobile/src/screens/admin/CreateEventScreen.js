@@ -12,7 +12,7 @@
 // Form mirrors the existing CMS events schema so super-admin curated rows
 // and academy-created rows have the same shape.
 
-import React, { useMemo, useRef, useState } from 'react';
+import React, { createContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, ScrollView, TextInput, TouchableOpacity, ActivityIndicator,
   StyleSheet, Alert, KeyboardAvoidingView, Platform, Image, Modal, FlatList,
@@ -21,6 +21,7 @@ import {
 import {
   ArrowLeft, Calendar, MapPin, Link as LinkIcon, Image as ImageIcon,
   Type, ChevronRight, X, CreditCard, Clock, Send, Check,
+  Layers, Trash2, Plus, ChevronDown,
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
@@ -33,43 +34,430 @@ import { confirm } from '../../components/ConfirmDialog';
 // the academy logo + course banner upload uses.
 import { launchImageLibrary } from 'react-native-image-picker';
 import resolveAssetUrl from '../../utils/assetUrl';
+// Institution Home visual system — ambient blue wash + glass
+// cards + navy accents. Reused verbatim so this screen belongs to
+// the same design language as the rest of the institution UI.
+import InstitutionScreenBackground, {
+  INSTITUTION_BG_BASE,
+} from '../../components/InstitutionScreenBackground';
+import { useTheme } from '../../theme/ThemeContext';
 
+// ── Institution-Home glass tokens ─────────────────────────────
+const GLASS_FILL         = 'rgba(255,255,255,0.72)';
+const GLASS_FILL_STRONG  = 'rgba(255,255,255,0.88)';
+const GLASS_BORDER_LIGHT = 'rgba(255,255,255,0.55)';
+const GLASS_HIGHLIGHT    = 'rgba(255,255,255,0.9)';
+const GLASS_SHADOW       = '#1E40AF';
+const BRAND_DARK_BLUE    = '#1E3A8A';
+const BRAND_ACCENT_SOFT  = 'rgba(30,58,138,0.10)';
+const HEADER_NAVY        = '#0F172A';
+
+// Local theme tokens — names kept unchanged so every card / border
+// / text style inherits the Institution Home look automatically.
 const BRAND       = '#E63946';
 const BRAND_SOFT  = '#FFE4E6';
-const TEXT        = '#111827';
+const TEXT        = HEADER_NAVY;
 const TEXT_MUTED  = '#6B7280';
 const TEXT_LIGHT  = '#9CA3AF';
-const SURFACE     = '#FFFFFF';
-const BG          = '#F4F4F8';
-const BORDER      = '#E5E7EB';
+const SURFACE     = GLASS_FILL_STRONG;
+const BG          = INSTITUTION_BG_BASE;
+const BORDER      = GLASS_BORDER_LIGHT;
 
-export default function CreateEventScreen({ navigation }) {
-  const [form, setForm] = useState({
-    title: '',
-    subtitle: '',
-    description: '',
-    event_date: '',                  // ISO yyyy-mm-dd from DateField
-    registration_closing_date: '',
-    location: '',
-    image_url: '',
-    image_uri: '',                   // local preview only
-    link: '',
+// Local context so nested sub-components pick up dark-mode
+// overrides without prop-drilling.
+const CreateEventCtx = createContext({ isDark: false, dark: {} });
 
-    // New — payment gate. When on, students/trainers see a "Pay ₹X"
-    // button on the event that mints a Razorpay Payment Link at tap
-    // time — same integrated flow as the subscription Pay Now.
-    payment_required: false,
-    payment_amount: '',            // rupees, string in input, coerced to number on submit
+function buildDarkOverrides(pal) {
+  return StyleSheet.create({
+    screen:      { backgroundColor: pal.bg },
+    header:      { backgroundColor: pal.surface, borderBottomColor: pal.border },
+    headerTitle: { color: pal.text },
+    headerSub:   { color: pal.textMuted },
+    iconBtn:     { backgroundColor: pal.border },
+    card:        { backgroundColor: pal.surface, borderColor: pal.border },
+    catBlock:    { backgroundColor: pal.surface, borderColor: pal.border },
+    sectionTitle:{ color: pal.textMuted },
+    label:       { color: pal.textMuted },
+  });
+}
 
-    // New — publish scheduling. 'now' publishes immediately; 'later'
-    // requires publish_date + publish_time (hh:mm 24h).
-    publish_mode: 'now',             // 'now' | 'later'
-    publish_date: '',
-    publish_time: '',                // 'HH:mm'
+// Canonical categories the organiser can start from. "Other" opens
+// a free-text field so events aimed at a custom bucket (e.g. "Sub-
+// Junior Category") are still captured.
+// Categories offered in the Category Name dropdown. Order is
+// deliberate — youngest first — so age-appropriate options appear at
+// the top of the picker. "Sub-Junior" was added per product spec to
+// cover younger participants that did not fit under "Junior".
+const CATEGORY_OPTIONS = [
+  'Sub-Junior Category',
+  'Junior Category',
+  'Senior Category',
+  'Other',
+];
+
+// Age range the From / To dropdowns choose from. Covers everyone from
+// young beginners through adult / senior players. Stored as strings so
+// dropdown equality is trivial.
+const AGE_OPTIONS = Array.from({ length: 77 }, (_, i) => String(i + 4)); // 4 … 80
+
+// Gender bucket for each category. Kept as an explicit list — no
+// "Other" for now, per product spec — so the picker is unambiguous
+// and the stored value maps 1:1 to what the registrant sees.
+const GENDER_OPTIONS = ['Male', 'Female'];
+
+import RegistrationFormBuilder from '../../components/RegistrationFormBuilder';
+
+export default function CreateEventScreen({ navigation, route }) {
+  // Edit mode. Set when the caller (EventsList "Edit event" button on
+  // pending Inter-Level events) passes an existing event blob via
+  // route.params.editEvent. In edit mode we PUT to the existing row
+  // instead of POSTing a new one and the header/CTA copy switches
+  // to reflect that this is an edit.
+  const editEvent = route?.params?.editEvent || null;
+  const isEdit    = !!editEvent && Number.isFinite(Number(editEvent.id));
+
+  // Event-type is chosen upstream by the "Select Event Type" modal
+  // launched from the Dashboard's Add Event tile. Missing / unknown
+  // values collapse to 'inter' so the historical direct-navigation
+  // path (no modal) still works exactly as before. In edit mode we
+  // pin to the existing row's event_type so an accidental route-param
+  // mismatch can't flip the row's type.
+  const eventType = isEdit
+    ? (editEvent.event_type === 'intra' ? 'intra' : 'inter')
+    : (route?.params?.eventType === 'intra' ? 'intra' : 'inter');
+
+  // MODULE 1: Registration Form definition. Kept as sibling state
+  // rather than merged into `form` so the existing event-creation
+  // POST body stays unchanged — the definition is persisted via a
+  // separate PUT after the event row has been created (see the
+  // submit handler below).
+  const [regForm, setRegForm] = useState({ enabled: false, fields: [] });
+  // Seed form state — in create mode everything is blank; in edit
+  // mode we hydrate from the existing event blob so the fields
+  // already show what the admin previously entered. `publish_at` is
+  // a full ISO string from the backend; we split it into a date +
+  // time pair so the existing DateField / time picker UI keeps
+  // working unchanged.
+  const [form, setForm] = useState(() => {
+    if (!isEdit) {
+      return {
+        title: '', subtitle: '', description: '',
+        event_date: '', event_time: '',
+        registration_closing_date: '',
+        location: '', image_url: '', image_uri: '', link: '',
+        payment_required: false, payment_amount: '',
+        publish_mode: 'now', publish_date: '', publish_time: '',
+      };
+    }
+    // Split publish_at (ISO) into date + HH:mm parts if scheduled.
+    let pubDate = '', pubTime = '', pubMode = 'now';
+    if (editEvent.publish_at) {
+      const d = new Date(editEvent.publish_at);
+      if (!Number.isNaN(d.getTime())) {
+        pubMode = 'later';
+        const yyyy = d.getFullYear();
+        const mm   = String(d.getMonth() + 1).padStart(2, '0');
+        const dd   = String(d.getDate()).padStart(2, '0');
+        pubDate = `${yyyy}-${mm}-${dd}`;
+        pubTime = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+      }
+    }
+    // event_date from DB may come back as 'YYYY-MM-DD' or an ISO
+    // timestamp — normalise to the date-only string DateField expects.
+    const normaliseDate = (v) => {
+      if (!v) return '';
+      const s = String(v);
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+      const d = new Date(s);
+      if (Number.isNaN(d.getTime())) return '';
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    };
+    return {
+      title:                     editEvent.title || '',
+      subtitle:                  editEvent.subtitle || '',
+      description:               editEvent.description || '',
+      event_date:                normaliseDate(editEvent.event_date),
+      event_time:                editEvent.event_time || '',
+      registration_closing_date: normaliseDate(editEvent.registration_closing_date),
+      location:                  editEvent.location || '',
+      image_url:                 editEvent.image_url || '',
+      image_uri:                 '',
+      link:                      editEvent.link || '',
+      payment_required:          !!editEvent.payment_required,
+      payment_amount:            editEvent.payment_amount != null ? String(editEvent.payment_amount) : '',
+      publish_mode:              pubMode,
+      publish_date:              pubDate,
+      publish_time:              pubTime,
+    };
   });
   const [submitting, setSubmitting] = useState(false);
   const [uploadingImage, setUploadingImage] = useState(false);
+  // Time picker is shared between the Event Time field and the
+  // Publish Time field — `timeTarget` records which one launched it
+  // so the modal writes back to the right key.
   const [timeModalOpen, setTimeModalOpen] = useState(false);
+  const [timeTarget, setTimeTarget] = useState(null); // 'event' | 'publish'
+
+  // Skills catalog for the Categories & Skills dropdown. Sourced
+  // from TWO places and merged so the picker shows every skill the
+  // organiser could reasonably assign to an event:
+  //
+  //   1. GET /api/config/enums → { skills: [...] }
+  //      The canonical martial-arts catalog that BACKS the Academy
+  //      Registration Setup Form's multi-select chips. This is the
+  //      single source of truth — the same array powers Setup, the
+  //      Web Admin trainer filters, and the Student enrolment form.
+  //
+  //   2. GET /api/institutions/me/details → institution.skills
+  //      The subset the admin actually ticked during Setup, plus any
+  //      custom entries they typed into the "Other" free-text row on
+  //      the setup wizard (which get folded into `institution.skills`
+  //      alongside the ticked chips on submit).
+  //
+  // Merging both means:
+  //   • Every canonical option appears (16 built-ins today), even for
+  //     an academy that only ticked 2 during setup — the organiser
+  //     can still assign any discipline to an event.
+  //   • Custom disciplines the academy added via "Other" also appear.
+  //   • Deduped case-insensitively so a canonical "Karate" and a
+  //     custom "karate" don't render twice.
+  const [instSkills,   setInstSkills]   = useState([]);
+  const [skillsLoading, setSkillsLoading] = useState(true);
+  const [skillsError,   setSkillsError]   = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setSkillsLoading(true);
+      setSkillsError(null);
+      try {
+        // Fire both in parallel — either can fail independently and
+        // we still surface whatever came back so the organiser is
+        // never stuck with an empty picker.
+        const [enumsRes, detailsRes] = await Promise.allSettled([
+          apiClient.get('/config/enums'),
+          apiClient.get('/institutions/me/details'),
+        ]);
+        if (cancelled) return;
+
+        const canonical = enumsRes.status === 'fulfilled'
+          ? (Array.isArray(enumsRes.value?.data?.skills) ? enumsRes.value.data.skills : [])
+          : [];
+        const owned = detailsRes.status === 'fulfilled'
+          ? (Array.isArray(detailsRes.value?.data?.institution?.skills)
+              ? detailsRes.value.data.institution.skills
+              : [])
+          : [];
+
+        // Merge + dedupe case-insensitively. Canonical order first
+        // (matches Setup Form order), then any custom-typed extras
+        // the academy added on top.
+        const seen = new Set();
+        const merged = [];
+        [...canonical, ...owned].forEach((raw) => {
+          const s = String(raw || '').trim();
+          if (!s) return;
+          const key = s.toLowerCase();
+          if (seen.has(key)) return;
+          seen.add(key);
+          merged.push(s);
+        });
+
+        setInstSkills(merged);
+        // Both endpoints failed AND the merge came back empty →
+        // surface an error so the empty state renders a hint.
+        if (
+          merged.length === 0
+          && enumsRes.status === 'rejected'
+          && detailsRes.status === 'rejected'
+        ) {
+          setSkillsError('Could not load skills. Check your connection.');
+        }
+      } catch (err) {
+        if (cancelled) return;
+        setSkillsError(err?.response?.data?.message || err?.message || 'Could not load skills.');
+      } finally {
+        if (!cancelled) setSkillsLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // ── Hydrate the Registration Form in edit mode ─────────────────
+  // Only runs once, when editing. We fetch the previously-saved
+  // registration form definition so the builder toggle + field
+  // rows come back exactly as the organiser left them. Failure is
+  // soft — an empty form just means the organiser can start fresh.
+  useEffect(() => {
+    if (!isEdit) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await apiClient.get(`/events/${editEvent.id}/registration-form`);
+        if (cancelled) return;
+        const fields = Array.isArray(r.data?.fields)
+          ? r.data.fields.map((f) => ({
+              // Keep the wire shape the builder + submit expect.
+              sourceType: f.sourceType || (f.sourceKey ? 'student' : 'custom'),
+              sourceKey:  f.sourceKey || null,
+              label:      f.label,
+              type:       f.type,
+              required:   !!f.required,
+              options:    Array.isArray(f.options) ? f.options : null,
+              sortOrder:  f.sortOrder,
+            }))
+          : [];
+        setRegForm({ enabled: !!r.data?.enabled, fields });
+      } catch (err) {
+        // Not fatal — the builder just starts blank. Log for
+        // debugging so we know if the fetch went sideways.
+        console.warn('[CreateEvent/edit] registration-form fetch failed:', err?.message);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isEdit, editEvent?.id]);
+
+  // ── Categories & Skills state ────────────────────────────────────
+  // Structure:
+  //   categories: [
+  //     {
+  //       id: string,               // stable local id for React keys
+  //       name: string,             // 'Junior Category' | 'Senior Category' | 'Other'
+  //       customName: string,       // only used when name === 'Other'
+  //       skills: [
+  //         {
+  //           id: string,
+  //           name: string,         // one of instSkills[] | 'Other'
+  //           customName: string,   // only when name === 'Other'
+  //           ageFrom: string,      // '4' … '80' from AGE_OPTIONS
+  //           ageTo:   string,
+  //         }
+  //       ]
+  //     }
+  //   ]
+  const nextIdRef = useRef(1);
+  const nextId = () => String(nextIdRef.current++);
+  // Seed categories from the existing event when editing. Every
+  // category and skill needs a local `id` for React keys, and every
+  // skill needs a `divisions` array (older rows may lack it). The
+  // persisted shape uses `age_from` / `age_to`; the UI uses camel
+  // case, so we translate here so the dropdowns pre-select correctly.
+  const [categories, setCategories] = useState(() => {
+    if (!isEdit || !Array.isArray(editEvent.categories)) return [];
+    return editEvent.categories.map((c) => ({
+      id:         nextIdRef.current++ + '',
+      name:       c?.name || 'Junior Category',
+      customName: '',
+      gender:     c?.gender === 'Female' ? 'Female' : 'Male',
+      skills: Array.isArray(c?.skills) ? c.skills.map((s) => ({
+        id:         nextIdRef.current++ + '',
+        name:       s?.name || 'Other',
+        customName: '',
+        ageFrom:    s?.age_from != null ? String(s.age_from) : '',
+        ageTo:      s?.age_to   != null ? String(s.age_to)   : '',
+        divisions:  Array.isArray(s?.divisions)
+          ? s.divisions.map((d) => ({ id: nextIdRef.current++ + '', name: d?.name || '' }))
+          : [],
+      })) : [],
+    }));
+  });
+
+  const addCategory = () => {
+    setCategories((prev) => [
+      ...prev,
+      {
+        id:         nextId(),
+        name:       'Junior Category',
+        customName: '',
+        // Gender for the category — defaults to 'Male' so new blocks
+        // always carry a valid persisted value even if the organiser
+        // never touches the dropdown.
+        gender:     'Male',
+        skills:     [{ id: nextId(), name: instSkills[0] || 'Other', customName: '', ageFrom: '', ageTo: '', divisions: [] }],
+      },
+    ]);
+  };
+  const updateCategory = (id, patch) => {
+    setCategories((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+  };
+  const removeCategory = (id) => {
+    setCategories((prev) => prev.filter((c) => c.id !== id));
+  };
+  const addSkillToCategory = (categoryId) => {
+    setCategories((prev) => prev.map((c) => (
+      c.id === categoryId
+        ? { ...c, skills: [...c.skills, { id: nextId(), name: instSkills[0] || 'Other', customName: '', ageFrom: '', ageTo: '', divisions: [] }] }
+        : c
+    )));
+  };
+  const updateSkill = (categoryId, skillId, patch) => {
+    setCategories((prev) => prev.map((c) => (
+      c.id === categoryId
+        ? { ...c, skills: c.skills.map((s) => (s.id === skillId ? { ...s, ...patch } : s)) }
+        : c
+    )));
+  };
+  const removeSkill = (categoryId, skillId) => {
+    setCategories((prev) => prev.map((c) => (
+      c.id === categoryId
+        ? { ...c, skills: c.skills.filter((s) => s.id !== skillId) }
+        : c
+    )));
+  };
+
+  // ── Divisions (per-skill) ────────────────────────────────────────
+  // Each skill can have zero or more free-text divisions (e.g.
+  // "Division A / Division B / Division C" under Karate). Kept as a
+  // separate `divisions: [{ id, name }]` array on the skill so it
+  // rides along inside the existing categories JSONB blob without
+  // needing a schema change — the whole categories tree is stored
+  // as-is on the event row.
+  const addDivision = (categoryId, skillId) => {
+    setCategories((prev) => prev.map((c) => (
+      c.id === categoryId
+        ? {
+            ...c,
+            skills: c.skills.map((s) => (
+              s.id === skillId
+                ? { ...s, divisions: [...(s.divisions || []), { id: nextId(), name: '' }] }
+                : s
+            )),
+          }
+        : c
+    )));
+  };
+  const updateDivision = (categoryId, skillId, divisionId, name) => {
+    setCategories((prev) => prev.map((c) => (
+      c.id === categoryId
+        ? {
+            ...c,
+            skills: c.skills.map((s) => (
+              s.id === skillId
+                ? {
+                    ...s,
+                    divisions: (s.divisions || []).map((d) => (
+                      d.id === divisionId ? { ...d, name } : d
+                    )),
+                  }
+                : s
+            )),
+          }
+        : c
+    )));
+  };
+  const removeDivision = (categoryId, skillId, divisionId) => {
+    setCategories((prev) => prev.map((c) => (
+      c.id === categoryId
+        ? {
+            ...c,
+            skills: c.skills.map((s) => (
+              s.id === skillId
+                ? { ...s, divisions: (s.divisions || []).filter((d) => d.id !== divisionId) }
+                : s
+            )),
+          }
+        : c
+    )));
+  };
 
   const set = (k, v) => setForm((p) => ({ ...p, [k]: v }));
 
@@ -196,32 +584,112 @@ export default function CreateEventScreen({ navigation }) {
       }
     }
 
+    // Normalise the categories payload: strip empty rows, resolve
+    // "Other" custom names, and drop skills with no name so the
+    // organiser can leave partially-filled rows sitting in the UI
+    // without polluting the persisted event.
+    const normalizedCategories = (categories || [])
+      .map((c) => ({
+        name: c.name === 'Other' ? (c.customName || '').trim() : c.name,
+        // Persisted alongside the category — kept simple ('Male' /
+        // 'Female') and defaulted to 'Male' if somehow blank so the
+        // stored blob always has a value to render on the detail view.
+        gender: c.gender === 'Female' ? 'Female' : 'Male',
+        skills: (c.skills || [])
+          .map((s) => ({
+            name:    s.name === 'Other' ? (s.customName || '').trim() : s.name,
+            age_from: s.ageFrom ? Number(s.ageFrom) : null,
+            age_to:   s.ageTo   ? Number(s.ageTo)   : null,
+            // Divisions ride along inside each skill. Empty rows are
+            // stripped so a half-filled "+ Add Division" row the
+            // organiser abandoned doesn't pollute the saved event.
+            divisions: (s.divisions || [])
+              .map((d) => ({ name: (d.name || '').trim() }))
+              .filter((d) => d.name),
+          }))
+          .filter((s) => s.name),
+      }))
+      .filter((c) => c.name && c.skills.length > 0);
+
     setSubmitting(true);
     try {
-      const res = await apiClient.post('/institutions/me/events', {
+      // Shared payload for create + edit. `event_type` is only sent
+      // on create (the backend pins it at row level and won't accept
+      // a mid-life change anyway).
+      const payload = {
         title:                      form.title.trim(),
         subtitle:                   form.subtitle.trim() || null,
         description:                form.description.trim() || null,
         event_date:                 form.event_date,
+        // Optional start-time (HH:mm 24h). Sent alongside the date so
+        // downstream consumers can render "When" as a single line.
+        event_time:                 form.event_time || null,
         registration_closing_date:  form.registration_closing_date || null,
         location:                   form.location.trim() || null,
         image_url:                  form.image_url || null,
+        // Location Link (renamed on the UI; wire key stays `link` so
+        // the backend + existing consumers don't need changes).
         link:                       form.link.trim() || null,
+        // Categories × skills × age range. Backend may store or ignore
+        // this block; the mobile form persists the full structure so
+        // downstream features can consume it when available.
+        categories:                 normalizedCategories,
         payment_required:           !!form.payment_required,
         payment_amount:             form.payment_required ? feeNumber : null,
         publish_at,
-      });
+      };
+      const res = isEdit
+        ? await apiClient.put(`/institutions/me/events/${editEvent.id}`, payload)
+        : await apiClient.post('/institutions/me/events', {
+            ...payload,
+            // 'inter' → institution-local, publishes immediately
+            // (existing behaviour). 'intra' → cross-institution,
+            // parks at Pending Approval on the backend until a
+            // super-admin reviews it.
+            event_type: eventType,
+          });
+
+      // MODULE 1: persist the Registration Form definition (if the
+      // organizer configured one). Wrapped in try/catch so a form
+      // save blip never rolls back the already-created event.
+      const createdEventId = res.data?.event?.id || res.data?.id || (isEdit ? editEvent.id : null);
+      if (createdEventId && regForm && (regForm.enabled || (regForm.fields || []).length > 0)) {
+        try {
+          await apiClient.put(`/events/${createdEventId}/registration-form`, {
+            enabled: !!regForm.enabled,
+            fields:  regForm.fields || [],
+          });
+        } catch (err) {
+          console.warn('[event/create] registration-form save failed:', err?.response?.data?.message || err.message);
+        }
+      }
       const scheduled = form.publish_mode === 'later';
-      confirm({
-        title: scheduled ? 'Event scheduled' : 'Event published',
-        message:
-          res.data?.message ||
-          (scheduled
-            ? 'Your students and trainers will see it when the scheduled time arrives.'
-            : 'Your students and trainers will see it on their home screen.'),
-        variant: 'success', confirmText: 'OK', hideCancel: true,
-        onConfirm: () => navigation.goBack(),
-      });
+
+      // Intra-Level events always land on the super-admin approval
+      // queue, so we ALWAYS show the "pending" confirmation regardless
+      // of publish_mode (schedule doesn't apply until an approver
+      // green-lights the event).
+      if (eventType === 'intra') {
+        confirm({
+          title:   isEdit ? 'Event updated' : 'Event approval is pending',
+          message: isEdit
+            ? 'Your changes have been saved. The event stays awaiting approval — the platform reviewer will see the latest values.'
+            : 'Your event has been submitted for approval. Once approved, it will be promoted to all institutions. You will be acknowledged within 24 hours.',
+          variant: 'info', confirmText: 'OK', hideCancel: true,
+          onConfirm: () => navigation.goBack(),
+        });
+      } else {
+        confirm({
+          title: scheduled ? 'Event scheduled' : 'Event published',
+          message:
+            res.data?.message ||
+            (scheduled
+              ? 'Your students and trainers will see it when the scheduled time arrives.'
+              : 'Your students and trainers will see it on their home screen.'),
+          variant: 'success', confirmText: 'OK', hideCancel: true,
+          onConfirm: () => navigation.goBack(),
+        });
+      }
     } catch (err) {
       Alert.alert('Failed', err.response?.data?.message || err.message || 'Could not save event.');
     } finally {
@@ -230,18 +698,31 @@ export default function CreateEventScreen({ navigation }) {
   };
 
   // ── Render ─────────────────────────────────────────────────────────
+  // Dark-mode overrides pulled from the shared ThemeContext.
+  // Institution Home's ambient background is skipped in dark mode.
+  const { mode, palette: themePalette } = useTheme();
+  const isDark = mode === 'dark';
+  const dark   = useMemo(() => (isDark ? buildDarkOverrides(themePalette) : {}), [isDark, themePalette]);
+
   return (
+    <CreateEventCtx.Provider value={{ isDark, dark }}>
     <KeyboardAvoidingView
-      style={styles.screen}
+      style={[styles.screen, isDark && dark.screen]}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.iconBtn} activeOpacity={0.7}>
-          <ArrowLeft size={20} color={TEXT} strokeWidth={2.2} />
+      {/* Institution Home ambient wash. */}
+      {!isDark ? <InstitutionScreenBackground layer /> : null}
+      <View style={[styles.header, isDark && dark.header]}>
+        <TouchableOpacity onPress={() => navigation.goBack()} style={[styles.iconBtn, isDark && dark.iconBtn]} activeOpacity={0.7}>
+          <ArrowLeft size={20} color={isDark ? themePalette.text : TEXT} strokeWidth={2.2} />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
-          <Text style={styles.headerTitle}>Create Event</Text>
-          <Text style={styles.headerSub}>Visible to your students & trainers</Text>
+          <Text style={[styles.headerTitle, isDark && dark.headerTitle]}>{isEdit ? 'Edit Event' : 'Create Event'}</Text>
+          <Text style={[styles.headerSub, isDark && dark.headerSub]}>
+            {isEdit
+              ? 'Stays awaiting approval after you save.'
+              : 'Visible to all Institutions, Students & Trainers'}
+          </Text>
         </View>
       </View>
 
@@ -319,6 +800,36 @@ export default function CreateEventScreen({ navigation }) {
           />
         </Field>
 
+        {/* Event Time — sits directly under the date so the two
+            "when is this happening" fields group visually. Reuses
+            the shared TimeWheelModal via `timeTarget = 'event'`. */}
+        <Field label="Event time" hint="Optional. When on the event day does it start?">
+          <TouchableOpacity
+            style={styles.timeTrigger}
+            onPress={() => { setTimeTarget('event'); setTimeModalOpen(true); }}
+            activeOpacity={0.85}
+          >
+            <Clock size={14} color={TEXT_MUTED} strokeWidth={2.2} />
+            <Text
+              style={[
+                styles.timeTriggerText,
+                !form.event_time && { color: TEXT_LIGHT, fontWeight: '500' },
+              ]}
+            >
+              {form.event_time ? format12h(form.event_time) : 'Pick a time'}
+            </Text>
+            {form.event_time ? (
+              <TouchableOpacity
+                onPress={() => set('event_time', '')}
+                hitSlop={8}
+                style={{ marginLeft: 'auto' }}
+              >
+                <X size={14} color={TEXT_MUTED} strokeWidth={2.4} />
+              </TouchableOpacity>
+            ) : null}
+          </TouchableOpacity>
+        </Field>
+
         {/* Registration closing */}
         <Field label="Registration closes" hint="Optional cut-off for sign-ups.">
           <DateField
@@ -341,8 +852,9 @@ export default function CreateEventScreen({ navigation }) {
           />
         </Field>
 
-        {/* Link */}
-        <Field label="External link" hint="Form / ticket page / live-stream URL. Optional.">
+        {/* Location Link — renamed from External Link. Same underlying
+            form.link key so backend + downstream consumers keep working. */}
+        <Field label="Location link" hint="Google Maps / venue page / directions URL. Optional.">
           <TextInput
             style={styles.input}
             value={form.link}
@@ -354,6 +866,232 @@ export default function CreateEventScreen({ navigation }) {
             keyboardType="url"
           />
         </Field>
+
+        {/* ── Categories & Skills ─────────────────────────────────────
+            The organiser groups the event by category (Junior /
+            Senior / custom) and, inside each category, picks which
+            skills participate and the age window per skill. Any
+            number of categories + skills is supported. */}
+        <View style={styles.card}>
+          <View style={styles.cardRow}>
+            <View style={styles.cardIconWrap}>
+              <Layers size={16} color={BRAND} strokeWidth={2.4} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.cardTitle}>Categories & Skills</Text>
+              <Text style={styles.cardHint}>
+                Add each category, then the skills competing under it with an age range.
+              </Text>
+            </View>
+          </View>
+
+          {/* Skills-source status hint — surfaces the state of the two
+              fetches driving the skill dropdown so the organiser
+              understands why options look sparse (loading in flight,
+              network error, or setup form genuinely empty). Silent
+              once the catalog is loaded and non-empty. */}
+          {skillsLoading ? (
+            <View style={styles.skillsStatus}>
+              <ActivityIndicator size="small" color={BRAND} />
+              <Text style={styles.skillsStatusText}>Loading skills from your Setup Form…</Text>
+            </View>
+          ) : skillsError ? (
+            <View style={[styles.skillsStatus, styles.skillsStatusError]}>
+              <Text style={[styles.skillsStatusText, { color: '#B91C1C' }]}>
+                {skillsError}
+              </Text>
+            </View>
+          ) : instSkills.length === 0 ? (
+            <View style={[styles.skillsStatus, styles.skillsStatusWarn]}>
+              <Text style={[styles.skillsStatusText, { color: '#92400E' }]}>
+                No skills configured yet. Add them in Setup → Academy Profile, or use "Other" below to type one in.
+              </Text>
+            </View>
+          ) : null}
+
+          {categories.length === 0 ? (
+            <View style={styles.catEmpty}>
+              <Text style={styles.catEmptyText}>
+                No categories yet. Tap "+ Add Category" to start.
+              </Text>
+            </View>
+          ) : null}
+
+          {categories.map((cat, ci) => (
+            <View key={cat.id} style={styles.catBlock}>
+              <View style={styles.catHeader}>
+                <View style={styles.catBadge}>
+                  <Text style={styles.catBadgeText}>{ci + 1}</Text>
+                </View>
+                <Text style={styles.catHeaderTitle}>Category {ci + 1}</Text>
+                <TouchableOpacity
+                  onPress={() => removeCategory(cat.id)}
+                  hitSlop={8}
+                  style={styles.catRemoveBtn}
+                >
+                  <Trash2 size={14} color="#B91C1C" strokeWidth={2.4} />
+                </TouchableOpacity>
+              </View>
+
+              {/* Category name dropdown */}
+              <Text style={styles.miniLabel}>Category name</Text>
+              <SimpleDropdown
+                value={cat.name}
+                options={CATEGORY_OPTIONS}
+                onChange={(v) => updateCategory(cat.id, { name: v })}
+              />
+              {cat.name === 'Other' ? (
+                <TextInput
+                  style={[styles.input, { marginTop: 6 }]}
+                  value={cat.customName}
+                  onChangeText={(v) => updateCategory(cat.id, { customName: v })}
+                  placeholder="Enter custom category name"
+                  placeholderTextColor={TEXT_LIGHT}
+                  maxLength={80}
+                />
+              ) : null}
+
+              {/* Gender — Male / Female. Sits between Category name
+                  and Skills so the organiser sets it once for the
+                  whole category rather than per-skill. Value is
+                  persisted with the category on submit. */}
+              <View style={{ height: 8 }} />
+              <Text style={styles.miniLabel}>Gender</Text>
+              <SimpleDropdown
+                value={cat.gender || 'Male'}
+                options={GENDER_OPTIONS}
+                onChange={(v) => updateCategory(cat.id, { gender: v })}
+              />
+
+              {/* Skills under this category */}
+              <View style={styles.skillsHeader}>
+                <Text style={styles.miniLabel}>Skills</Text>
+                <Text style={styles.miniHint}>{cat.skills.length} added</Text>
+              </View>
+
+              {cat.skills.map((sk, si) => (
+                <View key={sk.id} style={styles.skillCard}>
+                  <View style={styles.skillTopRow}>
+                    <Text style={styles.skillIndex}>{si + 1}.</Text>
+                    <View style={{ flex: 1 }}>
+                      <SimpleDropdown
+                        value={sk.name}
+                        // Institution's own skills come first, then Other
+                        // so the organiser can still type a custom one.
+                        options={[...instSkills, 'Other']}
+                        onChange={(v) => updateSkill(cat.id, sk.id, { name: v })}
+                        emptyLabel="Pick a skill"
+                      />
+                    </View>
+                    {cat.skills.length > 1 ? (
+                      <TouchableOpacity
+                        onPress={() => removeSkill(cat.id, sk.id)}
+                        hitSlop={8}
+                        style={styles.skillRemoveBtn}
+                      >
+                        <X size={14} color={TEXT_MUTED} strokeWidth={2.4} />
+                      </TouchableOpacity>
+                    ) : null}
+                  </View>
+                  {sk.name === 'Other' ? (
+                    <TextInput
+                      style={[styles.input, { marginTop: 6 }]}
+                      value={sk.customName}
+                      onChangeText={(v) => updateSkill(cat.id, sk.id, { customName: v })}
+                      placeholder="Enter custom skill"
+                      placeholderTextColor={TEXT_LIGHT}
+                      maxLength={80}
+                    />
+                  ) : null}
+
+                  {/* Age range: From / To */}
+                  <View style={styles.ageRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.miniLabel}>Age from</Text>
+                      <SimpleDropdown
+                        value={sk.ageFrom}
+                        options={AGE_OPTIONS}
+                        onChange={(v) => updateSkill(cat.id, sk.id, { ageFrom: v })}
+                        emptyLabel="—"
+                      />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.miniLabel}>Age to</Text>
+                      <SimpleDropdown
+                        value={sk.ageTo}
+                        // Restrict "to" to values >= "from" when set,
+                        // so the range picker can't produce nonsense.
+                        options={sk.ageFrom
+                          ? AGE_OPTIONS.filter((n) => Number(n) >= Number(sk.ageFrom))
+                          : AGE_OPTIONS}
+                        onChange={(v) => updateSkill(cat.id, sk.id, { ageTo: v })}
+                        emptyLabel="—"
+                      />
+                    </View>
+                  </View>
+
+                  {/* Divisions — optional free-text tags under the
+                      skill (e.g. Karate → Division A, Division B).
+                      Each row is a text input + a remove button; the
+                      "+ Add Division" button appends a fresh empty
+                      row that the organiser can start typing into. */}
+                  <View style={styles.divisionsHeader}>
+                    <Text style={styles.miniLabel}>Divisions</Text>
+                    <Text style={styles.miniHint}>
+                      {(sk.divisions || []).length} added
+                    </Text>
+                  </View>
+                  {(sk.divisions || []).map((d, di) => (
+                    <View key={d.id} style={styles.divisionRow}>
+                      <Text style={styles.divisionIndex}>{di + 1}.</Text>
+                      <TextInput
+                        style={[styles.input, styles.divisionInput]}
+                        value={d.name}
+                        onChangeText={(v) => updateDivision(cat.id, sk.id, d.id, v)}
+                        placeholder="Division name (e.g. Division A)"
+                        placeholderTextColor={TEXT_LIGHT}
+                        maxLength={80}
+                      />
+                      <TouchableOpacity
+                        onPress={() => removeDivision(cat.id, sk.id, d.id)}
+                        hitSlop={8}
+                        style={styles.divisionRemoveBtn}
+                      >
+                        <X size={14} color={TEXT_MUTED} strokeWidth={2.4} />
+                      </TouchableOpacity>
+                    </View>
+                  ))}
+                  <TouchableOpacity
+                    onPress={() => addDivision(cat.id, sk.id)}
+                    style={styles.addDivisionBtn}
+                    activeOpacity={0.85}
+                  >
+                    <Plus size={12} color={BRAND} strokeWidth={2.6} />
+                    <Text style={styles.addDivisionBtnText}>Add Division</Text>
+                  </TouchableOpacity>
+                </View>
+              ))}
+
+              <TouchableOpacity
+                onPress={() => addSkillToCategory(cat.id)}
+                style={styles.addSkillBtn}
+                activeOpacity={0.85}
+              >
+                <Plus size={12} color={BRAND} strokeWidth={2.6} />
+                <Text style={styles.addSkillBtnText}>Add skill</Text>
+              </TouchableOpacity>
+            </View>
+          ))}
+
+          <TouchableOpacity
+            onPress={addCategory}
+            style={styles.addCategoryBtn}
+            activeOpacity={0.85}
+          >
+            <Plus size={14} color="#fff" strokeWidth={2.6} />
+            <Text style={styles.addCategoryBtnText}>Add Category</Text>
+          </TouchableOpacity>
+        </View>
 
         {/* Description */}
         <Field label="Details" hint="What to expect, what to bring, contact info.">
@@ -373,7 +1111,15 @@ export default function CreateEventScreen({ navigation }) {
             Toggle governs whether the event is paid. When on, the link
             becomes mandatory and students/trainers see a Pay Now CTA on
             the event card. When off, the link field is hidden and the
-            payload sends payment_link=null (backend also validates). */}
+            payload sends payment_link=null (backend also validates).
+
+            HIDE for Inter-Level events. The Add Event tile the admin
+            sees labelled "Inter-Level Event" sends `eventType: 'intra'`
+            (see AdminDashboardScreen's Select Event Type modal — labels
+            were swapped visually). For that type the Payment Required
+            field must not appear at all. Intra-Level tile (which sends
+            `eventType: 'inter'`) keeps the payment field unchanged. */}
+        {eventType !== 'intra' ? (
         <View style={styles.card}>
           <View style={styles.cardRow}>
             <View style={styles.cardIconWrap}>
@@ -424,12 +1170,23 @@ export default function CreateEventScreen({ navigation }) {
             </View>
           ) : null}
         </View>
+        ) : null}
 
         {/* ── Posting options ──────────────────────────────────────────
             Two-pill toggle for Post Now / Schedule. Choosing Schedule
             reveals the date + time pickers. The event stays hidden from
             the student/trainer feed until publish_at is reached — the
-            backend filters on read, so no cron job is needed. */}
+            backend filters on read, so no cron job is needed.
+
+            HIDE for Inter-Level events. The Add Event tile the admin
+            sees labelled "Inter-Level Event" navigates with
+            `eventType: 'intra'` (labels swapped visually — see the
+            Select Event Type modal). For that type the Posting Options
+            card is hidden entirely; `form.publish_mode` defaults to
+            'now' so submit still posts immediately. Intra-Level tile
+            (which sends `eventType: 'inter'`) keeps the card
+            unchanged. */}
+        {eventType !== 'intra' ? (
         <View style={styles.card}>
           <View style={styles.cardRow}>
             <View style={styles.cardIconWrap}>
@@ -504,7 +1261,7 @@ export default function CreateEventScreen({ navigation }) {
                 <Text style={styles.label}>Publish time *</Text>
                 <TouchableOpacity
                   style={styles.timeTrigger}
-                  onPress={() => setTimeModalOpen(true)}
+                  onPress={() => { setTimeTarget('publish'); setTimeModalOpen(true); }}
                   activeOpacity={0.85}
                 >
                   <Clock size={14} color={TEXT_MUTED} strokeWidth={2.2} />
@@ -527,17 +1284,51 @@ export default function CreateEventScreen({ navigation }) {
             </View>
           ) : null}
         </View>
+        ) : null}
+
+        {/* ── Registration Form section (MODULE 1) ────────────────
+            Fully controlled component. Persisted via a follow-up
+            PUT after the event row is created (see submit). Sits
+            in its own card to match the surrounding sections.
+
+            HIDE for Intra-Level events. The Add Event tile the admin
+            sees labelled "Intra-Level Event" navigates with
+            `eventType: 'inter'` (labels swapped visually — see the
+            Select Event Type modal). For that type the Registration
+            Form builder is hidden entirely; `regForm` keeps its
+            default `{ enabled: false, fields: [] }` so the submit
+            handler's follow-up PUT is skipped by its existing guard
+            (only fires when enabled OR fields.length > 0).
+            Inter-Level tile (`eventType: 'intra'`) keeps the section
+            unchanged. */}
+        {eventType !== 'inter' ? (
+        <View style={{
+          marginTop: 12,
+          backgroundColor: SURFACE,
+          borderWidth: 1, borderColor: BORDER,
+          borderRadius: 12, padding: 14,
+        }}>
+          <RegistrationFormBuilder value={regForm} onChange={setRegForm} />
+        </View>
+        ) : null}
 
         <View style={{ height: 16 }} />
       </ScrollView>
 
-      {/* Time picker bottom sheet — two wheels: hours (12h) + minutes. */}
+      {/* Time picker bottom sheet — two wheels: hours (12h) + minutes.
+          Shared between the Event Time and Publish Time fields; the
+          write-back key comes from `timeTarget`. */}
       <TimeWheelModal
         visible={timeModalOpen}
-        initial={form.publish_time || defaultRoundedTime()}
+        initial={
+          (timeTarget === 'event' ? form.event_time : form.publish_time)
+          || defaultRoundedTime()
+        }
+        title={timeTarget === 'event' ? 'Pick event time' : 'Pick publish time'}
         onCancel={() => setTimeModalOpen(false)}
         onDone={(hhmm) => {
-          set('publish_time', hhmm);
+          if (timeTarget === 'event') set('event_time', hhmm);
+          else                        set('publish_time', hhmm);
           setTimeModalOpen(false);
         }}
       />
@@ -562,7 +1353,9 @@ export default function CreateEventScreen({ navigation }) {
           ) : (
             <>
               <Text style={styles.btnPrimaryText}>
-                {form.publish_mode === 'later' ? 'Schedule event' : 'Publish event'}
+                {isEdit
+                  ? 'Save changes'
+                  : form.publish_mode === 'later' ? 'Schedule event' : 'Publish event'}
               </Text>
               <ChevronRight size={18} color="#fff" strokeWidth={2.6} />
             </>
@@ -570,10 +1363,75 @@ export default function CreateEventScreen({ navigation }) {
         </TouchableOpacity>
       </View>
     </KeyboardAvoidingView>
+    </CreateEventCtx.Provider>
   );
 }
 
 // ─── Sub-components ─────────────────────────────────────────────────────
+// SimpleDropdown — modal-backed picker with the same visual language
+// as the existing time / date triggers. Used across the Categories &
+// Skills section (category name, skill name, age from, age to).
+function SimpleDropdown({ value, options, onChange, emptyLabel = 'Select…' }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <TouchableOpacity
+        onPress={() => setOpen(true)}
+        activeOpacity={0.85}
+        style={styles.ddTrigger}
+      >
+        <Text
+          style={[
+            styles.ddTriggerText,
+            !value && { color: TEXT_LIGHT, fontWeight: '500' },
+          ]}
+          numberOfLines={1}
+        >
+          {value || emptyLabel}
+        </Text>
+        <ChevronDown size={14} color={TEXT_MUTED} strokeWidth={2.4} />
+      </TouchableOpacity>
+      <Modal
+        visible={open}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setOpen(false)}
+      >
+        <TouchableOpacity
+          style={styles.ddBackdrop}
+          activeOpacity={1}
+          onPress={() => setOpen(false)}
+        >
+          <View style={styles.ddSheet}>
+            <FlatList
+              data={options}
+              keyExtractor={(item) => String(item)}
+              renderItem={({ item }) => {
+                const active = String(item) === String(value);
+                return (
+                  <TouchableOpacity
+                    onPress={() => { onChange(item); setOpen(false); }}
+                    style={[styles.ddItem, active && styles.ddItemActive]}
+                    activeOpacity={0.85}
+                  >
+                    <Text style={[styles.ddItemText, active && styles.ddItemTextActive]}>
+                      {item}
+                    </Text>
+                    {active ? (
+                      <Check size={14} color={BRAND} strokeWidth={2.6} />
+                    ) : null}
+                  </TouchableOpacity>
+                );
+              }}
+              ItemSeparatorComponent={() => <View style={styles.ddSep} />}
+            />
+          </View>
+        </TouchableOpacity>
+      </Modal>
+    </>
+  );
+}
+
 function Field({ label, hint, children }) {
   return (
     <View style={{ marginBottom: 16 }}>
@@ -615,7 +1473,7 @@ const ITEM_H = 40;
 const VISIBLE = 5;
 const WHEEL_H = ITEM_H * VISIBLE;
 
-function TimeWheelModal({ visible, initial, onCancel, onDone }) {
+function TimeWheelModal({ visible, initial, onCancel, onDone, title }) {
   const parse = (s) => {
     const [hh, mm] = String(s || '09:00').split(':').map((n) => parseInt(n, 10));
     const safeH = Number.isFinite(hh) ? hh : 9;
@@ -659,26 +1517,43 @@ function TimeWheelModal({ visible, initial, onCancel, onDone }) {
             <TouchableOpacity onPress={onCancel} hitSlop={8}>
               <X size={20} color={TEXT_MUTED} strokeWidth={2.2} />
             </TouchableOpacity>
-            <Text style={timeStyles.title}>Pick publish time</Text>
+            <Text style={timeStyles.title}>{title || 'Pick time'}</Text>
             <TouchableOpacity onPress={commit} hitSlop={8}>
               <Check size={20} color={BRAND} strokeWidth={2.4} />
             </TouchableOpacity>
           </View>
 
-          <View style={timeStyles.wheels}>
-            <Wheel
-              data={hours}
-              value={state.hour12}
-              onChange={(v) => setState((s) => ({ ...s, hour12: v }))}
-              render={(n) => String(n)}
-            />
-            <Text style={timeStyles.colon}>:</Text>
-            <Wheel
-              data={minutes}
-              value={state.minute}
-              onChange={(v) => setState((s) => ({ ...s, minute: v }))}
-              render={(n) => String(n).padStart(2, '0')}
-            />
+          {/* Wheels row — hours : minutes | AM/PM. The two number
+              wheels sit inside a fixed-height container that also
+              hosts the center-band highlight as an absolutely-
+              positioned overlay (so the band always tracks the
+              selected row regardless of the sheet's outer padding).
+              overflow: 'hidden' on each wheel column prevents the
+              FlatList's above/below-band padding from spilling into
+              the AM/PM column. */}
+          <View style={timeStyles.wheelsRow}>
+            <View style={timeStyles.wheelsGroup}>
+              {/* Center-band overlay — a subtle highlight strip that
+                  marks the selected row without intercepting scrolls. */}
+              <View pointerEvents="none" style={timeStyles.centerBand} />
+              <View style={timeStyles.wheelCol}>
+                <Wheel
+                  data={hours}
+                  value={state.hour12}
+                  onChange={(v) => setState((s) => ({ ...s, hour12: v }))}
+                  render={(n) => String(n)}
+                />
+              </View>
+              <Text style={timeStyles.colon}>:</Text>
+              <View style={timeStyles.wheelCol}>
+                <Wheel
+                  data={minutes}
+                  value={state.minute}
+                  onChange={(v) => setState((s) => ({ ...s, minute: v }))}
+                  render={(n) => String(n).padStart(2, '0')}
+                />
+              </View>
+            </View>
 
             <View style={timeStyles.periodCol}>
               {['AM', 'PM'].map((p) => (
@@ -703,9 +1578,6 @@ function TimeWheelModal({ visible, initial, onCancel, onDone }) {
               ))}
             </View>
           </View>
-
-          {/* Center-band highlight is a visual guide — no interaction. */}
-          <View pointerEvents="none" style={timeStyles.centerBand} />
         </View>
       </View>
     </Modal>
@@ -726,8 +1598,11 @@ function Wheel({ data, value, onChange, render }) {
       showsVerticalScrollIndicator={false}
       snapToInterval={ITEM_H}
       decelerationRate="fast"
-      style={{ height: WHEEL_H, width: 64 }}
-      contentContainerStyle={{ paddingVertical: ITEM_H * 2 }}
+      // Fill the parent wheelCol (72px wide, WHEEL_H tall). Explicit
+      // width kept small so the two wheels + colon + AM/PM col all
+      // fit comfortably on a phone-width sheet without clipping.
+      style={{ height: WHEEL_H, width: '100%' }}
+      contentContainerStyle={{ paddingVertical: ITEM_H * 2, alignItems: 'center' }}
       getItemLayout={(_, index) => ({ length: ITEM_H, offset: ITEM_H * index, index })}
       initialScrollIndex={initialIndex}
       onMomentumScrollEnd={(e) => {
@@ -755,18 +1630,26 @@ function Wheel({ data, value, onChange, render }) {
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: BG },
 
+  // Header — glass slab with navy title and a soft blue lift
+  // shadow. Matches every other Institution Home surface.
   header: {
     flexDirection: 'row', alignItems: 'center', gap: 10,
     paddingHorizontal: 16, paddingTop: 44, paddingBottom: 12,
-    backgroundColor: SURFACE,
-    borderBottomWidth: 1, borderBottomColor: BORDER,
+    backgroundColor: GLASS_FILL_STRONG,
+    borderBottomWidth: 1, borderBottomColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
   },
   iconBtn: {
     width: 36, height: 36, borderRadius: 18,
-    backgroundColor: BG,
+    backgroundColor: BRAND_ACCENT_SOFT,
     alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
   },
-  headerTitle: { fontSize: 17, fontWeight: '800', color: TEXT },
+  headerTitle: { fontSize: 17, fontWeight: '800', color: HEADER_NAVY, letterSpacing: 0.2 },
   headerSub:   { fontSize: 11, color: TEXT_MUTED, marginTop: 2, fontWeight: '600' },
 
   body: { padding: 16, paddingBottom: 32 },
@@ -885,6 +1768,180 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12, paddingVertical: 12,
   },
   timeTriggerText: { fontSize: 14, color: TEXT, fontWeight: '700' },
+
+  // ── Categories & Skills ────────────────────────────────────────────
+  // Loading / error / empty hint for the skills catalog. Sits above
+  // the Add Category CTA so the organiser knows why the dropdown may
+  // look sparse.
+  skillsStatus: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    marginTop: 12,
+    paddingVertical: 8, paddingHorizontal: 10,
+    borderRadius: 10,
+    backgroundColor: BG,
+    borderWidth: 1, borderColor: BORDER,
+  },
+  skillsStatusError: { backgroundColor: '#FEF2F2', borderColor: '#FCA5A5' },
+  skillsStatusWarn:  { backgroundColor: '#FFFBEB', borderColor: '#FDE68A' },
+  skillsStatusText:  { flex: 1, fontSize: 11, color: TEXT_MUTED, fontWeight: '600', lineHeight: 16 },
+
+  catEmpty: {
+    marginTop: 12, padding: 12,
+    backgroundColor: BG,
+    borderRadius: 10,
+    borderWidth: 1, borderColor: BORDER, borderStyle: 'dashed',
+    alignItems: 'center',
+  },
+  catEmptyText: { fontSize: 12, color: TEXT_MUTED, fontWeight: '600' },
+
+  // Category block — glass-tinted card so it reads as a nested
+  // panel on the ambient wash instead of a flat grey box.
+  catBlock: {
+    marginTop: 12,
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
+    backgroundColor: GLASS_FILL,
+  },
+  catHeader: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    marginBottom: 10,
+  },
+  catBadge: {
+    width: 22, height: 22, borderRadius: 11,
+    backgroundColor: BRAND_SOFT,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  catBadgeText: { fontSize: 11, fontWeight: '800', color: BRAND },
+  catHeaderTitle: {
+    flex: 1,
+    fontSize: 13, fontWeight: '800', color: TEXT, letterSpacing: 0.2,
+  },
+  catRemoveBtn: {
+    width: 28, height: 28, borderRadius: 14,
+    backgroundColor: '#FEE2E2',
+    alignItems: 'center', justifyContent: 'center',
+  },
+
+  miniLabel: {
+    fontSize: 11, fontWeight: '700', color: TEXT_MUTED,
+    letterSpacing: 0.4, marginBottom: 4, marginTop: 6,
+  },
+  miniHint: { fontSize: 11, color: TEXT_LIGHT, fontWeight: '600' },
+
+  skillsHeader: {
+    flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between',
+    marginTop: 10, marginBottom: 4,
+  },
+  skillCard: {
+    backgroundColor: SURFACE,
+    borderRadius: 10,
+    borderWidth: 1, borderColor: BORDER,
+    padding: 10,
+    marginTop: 8,
+  },
+  skillTopRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+  },
+  skillIndex: {
+    fontSize: 12, fontWeight: '800', color: TEXT_MUTED, width: 18,
+  },
+  skillRemoveBtn: {
+    width: 28, height: 28, borderRadius: 14,
+    backgroundColor: BG,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  ageRow: {
+    flexDirection: 'row', gap: 10, marginTop: 8,
+  },
+
+  addSkillBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 6,
+    marginTop: 10,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: BRAND_SOFT,
+    borderWidth: 1, borderColor: BRAND_SOFT,
+  },
+  addSkillBtnText: { fontSize: 12, fontWeight: '800', color: BRAND, letterSpacing: 0.2 },
+
+  // Divisions block — sits inside each skill card below the age
+  // range. Rendered a touch tighter than the skill picker so it
+  // reads as a sub-section rather than a peer.
+  divisionsHeader: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    marginTop: 10, marginBottom: 4,
+  },
+  divisionRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 6,
+  },
+  divisionIndex: {
+    fontSize: 12, fontWeight: '800', color: TEXT_MUTED, width: 18,
+  },
+  divisionInput: {
+    flex: 1, marginTop: 0,
+  },
+  divisionRemoveBtn: {
+    width: 28, height: 28, borderRadius: 14,
+    backgroundColor: BG,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  addDivisionBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 6,
+    marginTop: 8,
+    paddingVertical: 7,
+    borderRadius: 10,
+    backgroundColor: SURFACE,
+    borderWidth: 1, borderColor: BRAND_SOFT, borderStyle: 'dashed',
+  },
+  addDivisionBtnText: { fontSize: 12, fontWeight: '800', color: BRAND, letterSpacing: 0.2 },
+
+  addCategoryBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 6,
+    marginTop: 14,
+    paddingVertical: 12,
+    borderRadius: 12,
+    backgroundColor: BRAND,
+  },
+  addCategoryBtnText: { fontSize: 13, fontWeight: '800', color: '#fff', letterSpacing: 0.2 },
+
+  // ── SimpleDropdown ─────────────────────────────────────────────────
+  ddTrigger: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    backgroundColor: SURFACE,
+    borderRadius: 10,
+    borderWidth: 1, borderColor: BORDER,
+    paddingHorizontal: 12, paddingVertical: 10,
+    gap: 8,
+  },
+  ddTriggerText: { flex: 1, fontSize: 13, color: TEXT, fontWeight: '700' },
+  ddBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(15,23,42,0.45)',
+    alignItems: 'center', justifyContent: 'center',
+    padding: 24,
+  },
+  ddSheet: {
+    width: '100%',
+    maxWidth: 340,
+    maxHeight: 340,
+    backgroundColor: SURFACE,
+    borderRadius: 14,
+    paddingVertical: 6,
+    overflow: 'hidden',
+  },
+  ddItem: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 16, paddingVertical: 12,
+    gap: 8,
+  },
+  ddItemActive: { backgroundColor: BRAND_SOFT },
+  ddItemText: { fontSize: 14, color: TEXT, fontWeight: '600' },
+  ddItemTextActive: { color: BRAND, fontWeight: '800' },
+  ddSep: { height: StyleSheet.hairlineWidth, backgroundColor: BORDER, marginLeft: 16 },
 });
 
 // ─── Time picker styles ─────────────────────────────────────────────────
@@ -908,20 +1965,46 @@ const timeStyles = StyleSheet.create({
   },
   title: { fontSize: 15, fontWeight: '800', color: TEXT },
 
-  wheels: {
-    marginTop: 4,
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+  // Outer wheels row hosts the two-wheel group + AM/PM column.
+  wheelsRow: {
+    marginTop: 8,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 12,
     height: WHEEL_H,
   },
-  colon: { fontSize: 22, fontWeight: '800', color: TEXT, marginHorizontal: 2 },
+  // Group holds the hour + colon + minute together so the
+  // center-band overlay can span both wheels precisely.
+  wheelsGroup: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    height: WHEEL_H,
+    position: 'relative',
+  },
+  // Each wheel column clips its FlatList so the row-padding rows
+  // above/below the center don't spill into the AM/PM column.
+  wheelCol: {
+    width: 72,
+    height: WHEEL_H,
+    overflow: 'hidden',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  colon: {
+    fontSize: 22, fontWeight: '800', color: TEXT,
+    marginHorizontal: 4,
+    textAlignVertical: 'center',
+  },
 
+  // Center-band highlight — absolutely positioned inside the
+  // wheelsGroup so it sits over the "selected" row regardless of
+  // the sheet's outer padding.
   centerBand: {
     position: 'absolute',
-    left: 20, right: 20,
-    top: 14 + 30 + 4 + ITEM_H * 2,   // header + spacing + 2 rows above center
+    left: 0, right: 0,
+    top: ITEM_H * 2,   // 2 rows above the center of a 5-row wheel
     height: ITEM_H,
     borderTopWidth: 1, borderBottomWidth: 1,
     borderColor: BORDER,
+    backgroundColor: BRAND_SOFT,
+    borderRadius: 8,
   },
 
   wheelText: {

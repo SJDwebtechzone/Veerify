@@ -320,11 +320,141 @@ async function sendStudentCredentialsMessage({
   }
 }
 
+/**
+ * Course-transfer WhatsApp — sent after an institution admin
+ * successfully changes a student's enrolled course via
+ * PATCH /api/enrollments/:id/course.
+ *
+ * Fire-and-forget: never throws. The caller's course-transfer
+ * response is NOT affected by a WhatsApp failure.
+ *
+ * @param {object} opts
+ * @param {number} opts.adminUserId  – admin who performed the transfer
+ *        (used for the isWhatsAppEnabledForUser plan-gate check)
+ * @param {string} opts.phone        – student's phone / WhatsApp number
+ * @param {string} opts.studentName  – student's display name
+ * @param {string} opts.institutionName – institution display name
+ * @param {string} opts.oldCourseName   – course name BEFORE the change
+ * @param {string} opts.newCourseName   – course name AFTER the change
+ */
+async function sendCourseTransferMessage({
+  adminUserId,
+  phone,
+  studentName,
+  institutionName,
+  oldCourseName,
+  newCourseName,
+}) {
+  try {
+    if (!adminUserId || !phone) {
+      return { ok: false, skipped: "missing-required-data" };
+    }
+
+    const allowed = await isWhatsAppEnabledForUser(adminUserId);
+    if (!allowed) {
+      return { ok: false, skipped: "whatsapp-disabled-on-plan" };
+    }
+
+    const firstName =
+      String(studentName || "").trim().split(/\s+/)[0] || "Student";
+    const academy = institutionName || "your institution";
+
+    const body =
+      `📚 *Course Transfer Notification*\n\n` +
+      `Hello ${firstName},\n\n` +
+      `Your course has been changed by *${academy}*.\n\n` +
+      `Previous Course: ${oldCourseName || '—'}\n` +
+      `New Course: ${newCourseName || '—'}\n\n` +
+      `Please log in to the Veerify app to view your updated course details.\n\n` +
+      `Regards,\n${academy}`;
+
+    const result = await sendTextMessage(phone, body);
+    console.log(
+      `[whatsapp] sendCourseTransferMessage → ok=${result.ok} `
+      + `admin=${adminUserId} phone=${phone} `
+      + `old="${oldCourseName}" new="${newCourseName}"`,
+    );
+    return result;
+  } catch (err) {
+    console.warn(
+      "[whatsapp] sendCourseTransferMessage failed:",
+      err?.message,
+    );
+    return { ok: false, error: err?.message };
+  }
+}
+
+/**
+ * Batch-transfer WhatsApp — sent after an institution admin
+ * successfully moves a student to a different batch via
+ * PATCH /api/enrollments/:id/batch.
+ *
+ * Fire-and-forget: never throws. The caller's batch-transfer
+ * response is NOT affected by a WhatsApp failure.
+ *
+ * @param {object} opts
+ * @param {number} opts.adminUserId  – admin who performed the transfer
+ *        (used for the isWhatsAppEnabledForUser plan-gate check)
+ * @param {string} opts.phone        – student's phone / WhatsApp number
+ * @param {string} opts.studentName  – student's display name
+ * @param {string} opts.institutionName – institution display name
+ * @param {string} opts.oldBatchName    – batch name BEFORE the transfer
+ * @param {string} opts.newBatchName    – batch name AFTER the transfer
+ */
+async function sendBatchTransferMessage({
+  adminUserId,
+  phone,
+  studentName,
+  institutionName,
+  oldBatchName,
+  newBatchName,
+}) {
+  try {
+    if (!adminUserId || !phone) {
+      return { ok: false, skipped: "missing-required-data" };
+    }
+
+    const allowed = await isWhatsAppEnabledForUser(adminUserId);
+    if (!allowed) {
+      return { ok: false, skipped: "whatsapp-disabled-on-plan" };
+    }
+
+    const firstName =
+      String(studentName || "").trim().split(/\s+/)[0] || "Student";
+    const academy = institutionName || "your institution";
+
+    const body =
+      `🔄 *Batch Transfer Notification*\n\n` +
+      `Hello ${firstName},\n\n` +
+      `You have been transferred to a new batch by *${academy}*.\n\n` +
+      `Previous Batch: ${oldBatchName || '—'}\n` +
+      `New Batch: ${newBatchName || '—'}\n\n` +
+      `Please log in to the Veerify app to view your updated batch details.\n\n` +
+      `Regards,\n${academy}`;
+
+    const result = await sendTextMessage(phone, body);
+    console.log(
+      `[whatsapp] sendBatchTransferMessage → ok=${result.ok} `
+      + `admin=${adminUserId} phone=${phone} `
+      + `old="${oldBatchName}" new="${newBatchName}"`,
+    );
+    return result;
+  } catch (err) {
+    console.warn(
+      "[whatsapp] sendBatchTransferMessage failed:",
+      err?.message,
+    );
+    return { ok: false, error: err?.message };
+  }
+}
+
 
 module.exports = {
   sendTextMessage,
   sendWelcomeMessage,
   sendTrainerCredentialsMessage,
   sendStudentCredentialsMessage,
+  sendCourseTransferMessage,
+  sendBatchTransferMessage,
   toWaNumber,
 };

@@ -5,7 +5,7 @@
 // promo banner, code card, summary stats, recent referrals, next-renewal
 // preview, and the transactions ledger.
 
-import React, { useCallback, useState } from 'react';
+import React, { createContext, useCallback, useMemo, useState } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet, Share, TextInput,
   ActivityIndicator, RefreshControl, Alert, Linking,
@@ -20,6 +20,45 @@ import {
 
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
+// Institution Home visual system — ambient blue wash + glass
+// cards + navy accents. Reused verbatim so this screen belongs to
+// the same design language as the rest of the institution UI.
+import InstitutionScreenBackground, {
+  INSTITUTION_BG_BASE,
+} from '../../components/InstitutionScreenBackground';
+import { useTheme } from '../../theme/ThemeContext';
+
+// ── Institution-Home glass tokens ─────────────────────────────
+const GLASS_FILL         = 'rgba(255,255,255,0.72)';
+const GLASS_FILL_STRONG  = 'rgba(255,255,255,0.88)';
+const GLASS_BORDER_LIGHT = 'rgba(255,255,255,0.55)';
+const GLASS_HIGHLIGHT    = 'rgba(255,255,255,0.9)';
+const GLASS_SHADOW       = '#1E40AF';
+const BRAND_DARK_BLUE    = '#1E3A8A';
+const BRAND_ACCENT_SOFT  = 'rgba(30,58,138,0.10)';
+const HEADER_NAVY        = '#0F172A';
+
+// Local context so nested sub-components pick up dark-mode
+// overrides without prop-drilling.
+const ReferEarnCtx = createContext({ isDark: false, dark: {} });
+
+function buildDarkOverrides(pal) {
+  return StyleSheet.create({
+    screen:         { backgroundColor: pal.bg },
+    header:         { backgroundColor: pal.surface, borderBottomColor: pal.border },
+    headerTitle:    { color: pal.text },
+    headerSubtitle: { color: pal.textMuted },
+    backBtn:        { backgroundColor: pal.border },
+    card:           { backgroundColor: pal.surface, borderColor: pal.border },
+    codeCard:       { backgroundColor: pal.surface, borderColor: pal.border },
+    banner:         { backgroundColor: pal.surface, borderColor: pal.border },
+    statCard:       { backgroundColor: pal.surface, borderColor: pal.border },
+    sectionTitle:   { color: pal.text },
+    sectionSubtitle:{ color: pal.textMuted },
+    label:          { color: pal.textMuted },
+    value:          { color: pal.text },
+  });
+}
 
 const STATUS_PILLS = {
   pending:   { label: 'Pending',   bg: '#FEF3C7', fg: '#92400E' },
@@ -44,6 +83,14 @@ const fmtDate  = (iso) => {
 };
 
 export default function AdminReferEarnScreen({ navigation }) {
+  // Theme hooks — MUST live above any early-return so hook order
+  // stays stable across renders (React reported "Rendered more
+  // hooks than during the previous render" when these lived after
+  // the loading branch).
+  const { mode, palette: themePalette } = useTheme();
+  const isDark = mode === 'dark';
+  const dark   = useMemo(() => (isDark ? buildDarkOverrides(themePalette) : {}), [isDark, themePalette]);
+
   const [data,    setData]    = useState(null);
   const [history, setHistory] = useState([]);
   const [txs,     setTxs]     = useState([]);
@@ -160,15 +207,21 @@ export default function AdminReferEarnScreen({ navigation }) {
   const nextRenew  = data.next_renewal || {};
   const settings   = data.settings || {};
 
+  // Theme hooks live at the top of the component so hook order
+  // stays stable across renders (see the top of the file).
   return (
-    <View style={styles.screen}>
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
-          <ArrowLeft size={20} color={palette.dark} />
+    <ReferEarnCtx.Provider value={{ isDark, dark }}>
+    <View style={[styles.screen, isDark && dark.screen]}>
+      {/* Institution Home ambient wash — sits behind all content. */}
+      {!isDark ? <InstitutionScreenBackground layer /> : null}
+
+      <View style={[styles.header, isDark && dark.header]}>
+        <TouchableOpacity onPress={() => navigation.goBack()} style={[styles.backBtn, isDark && dark.backBtn]}>
+          <ArrowLeft size={20} color={isDark ? themePalette.text : HEADER_NAVY} />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
-          <Text style={styles.headerTitle}>Refer & Earn</Text>
-          <Text style={styles.headerSubtitle}>Invite institutions, earn discounts</Text>
+          <Text style={[styles.headerTitle, isDark && dark.headerTitle]}>Refer & Earn</Text>
+          <Text style={[styles.headerSubtitle, isDark && dark.headerSubtitle]}>Invite institutions, earn discounts</Text>
         </View>
       </View>
 
@@ -298,6 +351,7 @@ export default function AdminReferEarnScreen({ navigation }) {
         <View style={{ height: 40 }} />
       </ScrollView>
     </View>
+    </ReferEarnCtx.Provider>
   );
 }
 
@@ -378,20 +432,28 @@ function TransactionRow({ item }) {
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: palette.bg },
+  // Institution Home ambient page base — the wash SVG paints on top.
+  screen: { flex: 1, backgroundColor: INSTITUTION_BG_BASE },
+  // Header — glass slab with navy title and soft blue lift shadow.
   header: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
     paddingTop: 48, paddingHorizontal: spacing.xl, paddingBottom: spacing.md,
-    backgroundColor: palette.surface,
-    borderBottomWidth: 1, borderBottomColor: palette.borderSoft,
+    backgroundColor: GLASS_FILL_STRONG,
+    borderBottomWidth: 1, borderBottomColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
   },
   backBtn: {
     width: 36, height: 36, borderRadius: 18,
-    backgroundColor: palette.surfaceAlt,
+    backgroundColor: BRAND_ACCENT_SOFT,
     alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
   },
-  headerTitle: { fontSize: 17, fontWeight: '700', color: palette.dark },
-  headerSubtitle: { fontSize: 12, color: palette.textLight, marginTop: 1 },
+  headerTitle: { fontSize: 17, fontWeight: '800', color: HEADER_NAVY, letterSpacing: 0.2 },
+  headerSubtitle: { fontSize: 12, color: palette.textLight, marginTop: 1, fontWeight: '600' },
 
   scrollContent: { padding: spacing.xl },
 
@@ -428,12 +490,19 @@ const styles = StyleSheet.create({
     marginTop: spacing.lg, marginBottom: 8,
   },
 
-  // Code card
+  // Code card — translucent glass fill + light glass border + soft
+  // blue lift shadow so the code chip reads as a glass panel on
+  // the Institution Home ambient wash.
   codeCard: {
-    backgroundColor: palette.surface,
-    borderRadius: radius.lg,
+    backgroundColor: GLASS_FILL_STRONG,
+    borderRadius: 16,
     padding: 16,
-    ...shadows.soft,
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
   },
   codeLabel: {
     fontSize: 10, color: palette.textLight, fontWeight: '800',
@@ -500,10 +569,18 @@ const styles = StyleSheet.create({
   },
   statCard: {
     width: '48%',
-    backgroundColor: palette.surface,
-    borderRadius: radius.lg,
+    backgroundColor: GLASS_FILL_STRONG,
+    borderRadius: 16,
     padding: 12,
     borderWidth: 1,
+    // Soft blue lift shadow so each stat tile reads as a glass
+    // panel on the Institution Home ambient wash. `borderColor`
+    // is left to the caller so each accent tile keeps its tone.
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.08,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 2,
   },
   statIcon: {
     width: 32, height: 32, borderRadius: 16,
@@ -513,12 +590,18 @@ const styles = StyleSheet.create({
   statValue: { fontSize: 18, fontWeight: '800', color: palette.dark },
   statLabel: { fontSize: 11, color: palette.textLight, marginTop: 2 },
 
-  // Renew preview
+  // Renew preview — matches the other Institution Home glass
+  // cards on this screen.
   renewCard: {
-    backgroundColor: palette.surface,
-    borderRadius: radius.lg,
+    backgroundColor: GLASS_FILL_STRONG,
+    borderRadius: 16,
     padding: 14,
-    ...shadows.soft,
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
   },
   renewLine: {
     flexDirection: 'row', justifyContent: 'space-between',

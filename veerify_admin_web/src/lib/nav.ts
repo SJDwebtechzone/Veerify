@@ -80,6 +80,16 @@ export const navSections: NavSection[] = [
     ],
   },
   {
+    // Super-admin queue for Intra-Level (cross-institution) events
+    // submitted from the mobile Create Event flow. Sits at the top-
+    // level of the sidebar (peer of Institutions / Trainers / etc.)
+    // so it's one click from anywhere. See
+    // src/pages/events/EventApprovals.tsx.
+    label: 'Event Approvals',
+    icon: ShieldCheck,
+    to: '/events/approvals',
+  },
+  {
     label: 'Payments',
     icon: Wallet,
     children: [
@@ -96,8 +106,14 @@ export const navSections: NavSection[] = [
     icon: Bell,
     children: [
       { label: 'Broadcasts', to: '/notifications' },
-      { label: 'Push Notifications', to: '/notifications/push' },
-      { label: 'Emails', to: '/notifications/emails' },
+      // Push Notifications + Emails intentionally hidden from the
+      // sidebar per product spec. The underlying routes, controllers,
+      // and email-sending backend all stay in place — we're only
+      // removing the navigation entry so the sub-menu shows just
+      // Broadcasts. Re-adding these lines restores the menu items
+      // without any other change needed.
+      // { label: 'Push Notifications', to: '/notifications/push' },
+      // { label: 'Emails', to: '/notifications/emails' },
     ],
   },
   {

@@ -21,6 +21,10 @@
 const pool = require('../config/db');
 const { insertNotification } = require('./notification.controller');
 const { getBranchScope, adminCanSeeStudent } = require('../utils/branchScope');
+// Display normalization — strip a trailing " Belt" so certificate
+// snapshots read "Black" instead of "Black Belt". Backend + mobile
+// share the exact same rule.
+const { stripBeltSuffix } = require('../utils/beltDisplay');
 
 // Attendance snapshot for the given student across every batch they
 // belong to (bounded by their institution). Used at submit time so
@@ -106,6 +110,12 @@ exports.create = async (req, res) => {
     const studentId     = parseInt(req.body?.student_id, 10);
     const requestedBelt = String(req.body?.requested_belt || '').trim();
     const remarks       = String(req.body?.remarks || '').trim() || null;
+    // MODULE FIX: curriculum_item_id makes each request per-item so
+    // "Pending Approval" on Level 1 no longer paints Level 2/3 too.
+    // Kept optional for legacy clients that don't send it yet.
+    const rawItemId     = req.body?.curriculum_item_id;
+    const curriculumItemId = rawItemId != null && rawItemId !== ''
+      ? parseInt(rawItemId, 10) : null;
     if (!Number.isInteger(studentId) || !requestedBelt) {
       return res.status(400).json({ message: 'student_id + requested_belt are required.' });
     }
@@ -139,11 +149,18 @@ exports.create = async (req, res) => {
     // Duplicate-pending guard — the partial unique index does this
     // at the DB level too, but a friendly early return avoids the
     // 23505 code bubbling as a generic 500 to the mobile.
+    //
+    // Now scoped by curriculum_item_id so the trainer can have one
+    // pending request per item (Level 1 pending doesn't block a
+    // Level 2 submit). Legacy student-level requests (null item)
+    // still block a matching null-item resubmit.
     const dup = await pool.query(
       `SELECT id FROM belt_promotion_requests
-        WHERE student_id = $1 AND status = 'pending'
+        WHERE student_id = $1
+          AND status = 'pending'
+          AND curriculum_item_id IS NOT DISTINCT FROM $2::int
         LIMIT 1`,
-      [studentId],
+      [studentId, curriculumItemId],
     );
     if (dup.rows.length > 0) {
       return res.status(409).json({
@@ -154,14 +171,34 @@ exports.create = async (req, res) => {
 
     const attendance = await computeAttendanceSummary(studentId);
 
+    // Supersede any prior sent_for_recheck / declined row for the
+    // same (student, curriculum_item) pair — the fresh pending
+    // request is the one that should show on the institution UI, not
+    // the recheck stub. Marking as 'closed' keeps the audit history
+    // (the old row still exists) but removes it from every consumer
+    // surface. Best-effort: if the UPDATE errors on an unusual schema
+    // we still fall through and let the INSERT proceed.
+    try {
+      await pool.query(
+        `UPDATE belt_promotion_requests
+            SET status = 'closed'
+          WHERE student_id = $1
+            AND curriculum_item_id IS NOT DISTINCT FROM $2::int
+            AND status IN ('sent_for_recheck', 'declined')`,
+        [studentId, curriculumItemId],
+      );
+    } catch (supErr) {
+      console.warn('[promo] supersede prior recheck failed:', supErr?.message);
+    }
+
     let inserted;
     try {
       inserted = await pool.query(
         `INSERT INTO belt_promotion_requests
            (student_id, trainer_id, institution_id,
             current_belt, requested_belt, trainer_remarks,
-            attendance_summary, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, 'pending')
+            attendance_summary, status, curriculum_item_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, 'pending', $8)
          RETURNING *`,
         [
           studentId, trainerUserId, student.institution_id,
@@ -169,6 +206,7 @@ exports.create = async (req, res) => {
           requestedBelt,
           remarks,
           JSON.stringify(attendance),
+          curriculumItemId,
         ],
       );
     } catch (dbErr) {
@@ -253,6 +291,35 @@ exports.listMine = async (req, res) => {
 };
 
 // ────────────────────────────────────────────────────────────────
+// GET /api/belt-promotion-requests/mine-as-student
+//
+// Student-facing companion to listMine — returns promotion requests
+// where the caller IS the student. Powers the "Promoted" badge on
+// the student's EnrolledCourse curriculum view so the approved
+// state shows up on their side without needing trainer credentials.
+// ────────────────────────────────────────────────────────────────
+exports.listMineAsStudent = async (req, res) => {
+  try {
+    if (req.user?.role !== 'student') {
+      return res.status(403).json({ message: 'Student role required.' });
+    }
+    const r = await pool.query(
+      `SELECT id, student_id, curriculum_item_id, status,
+              requested_belt, current_belt,
+              approved_at, created_at
+         FROM belt_promotion_requests
+        WHERE student_id = $1
+        ORDER BY created_at DESC`,
+      [req.user.id],
+    );
+    return res.json({ count: r.rows.length, requests: r.rows });
+  } catch (err) {
+    console.error('promotion listMineAsStudent error:', err);
+    return res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// ────────────────────────────────────────────────────────────────
 // GET /api/belt-promotion-requests/institution
 // Institution admin — every pending (default) or all with ?status=all
 // Scoped through the student's institution tree; sub-branch admins
@@ -273,8 +340,18 @@ exports.listInstitution = async (req, res) => {
     // requests for students in their branch. Main admin: only
     // main-institution batches (branch_id IS NULL). Matches
     // batchBranchClause semantics used across the app.
+    //
+    // Default status filter now covers BOTH open states:
+    //   'pending'          — awaiting institution action
+    //   'sent_for_recheck' — institution returned it to the trainer;
+    //                        row still visible with the "Sent for
+    //                        Recheck" label so the admin sees the
+    //                        state of every request they've touched.
+    // 'closed' (superseded by a fresh submission) and 'approved' /
+    // 'declined' are excluded from the default list. ?status=all is
+    // still honoured so an audit view can pull the entire history.
     const params = [scope.rootId];
-    let where = `r.status = 'pending'
+    let where = `r.status IN ('pending', 'sent_for_recheck')
                  AND (
                    e.batch_id IS NULL
                    OR b.institution_id = $1
@@ -288,7 +365,10 @@ exports.listInstitution = async (req, res) => {
     }
     const statusFilter = String(req.query?.status || '').toLowerCase();
     if (statusFilter === 'all') {
-      where = where.replace(`r.status = 'pending' AND `, '');
+      where = where.replace(
+        `r.status IN ('pending', 'sent_for_recheck') AND `,
+        '',
+      );
     }
 
     const r = await pool.query(
@@ -358,9 +438,20 @@ exports.notifyTrainer = async (req, res) => {
       if (!canSee) return res.status(403).json({ message: 'Not your student.' });
     }
 
+    // MODULE FIX — Notify Trainer no longer hard-declines the
+    // request. It moves it into 'sent_for_recheck', which:
+    //   • keeps the row visible on the institution's Certificates
+    //     screen (labelled "Sent for Recheck", no action buttons)
+    //   • unlocks the trainer's curriculum row back to "Promote
+    //     Belt" so they can review and resubmit
+    // The pending unique index (status='pending' only) is preserved,
+    // so the trainer can freely POST a new request for the same
+    // (student, curriculum_item) pair. The subsequent create call
+    // supersedes this sent_for_recheck row by flipping it to 'closed'
+    // (see exports.create).
     await pool.query(
       `UPDATE belt_promotion_requests SET
-         status              = 'declined',
+         status              = 'sent_for_recheck',
          institution_remarks = $2,
          resolved_at         = NOW(),
          resolved_by         = $3
@@ -370,27 +461,51 @@ exports.notifyTrainer = async (req, res) => {
 
     await auditEvent({
       requestId: id, actorId: req.user.id, actorRole: 'admin',
-      event: 'notify_trainer', remarks,
+      event: 'sent_for_recheck', remarks,
     });
 
-    // Notify the trainer.
+    // Notify the trainer. Payload carries EVERY id the mobile needs
+    // to deep-link straight to the concerned Student Profile with the
+    // right curriculum item focused — no intermediate list screen:
+    //   • screen              — React Navigation route name
+    //   • params              — object the FCM cold-start handler
+    //                           forwards verbatim to navigationRef
+    //                           (background + terminated app case)
+    //   • student_id          — top-level so the in-app bell tap
+    //                           handler can build params without
+    //                           parsing `params`
+    //   • curriculum_item_id  — which lesson row to scroll to /
+    //                           highlight (nullable for legacy rows)
+    //   • promotion_request_id — audit linkage for future features
+    //   • reference_type / _id — kept for existing analytics hooks
     if (row.trainer_id) {
+      const navParams = {
+        studentId:            row.student_id,
+        focusCurriculumItemId: row.curriculum_item_id || null,
+        promotionRequestId:   id,
+        source:               'recheck',
+      };
       await insertNotification({
         user_id:        row.trainer_id,
         institution_id: row.institution_id,
         category:       'system',
-        title:          'Belt promotion returned',
-        message:        `Your promotion request for ${row.student_name} needs an update: ${remarks}`,
+        title:          'Belt promotion sent for recheck',
+        message:        `Please recheck your promotion request for ${row.student_name}: ${remarks}`,
         data: {
-          screen:         'StaffStudentDetail',
-          reference_type: 'belt_promotion_request',
-          reference_id:   id,
+          screen:                'StaffStudentDetail',
+          params:                navParams,
+          student_id:            row.student_id,
+          curriculum_item_id:    row.curriculum_item_id || null,
+          promotion_request_id:  id,
+          source:                'recheck',
+          reference_type:        'belt_promotion_request',
+          reference_id:          id,
         },
         created_by: req.user.id,
       }).catch(() => {});
     }
 
-    return res.json({ message: 'Trainer notified. Request marked as declined.' });
+    return res.json({ message: 'Trainer notified. Request marked for recheck.' });
   } catch (err) {
     console.error('promotion notifyTrainer error:', err);
     return res.status(500).json({ message: 'Server error', error: err.message });
@@ -429,6 +544,19 @@ exports.approve = async (req, res) => {
     );
     const row = r.rows[0];
     if (!row) { client.release(); return res.status(404).json({ message: 'Request not found.' }); }
+    // Idempotency guard #1 — same request re-approved. Return the
+    // already-issued certificate id instead of minting a duplicate.
+    // The DB partial unique index on certificates.promotion_request_id
+    // is the belt-and-braces safety net; this early return keeps the
+    // happy path clean when the admin double-taps Approve.
+    if (row.status === 'approved') {
+      client.release();
+      return res.json({
+        message: 'Promotion already approved.',
+        certificate_id: row.certificate_id || null,
+        idempotent: true,
+      });
+    }
     if (row.status !== 'pending') {
       client.release();
       return res.status(409).json({ message: `Request is already ${row.status}.` });
@@ -455,31 +583,64 @@ exports.approve = async (req, res) => {
     const bodyTemplateId = Number.parseInt(req.body?.template_id, 10);
     let template = null;
     try {
-      const t = await pool.query(
-        Number.isInteger(bodyTemplateId)
-          ? `SELECT * FROM certificate_templates WHERE id = $1 AND institution_id = $2`
-          : `SELECT * FROM certificate_templates WHERE institution_id = $1 AND is_default = TRUE
-              ORDER BY updated_at DESC LIMIT 1`,
-        Number.isInteger(bodyTemplateId)
-          ? [bodyTemplateId, rootInstitutionId]
-          : [rootInstitutionId],
-      );
-      template = t.rows[0] || null;
+      if (Number.isInteger(bodyTemplateId)) {
+        // Admin picked a specific template on the approve modal.
+        const t = await pool.query(
+          `SELECT * FROM certificate_templates
+            WHERE id = $1 AND institution_id = $2`,
+          [bodyTemplateId, rootInstitutionId],
+        );
+        template = t.rows[0] || null;
+      }
+      if (!template) {
+        // Prefer the institution's default template.
+        const t = await pool.query(
+          `SELECT * FROM certificate_templates
+            WHERE institution_id = $1 AND is_default = TRUE
+            ORDER BY updated_at DESC
+            LIMIT 1`,
+          [rootInstitutionId],
+        );
+        template = t.rows[0] || null;
+      }
+      if (!template) {
+        // Fallback: any template the academy has authored. Belt
+        // promotions must always render on the institution's own
+        // certificate design — never blank — even when the admin
+        // forgot to mark one as default.
+        const t = await pool.query(
+          `SELECT * FROM certificate_templates
+            WHERE institution_id = $1
+            ORDER BY is_default DESC NULLS LAST, updated_at DESC
+            LIMIT 1`,
+          [rootInstitutionId],
+        );
+        template = t.rows[0] || null;
+      }
     } catch (tplErr) {
       console.log('[promo/approve] template lookup skipped:', tplErr?.message);
     }
 
     // Build the merged placeholder payload — same shape sendCertificate
     // uses so the student's viewer renders the exact same layout.
+    // Belt strings are normalized to short-form ("Black" not "Black
+    // Belt") on the way in so the certificate snapshot, the DB row,
+    // the QR verify page, and the mobile viewer all speak the same
+    // string. Storage stays historical-safe: if a legacy request
+    // arrived with "White Belt" in current_belt, we still strip it
+    // for display but the source row is untouched.
+    const requestedBeltShort = stripBeltSuffix(row.requested_belt) || row.requested_belt;
+    const currentBeltShort   = stripBeltSuffix(row.current_belt || '') || '';
+
     const now = new Date();
     const certNo = `VRF-${row.institution_id}-${now.getFullYear()}-BELT-${
       Math.floor(Math.random() * 90000) + 10000
     }`;
     const values = {
       student_name:     row.student_name,
-      belt_name:        row.requested_belt,
-      belt_from:        row.current_belt || '',
-      belt_to:          row.requested_belt,
+      belt_name:        requestedBeltShort,
+      belt_from:        currentBeltShort,
+      belt_to:          requestedBeltShort,
       institution_name: row.institution_name || '',
       completion_date:  now.toISOString().slice(0, 10),
       certificate_no:   certNo,
@@ -502,7 +663,12 @@ exports.approve = async (req, res) => {
 
     // Certificate row. kind='belt' so the student's Belts & Certs
     // screen groups it correctly. qr_token is lowercase hex to match
-    // the case-insensitive verify endpoint (task #132).
+    // the case-insensitive verify endpoint (task #132). Title is the
+    // short-form belt name so the student's list reads "Black" not
+    // "Black Belt" — the redundant suffix was scrapped per the
+    // Certificate Templates spec. promotion_request_id links this
+    // certificate back to the exact promotion so QR verification and
+    // /certificates/my both surface the promotion audit trail.
     const crypto = require('crypto');
     const qrToken = crypto.randomBytes(12).toString('hex');
     let certId = null;
@@ -512,40 +678,89 @@ exports.approve = async (req, res) => {
         `INSERT INTO certificates
            (student_id, institution_id, kind, title, description,
             issue_date, certificate_no, qr_token,
-            template_id, placeholder_data)
+            template_id, placeholder_data, promotion_request_id)
          VALUES ($1, $2, 'belt', $3, $4,
                  CURRENT_DATE, $5, $6,
-                 $7, $8::jsonb)
+                 $7, $8::jsonb, $9)
          RETURNING id`,
         [
           row.student_id,
           row.institution_id,
-          `${row.requested_belt} Belt`,
+          requestedBeltShort,
           row.trainer_remarks || null,
           certNo,
           qrToken,
           template?.id || null,
           JSON.stringify(mergedPlaceholders),
+          id,
         ],
       );
       certId = certRes.rows[0]?.id || null;
       await client.query('RELEASE SAVEPOINT cert_insert');
     } catch (certErr) {
-      console.warn('[promo/approve] certificate insert failed:', certErr?.message);
+      // 23505 on uq_certificates_promotion_request means another
+      // approve landed first (race) — recover the existing cert id
+      // instead of failing the whole approve. Everything else falls
+      // through to the warn + rollback path so the promotion still
+      // completes even if a schema hiccup blocks the cert insert.
       try { await client.query('ROLLBACK TO SAVEPOINT cert_insert'); } catch (_) {}
+      if (certErr?.code === '23505') {
+        try {
+          const existing = await client.query(
+            `SELECT id FROM certificates WHERE promotion_request_id = $1 LIMIT 1`,
+            [id],
+          );
+          certId = existing.rows[0]?.id || null;
+        } catch (_) { /* best-effort */ }
+      } else {
+        console.warn('[promo/approve] certificate insert failed:', certErr?.message);
+      }
     }
 
-    // Update the student's belt_category. Fires whether or not the
-    // certificate row landed — the promotion is still valid even if
-    // the artwork insert had a schema hiccup.
+    // Update the student's belt_category. Short-form so the trainer
+    // curriculum view, student profile, and any downstream card show
+    // the same "Black" string. Fires whether or not the certificate
+    // row landed — the promotion itself is still valid even if the
+    // artwork insert had a schema hiccup.
     await client.query(
       `INSERT INTO student_profiles (user_id, full_name, belt_category)
          VALUES ($1, (SELECT name FROM users WHERE id = $1), $2)
        ON CONFLICT (user_id) DO UPDATE SET
          belt_category = EXCLUDED.belt_category,
          updated_at    = CURRENT_TIMESTAMP`,
-      [row.student_id, row.requested_belt],
+      [row.student_id, requestedBeltShort],
     );
+
+    // Mirror into student_belt_promotions when a matching belt_level
+    // exists — this keeps the historical Belt Journey timeline in
+    // sync with the new promotion. Best-effort inside a SAVEPOINT so
+    // an unusual belt name (custom label the academy invented) never
+    // fails the whole approve. The unique (student_id, belt_level_id)
+    // constraint takes care of duplicate promotion rows.
+    try {
+      await client.query('SAVEPOINT belt_journey_sync');
+      await client.query(
+        `INSERT INTO student_belt_promotions
+           (student_id, belt_level_id, institution_id,
+            promoted_by, promoted_at, remarks)
+         SELECT $1, bl.id, $2, $3, CURRENT_DATE, $4
+           FROM belt_levels bl
+          WHERE bl.institution_id = $2
+            AND (LOWER(bl.name) = LOWER($5) OR LOWER(bl.name) = LOWER($6))
+          LIMIT 1
+        ON CONFLICT (student_id, belt_level_id) DO NOTHING`,
+        [
+          row.student_id, row.institution_id, req.user.id,
+          row.trainer_remarks || null,
+          requestedBeltShort,
+          row.requested_belt,
+        ],
+      );
+      await client.query('RELEASE SAVEPOINT belt_journey_sync');
+    } catch (bjErr) {
+      try { await client.query('ROLLBACK TO SAVEPOINT belt_journey_sync'); } catch (_) {}
+      console.warn('[promo/approve] belt journey mirror skipped:', bjErr?.message);
+    }
 
     // Mark the request approved.
     await client.query(
@@ -563,7 +778,7 @@ exports.approve = async (req, res) => {
     await auditEvent({
       requestId: id, actorId: req.user.id, actorRole: 'admin',
       event: 'approved',
-      remarks: `Promoted to ${row.requested_belt}`,
+      remarks: `Promoted to ${requestedBeltShort}`,
     });
 
     // Notify student.
@@ -572,7 +787,7 @@ exports.approve = async (req, res) => {
       institution_id: row.institution_id,
       category:       'system',
       title:          'Congratulations — belt promoted!',
-      message:        `You've been promoted to ${row.requested_belt}. Your certificate is now available under Belts & Certs.`,
+      message:        `You've been promoted to ${requestedBeltShort}. Your certificate is now available under Belts & Certs.`,
       data: {
         screen:         'StudentCertificates',
         reference_type: 'certificate',
@@ -588,7 +803,7 @@ exports.approve = async (req, res) => {
         institution_id: row.institution_id,
         category:       'system',
         title:          'Promotion approved',
-        message:        `Your promotion request for ${row.student_name} was approved. The student is now ${row.requested_belt}.`,
+        message:        `Your promotion request for ${row.student_name} was approved. The student is now ${requestedBeltShort}.`,
         data: {
           screen:         'StaffStudentDetail',
           reference_type: 'belt_promotion_request',
@@ -599,8 +814,9 @@ exports.approve = async (req, res) => {
     }
 
     return res.json({
-      message: `Promotion approved. ${row.student_name} is now ${row.requested_belt}.`,
+      message: `Promotion approved. ${row.student_name} is now ${requestedBeltShort}.`,
       certificate_id: certId,
+      promotion_request_id: id,
     });
   } catch (err) {
     try { await client.query('ROLLBACK'); } catch (_) {}

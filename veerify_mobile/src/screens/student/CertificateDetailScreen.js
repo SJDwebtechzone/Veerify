@@ -29,12 +29,33 @@ import {
 } from 'react-native';
 import {
   ArrowLeft, Share2, Award, Calendar, CheckCircle2, AlertCircle,
-  Download,
+  Download, ShieldCheck, ExternalLink,
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 import resolveAssetUrl from '../../utils/assetUrl';
+// Display-only belt normalization. Backend snapshots may store
+// "Black Belt"; the certificate surface prints just the colour.
+import { stripBeltSuffix } from '../../utils/beltDisplay';
+// Public verification URL builder — resolves to the /certificates/
+// verify/:token web page (NOT the raw /api/... endpoint). The raw
+// API URL must never surface in the UI or share sheet per the
+// verification spec.
+import buildPublicVerifyUrl from '../../utils/certificateVerify';
+
+// Belt-typed placeholder keys — these get short-form (" Belt"
+// suffix stripped) before rendering. Storage stays untouched.
+const BELT_PIN_KEYS = new Set(['belt_name', 'belt_from', 'belt_to']);
+
+// Best-effort display helper for a belt-typed certificate title so
+// the header + share sheet both read "Black" instead of "Black Belt".
+function displayCertTitle(cert) {
+  if (!cert) return '';
+  const raw = cert.title || '';
+  if (cert.kind === 'belt') return stripBeltSuffix(raw) || raw;
+  return raw;
+}
 
 function fmtDate(iso) {
   if (!iso) return '';
@@ -43,10 +64,12 @@ function fmtDate(iso) {
   return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' });
 }
 
+// Kept as a thin alias so nothing else in this file has to know we
+// switched to the public URL. The old name still reads naturally at
+// call sites; the shape (public /certificates/verify/:token, not the
+// API JSON endpoint) is now enforced by buildPublicVerifyUrl.
 function buildVerifyUrl(cert) {
-  if (!cert?.qr_token) return null;
-  const base = (apiClient?.defaults?.baseURL || '').replace(/\/api\/?$/, '');
-  return `${base}/api/certificates/verify/${cert.qr_token}`;
+  return buildPublicVerifyUrl(cert);
 }
 
 // ── Placeholder pin renderer ──────────────────────────────────────
@@ -79,9 +102,15 @@ function TemplatePin({ pin, canvasW, canvasH }) {
     );
   }
 
-  const text = (pin.value != null && pin.value !== '')
+  const rawText = (pin.value != null && pin.value !== '')
     ? String(pin.value)
     : '';
+  // Belt pins render short-form ("Black" not "Black Belt"). Purely
+  // presentational — the stored placeholder_data on the certificate
+  // row is left untouched.
+  const text = BELT_PIN_KEYS.has(pin?.key)
+    ? stripBeltSuffix(rawText)
+    : rawText;
   if (!text) return null; // Blank placeholder — hide per spec.
 
   const fontSize = Math.max(8, Number(pin.font_size) || 16);
@@ -150,7 +179,7 @@ export default function CertificateDetailScreen({ navigation, route }) {
   const onShare = async () => {
     try {
       const msg = [
-        cert.title || 'Certificate',
+        displayCertTitle(cert) || 'Certificate',
         `Issued to: ${cert.student_name || 'Student'}`,
         `By: ${cert.institution_name || 'Academy'}`,
         `Date: ${fmtDate(cert.issue_date)}`,
@@ -182,7 +211,7 @@ export default function CertificateDetailScreen({ navigation, route }) {
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
           <Text style={styles.headerTitle}>Certificate</Text>
-          <Text style={styles.headerSubtitle}>{cert.title}</Text>
+          <Text style={styles.headerSubtitle}>{displayCertTitle(cert)}</Text>
         </View>
         <TouchableOpacity onPress={onShare} style={styles.shareBtn} activeOpacity={0.85}>
           <Share2 size={16} color="#fff" strokeWidth={2.4} />
@@ -264,7 +293,7 @@ export default function CertificateDetailScreen({ navigation, route }) {
           // auto-generated QR.
           <View style={styles.fallbackCard}>
             <Award size={28} color={palette.purple.vivid} />
-            <Text style={styles.fallbackTitle}>{cert.title}</Text>
+            <Text style={styles.fallbackTitle}>{displayCertTitle(cert)}</Text>
             <Text style={styles.fallbackMeta}>
               Issued by {cert.institution_name || 'your academy'}
             </Text>
@@ -325,12 +354,20 @@ export default function CertificateDetailScreen({ navigation, route }) {
         ) : null}
 
         {verifyUrl ? (
-          <>
-            <Text style={styles.verifyHint}>
-              Verify this certificate at:
-            </Text>
-            <Text selectable style={styles.verifyUrl}>{verifyUrl}</Text>
-          </>
+          <TouchableOpacity
+            onPress={async () => {
+              try { await Linking.openURL(verifyUrl); }
+              catch { Alert.alert('Error', 'Could not open the verification page.'); }
+            }}
+            activeOpacity={0.85}
+            style={styles.verifyBtn}
+            accessibilityRole="button"
+            accessibilityLabel="Verify Certificate"
+          >
+            <ShieldCheck size={16} color="#fff" strokeWidth={2.4} />
+            <Text style={styles.verifyBtnText}>Verify Certificate</Text>
+            <ExternalLink size={14} color="#fff" strokeWidth={2.4} />
+          </TouchableOpacity>
         ) : null}
 
         <View style={{ height: 30 }} />
@@ -444,13 +481,22 @@ const styles = StyleSheet.create({
   },
   downloadBtnText: { color: '#fff', fontWeight: '800', fontSize: 13 },
 
-  verifyHint: {
-    fontSize: 11, color: palette.textLight, marginTop: spacing.md,
+  // "Verify Certificate" button — dark-blue brand primary that
+  // replaces the raw /api/certificates/verify/:token URL. Tapping
+  // opens the public HTML verifier page in the phone's browser.
+  verifyBtn: {
     alignSelf: 'stretch',
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 8,
+    marginTop: spacing.md,
+    paddingVertical: 12,
+    backgroundColor: '#1E3A8A',
+    borderRadius: radius.md,
+    shadowColor: '#1E3A8A',
+    shadowOpacity: 0.25,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
   },
-  verifyUrl: {
-    alignSelf: 'stretch',
-    fontSize: 11, color: palette.purple.vivid, fontWeight: '700',
-    fontFamily: 'monospace', marginTop: 4,
-  },
+  verifyBtnText: { color: '#fff', fontWeight: '800', fontSize: 13, letterSpacing: 0.3 },
 });

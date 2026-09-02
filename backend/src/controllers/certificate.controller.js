@@ -35,18 +35,71 @@ exports.verify = async (req, res) => {
     const token = String(req.params.token || '').trim();
     if (!token) return res.status(400).json({ message: 'Token required' });
 
-    const r = await pool.query(
-      `SELECT c.id, c.kind, c.title, c.issue_date, c.certificate_no,
-              c.status, c.instructor_name,
-              u.name AS student_name,
-              i.name AS institution_name
-         FROM certificates c
-         JOIN users u ON c.student_id = u.id
-         JOIN institutions i ON c.institution_id = i.id
-        WHERE LOWER(c.qr_token) = LOWER($1)
-        LIMIT 1`,
-      [token],
-    );
+    // Pull the promotion linkage alongside the certificate so the
+    // verify page can prove this artefact was minted from a real
+    // promotion_request (not manually inserted). The LEFT JOIN keeps
+    // legacy / non-belt certificates working: they simply come back
+    // with null promotion fields.
+    //
+    // The extended query depends on:
+    //   • certificates.promotion_request_id  (migration 094)
+    //   • belt_promotion_requests table      (migration 085)
+    //   • belt_promotion_requests.curriculum_item_id (migration 093)
+    // Environments that haven't run one of those migrations yet would
+    // 42703 the whole query and turn every /verify into a "not
+    // found". To survive that, we run the enriched query first and
+    // silently fall back to a plain certificate-only lookup if any
+    // referenced column is missing.
+    async function runEnriched() {
+      return pool.query(
+        `SELECT c.id, c.kind, c.title, c.issue_date, c.certificate_no,
+                c.status, c.instructor_name,
+                c.promotion_request_id,
+                u.name AS student_name,
+                i.name AS institution_name,
+                r.id                  AS promo_id,
+                r.status              AS promo_status,
+                r.current_belt        AS promo_from_belt,
+                r.requested_belt      AS promo_to_belt,
+                r.curriculum_item_id  AS promo_curriculum_item_id,
+                r.resolved_at         AS promo_approved_at
+           FROM certificates c
+           JOIN users u ON c.student_id = u.id
+           JOIN institutions i ON c.institution_id = i.id
+           LEFT JOIN belt_promotion_requests r ON r.id = c.promotion_request_id
+          WHERE LOWER(c.qr_token) = LOWER($1)
+          LIMIT 1`,
+        [token],
+      );
+    }
+    async function runBasic() {
+      return pool.query(
+        `SELECT c.id, c.kind, c.title, c.issue_date, c.certificate_no,
+                c.status, c.instructor_name,
+                u.name AS student_name,
+                i.name AS institution_name
+           FROM certificates c
+           JOIN users u ON c.student_id = u.id
+           JOIN institutions i ON c.institution_id = i.id
+          WHERE LOWER(c.qr_token) = LOWER($1)
+          LIMIT 1`,
+        [token],
+      );
+    }
+
+    let r;
+    try {
+      r = await runEnriched();
+    } catch (enrichedErr) {
+      // 42703 = undefined_column; 42P01 = undefined_table. Anything
+      // else is a real fault the outer catch should surface.
+      if (enrichedErr?.code === '42703' || enrichedErr?.code === '42P01') {
+        console.warn('[verify] enriched query fell back to basic:', enrichedErr.message);
+        r = await runBasic();
+      } else {
+        throw enrichedErr;
+      }
+    }
     if (r.rows.length === 0) {
       return res.status(404).json({
         valid: false,
@@ -54,9 +107,33 @@ exports.verify = async (req, res) => {
       });
     }
     const c = r.rows[0];
+    // Belt-typed certificates carry a promotion block; other kinds
+    // stay flat so existing clients don't have to branch.
+    const promotion = c.kind === 'belt' && c.promotion_request_id
+      ? {
+          id:                  c.promo_id,
+          status:              c.promo_status,
+          from_belt:           c.promo_from_belt,
+          to_belt:             c.promo_to_belt,
+          curriculum_item_id:  c.promo_curriculum_item_id,
+          approved_at:         c.promo_approved_at,
+        }
+      : null;
     res.json({
       valid: c.status === 'verified',
-      certificate: c,
+      certificate: {
+        id:                   c.id,
+        kind:                 c.kind,
+        title:                c.title,
+        issue_date:           c.issue_date,
+        certificate_no:       c.certificate_no,
+        status:               c.status,
+        instructor_name:      c.instructor_name,
+        student_name:         c.student_name,
+        institution_name:     c.institution_name,
+        promotion_request_id: c.promotion_request_id,
+      },
+      promotion,
     });
   } catch (err) {
     console.error('Verify error:', err);
@@ -186,6 +263,82 @@ exports.listForStudent = async (req, res) => {
   } catch (err) {
     console.error('Cert listForStudent error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// ── List: every certificate the institution has dispatched ────────────────
+// GET /api/certificates/institution
+//
+// Powers the Admin → More → Certificates → Dispatched Certificates screen.
+// Branch-scoped the same way promotion requests are: sub-branch admins
+// only see certificates for students in their own branch (via the most
+// recent enrollment.batch_id → batches.branch_id); main-institution
+// admins see everything under the root plus its branches. Reads are
+// LEFT-JOINed to the template so the viewer can render the exact
+// artwork the admin dispatched — no separate round-trip needed.
+exports.listInstitution = async (req, res) => {
+  try {
+    if (req.user?.role !== 'admin') {
+      return res.status(403).json({ message: 'Admin role required.' });
+    }
+    const scope = await getBranchScope(req.user.id);
+    if (!scope) return res.status(403).json({ message: 'No institution linked.' });
+
+    // Institution filter — root institution plus its sub-branches.
+    // Mirrors the promotion listInstitution query so admins see a
+    // consistent set of students across the two screens.
+    const params = [scope.rootId];
+    let where = `(
+                   c.institution_id = $1
+                   OR c.institution_id IN (
+                        SELECT id FROM institutions WHERE parent_institution_id = $1
+                   )
+                 )`;
+
+    // Sub-branch admins are further narrowed to certificates whose
+    // owning student's most-recent batch sits under their branch.
+    // Main admins see everything under the root (no extra clause).
+    if (scope.isSubBranchAdmin) {
+      params.push(scope.callerInstId);
+      where += ` AND EXISTS (
+                   SELECT 1
+                     FROM enrollments e
+                     JOIN batches b ON b.id = e.batch_id
+                    WHERE e.student_id = c.student_id
+                      AND b.branch_id  = $${params.length}
+                 )`;
+    }
+
+    // Optional kind filter (?kind=belt | tournament | completion | achievement).
+    const kindFilter = String(req.query?.kind || '').trim().toLowerCase();
+    if (['belt', 'tournament', 'completion', 'achievement'].includes(kindFilter)) {
+      params.push(kindFilter);
+      where += ` AND c.kind = $${params.length}`;
+    }
+
+    const r = await pool.query(
+      `SELECT c.*,
+              u.name             AS student_name,
+              i.name             AS institution_name,
+              t.name             AS template_name,
+              t.background_url   AS template_background_url,
+              t.background_kind  AS template_background_kind,
+              t.canvas_width     AS template_canvas_width,
+              t.canvas_height    AS template_canvas_height,
+              t.signature_url    AS template_signature_url,
+              t.seal_url         AS template_seal_url
+         FROM certificates c
+         JOIN users u        ON u.id = c.student_id
+         JOIN institutions i ON i.id = c.institution_id
+         LEFT JOIN certificate_templates t ON t.id = c.template_id
+        WHERE ${where}
+        ORDER BY c.issue_date DESC, c.id DESC`,
+      params,
+    );
+    return res.json({ count: r.rows.length, certificates: r.rows });
+  } catch (err) {
+    console.error('Cert listInstitution error:', err);
+    return res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
 

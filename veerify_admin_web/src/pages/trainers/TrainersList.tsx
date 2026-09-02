@@ -87,6 +87,29 @@ export function TrainersList() {
   const [skillFilter, setSkillFilter] = useState<string>('');
   const [beltFilter, setBeltFilter] = useState<string>('');
 
+  // Canonical enum lists — pulled from GET /config/enums so the
+  // Trainers filter dropdowns render the SAME options as the mobile
+  // Academy Setup form (skills) and Student Enrollment form (belts).
+  // No hardcoded lists live in this file; the endpoint is the single
+  // source of truth. Empty until the network settles, then merged
+  // with any legacy trainer values so existing rows keep filtering.
+  const [canonicalSkills, setCanonicalSkills] = useState<string[]>([]);
+  const [canonicalBelts,  setCanonicalBelts]  = useState<string[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    apiClient
+      .get('/config/enums')
+      .then((r) => {
+        if (cancelled) return;
+        const s = Array.isArray(r.data?.skills) ? r.data.skills.map(String) : [];
+        const b = Array.isArray(r.data?.belts)  ? r.data.belts.map(String)  : [];
+        setCanonicalSkills(s);
+        setCanonicalBelts(b);
+      })
+      .catch(() => { /* silent — dropdowns will fall back to trainer-derived values below */ });
+    return () => { cancelled = true; };
+  }, []);
+
   // Detail modal
   const [viewing, setViewing] = useState<TrainerRow | null>(null);
 
@@ -112,21 +135,37 @@ export function TrainersList() {
     return Array.from(set.entries()).sort((a, b) => a[1].localeCompare(b[1]));
   }, [trainers]);
 
+  // Skill / belt dropdowns start from the canonical enum lists so the
+  // Web Admin matches Academy Setup (skills) and Student Enrollment
+  // (belts) exactly. We then MERGE any value carried on an existing
+  // trainer row that isn't in the canonical list — that way a legacy
+  // trainer whose specialization was hand-typed still filters cleanly
+  // and never becomes unreachable. The canonical order is preserved
+  // for the head of the list; extras are appended alphabetically so
+  // they're easy to spot as legacy outliers.
   const skills = useMemo(() => {
-    const set = new Set<string>();
+    const canonical = canonicalSkills;
+    const canonicalSet = new Set(canonical);
+    const extras: string[] = [];
     trainers.forEach((t) => {
-      if (t.specialization) set.add(t.specialization);
+      const v = t.specialization?.trim();
+      if (v && !canonicalSet.has(v)) extras.push(v);
     });
-    return Array.from(set).sort();
-  }, [trainers]);
+    extras.sort();
+    return [...canonical, ...Array.from(new Set(extras))];
+  }, [canonicalSkills, trainers]);
 
   const belts = useMemo(() => {
-    const set = new Set<string>();
+    const canonical = canonicalBelts;
+    const canonicalSet = new Set(canonical);
+    const extras: string[] = [];
     trainers.forEach((t) => {
-      if (t.belt_level) set.add(t.belt_level);
+      const v = t.belt_level?.trim();
+      if (v && !canonicalSet.has(v)) extras.push(v);
     });
-    return Array.from(set).sort();
-  }, [trainers]);
+    extras.sort();
+    return [...canonical, ...Array.from(new Set(extras))];
+  }, [canonicalBelts, trainers]);
 
   // ── Apply filters client-side ──
   const filtered = useMemo(() => {

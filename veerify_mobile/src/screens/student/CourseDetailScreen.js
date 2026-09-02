@@ -102,10 +102,18 @@ export default function CourseDetailScreen({ navigation, route }) {
       setProgram(progRes.data.course || progRes.data.program || null);
       setBatches(batchRes.data.batches || []);
       const myRows = enrRes.data?.enrollments || [];
+      // "Enrolled" for the purposes of the Course Detail screen
+      // means the student has ANY active enrolment in this course —
+      // paid, free, or institution-side. Excludes explicitly
+      // cancelled rows only. Previously we gated on
+      // payment_status='paid', which meant institution-side
+      // enrolments (payment_status often NULL/'free') read as
+      // "unenrolled" and the sticky bar kept prompting them to
+      // Enroll Now.
       setIsEnrolledInCourse(
         myRows.some((e) =>
           Number(e.course_id) === Number(courseId)
-          && e.payment_status === 'paid',
+          && String(e.status || '').toLowerCase() !== 'cancelled',
         ),
       );
     } catch (err) {
@@ -360,10 +368,9 @@ export default function CourseDetailScreen({ navigation, route }) {
                 navigation.navigate('Home');
               }
             }} />
-            <View style={{ flexDirection: 'row', gap: spacing.sm }}>
-              <RoundIconBtn icon={Heart} onPress={() => Alert.alert('Saved', 'Wishlist coming soon.')} />
-              <RoundIconBtn icon={Share2} onPress={handleShare} />
-            </View>
+            {/* Wishlist heart + Share buttons intentionally hidden.
+                Not wired to real functionality (heart was a "coming
+                soon" placeholder), and cluttered the hero corner. */}
           </View>
         </View>
 
@@ -527,7 +534,14 @@ export default function CourseDetailScreen({ navigation, route }) {
             no CTA is lost. */}
       </ScrollView>
 
-      {/* ── Sticky bottom Enroll bar ─────────────────────── */}
+      {/* ── Sticky bottom bar ────────────────────────────────
+          Three flavours:
+            • Enrolled — flat green "Enrolled" pill, no CTA. The
+              student is already in this course so the primary
+              action collapses to a status indicator.
+            • Paid (subscribed) — "Continue" CTA.
+            • Everyone else — "Enroll now" CTA.
+          The left half stays the same (Price / Free preview). */}
       <View style={styles.stickyBar}>
         <View style={{ flex: 1 }}>
           <Text style={styles.stickyPriceLabel}>Price</Text>
@@ -537,14 +551,21 @@ export default function CourseDetailScreen({ navigation, route }) {
               : 'Free preview'}
           </Text>
         </View>
-        <TouchableOpacity
-          onPress={handleEnroll}
-          activeOpacity={0.85}
-          style={styles.enrollBtn}
-        >
-          <CheckCircle2 size={16} color="#fff" strokeWidth={2.6} />
-          <Text style={styles.enrollBtnText}>{isPaid ? 'Continue' : 'Enroll now'}</Text>
-        </TouchableOpacity>
+        {isEnrolledInCourse ? (
+          <View style={[styles.enrollBtn, { backgroundColor: '#10B981' }]}>
+            <CheckCircle2 size={16} color="#fff" strokeWidth={2.6} />
+            <Text style={styles.enrollBtnText}>Enrolled</Text>
+          </View>
+        ) : (
+          <TouchableOpacity
+            onPress={handleEnroll}
+            activeOpacity={0.85}
+            style={styles.enrollBtn}
+          >
+            <CheckCircle2 size={16} color="#fff" strokeWidth={2.6} />
+            <Text style={styles.enrollBtnText}>{isPaid ? 'Continue' : 'Enroll now'}</Text>
+          </TouchableOpacity>
+        )}
       </View>
 
       {/* ── Batch picker (custom bottom sheet) ───────────────────────
@@ -712,7 +733,35 @@ function LessonRow({ index, lesson, locked, onPress }) {
   );
 }
 
+// Format a stored HH:MM (or HH:MM:SS) time string into "h:mm AM/PM".
+// Falls back to whatever came in if the value doesn't parse.
+function fmtBatchTime(t) {
+  if (!t) return '';
+  const s = String(t);
+  const m = /^(\d{1,2}):(\d{2})/.exec(s);
+  if (!m) return s;
+  const h  = Number(m[1]);
+  const mm = m[2];
+  const suffix = h >= 12 ? 'PM' : 'AM';
+  const h12 = ((h + 11) % 12) + 1;
+  return `${h12}:${mm} ${suffix}`;
+}
+
+// Compose the batch's timing string. Prefers explicit start_time +
+// end_time (from batches.start_time / end_time). Falls back to a
+// single time when only one side is set, and stays silent when
+// neither is present so we don't render an empty "–" pill.
+function batchTimingLabel(batch) {
+  const start = fmtBatchTime(batch.start_time);
+  const end   = fmtBatchTime(batch.end_time);
+  if (start && end) return `${start} – ${end}`;
+  if (start)        return `From ${start}`;
+  if (end)          return `Until ${end}`;
+  return '';
+}
+
 function BatchTeaserCard({ batch, onPress }) {
+  const timing = batchTimingLabel(batch);
   return (
     <TouchableOpacity onPress={onPress} activeOpacity={0.85} style={styles.batchCard}>
       <Text style={styles.batchName} numberOfLines={1}>
@@ -729,6 +778,15 @@ function BatchTeaserCard({ batch, onPress }) {
           {batch.days || batch.days_of_week || 'Schedule TBD'}
         </Text>
       </View>
+      {/* Timing row — start – end. Rendered only when at least one
+          side is available so batches with no time set don't show
+          a stray clock icon. */}
+      {timing ? (
+        <View style={styles.batchMetaRow}>
+          <Clock size={11} color={palette.textMuted} strokeWidth={2.2} />
+          <Text style={styles.batchMeta} numberOfLines={1}>{timing}</Text>
+        </View>
+      ) : null}
       {batch.mode ? (
         <View style={styles.batchMetaRow}>
           <MapPin size={11} color={palette.textMuted} strokeWidth={2.2} />

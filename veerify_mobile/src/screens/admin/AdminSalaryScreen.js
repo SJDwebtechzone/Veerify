@@ -20,7 +20,7 @@
 // it on the trainer profile yet) so we never persist a zero-net slip
 // by accident.
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, TextInput,
   ActivityIndicator, StyleSheet, RefreshControl,
@@ -33,6 +33,42 @@ import {
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 import { confirm } from '../../components/ConfirmDialog';
+// Institution Home visual system — ambient blue wash + glass
+// cards + navy accents. Reused verbatim so this screen belongs to
+// the same design language as the rest of the institution UI.
+import InstitutionScreenBackground, {
+  INSTITUTION_BG_BASE,
+} from '../../components/InstitutionScreenBackground';
+import { useTheme } from '../../theme/ThemeContext';
+
+// ── Institution-Home glass tokens ─────────────────────────────
+const GLASS_FILL         = 'rgba(255,255,255,0.72)';
+const GLASS_FILL_STRONG  = 'rgba(255,255,255,0.88)';
+const GLASS_BORDER_LIGHT = 'rgba(255,255,255,0.55)';
+const GLASS_HIGHLIGHT    = 'rgba(255,255,255,0.9)';
+const GLASS_SHADOW       = '#1E40AF';
+const BRAND_DARK_BLUE    = '#1E3A8A';
+const BRAND_ACCENT_SOFT  = 'rgba(30,58,138,0.10)';
+const HEADER_NAVY        = '#0F172A';
+
+// Local context so nested sub-components pick up dark-mode
+// overrides without prop-drilling.
+const SalaryCtx = createContext({ isDark: false, dark: {} });
+
+function buildDarkOverrides(pal) {
+  return StyleSheet.create({
+    screen:      { backgroundColor: pal.bg },
+    header:      { backgroundColor: pal.surface, borderBottomColor: pal.border },
+    headerTitle: { color: pal.text },
+    headerSub:   { color: pal.textMuted },
+    iconBtn:     { backgroundColor: pal.border },
+    card:        { backgroundColor: pal.surface, borderColor: pal.border },
+    trainerCard: { backgroundColor: pal.surface, borderColor: pal.border },
+    slipCard:    { backgroundColor: pal.surface, borderColor: pal.border },
+    sectionTitle:{ color: pal.textMuted },
+    label:       { color: pal.textMuted },
+  });
+}
 
 // ── Month utilities ─────────────────────────────────────────────────
 const MONTH_LONG  = ['January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -200,28 +236,40 @@ export default function AdminSalaryScreen({ navigation }) {
     }
   };
 
+  // Dark-mode overrides pulled from the shared ThemeContext.
+  // Institution Home's ambient background is skipped in dark mode.
+  const { mode, palette: themePalette } = useTheme();
+  const isDark = mode === 'dark';
+  const dark   = useMemo(() => (isDark ? buildDarkOverrides(themePalette) : {}), [isDark, themePalette]);
+
   if (loading) {
     return (
-      <View style={[styles.screen, styles.center]}>
-        <ActivityIndicator size="large" color={palette.purple.vivid} />
+      <SalaryCtx.Provider value={{ isDark, dark }}>
+      <View style={[styles.screen, styles.center, isDark && dark.screen]}>
+        {!isDark ? <InstitutionScreenBackground layer /> : null}
+        <ActivityIndicator size="large" color={BRAND_DARK_BLUE} />
       </View>
+      </SalaryCtx.Provider>
     );
   }
 
   return (
-    <View style={styles.screen}>
+    <SalaryCtx.Provider value={{ isDark, dark }}>
+    <View style={[styles.screen, isDark && dark.screen]}>
+      {/* Institution Home ambient wash — sits behind all content. */}
+      {!isDark ? <InstitutionScreenBackground layer /> : null}
       {/* ── Header ────────────────────────────────────────────── */}
-      <View style={styles.header}>
+      <View style={[styles.header, isDark && dark.header]}>
         <TouchableOpacity
           onPress={() => navigation.goBack()}
-          style={styles.iconBtn}
+          style={[styles.iconBtn, isDark && dark.iconBtn]}
           hitSlop={8}
         >
-          <ArrowLeft size={20} color={palette.text} strokeWidth={2.4} />
+          <ArrowLeft size={20} color={isDark ? themePalette.text : HEADER_NAVY} strokeWidth={2.4} />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
-          <Text style={styles.title}>Salary</Text>
-          <Text style={styles.subtitle}>
+          <Text style={[styles.title, isDark && dark.headerTitle]}>Salary</Text>
+          <Text style={[styles.subtitle, isDark && dark.headerSub]}>
             Pick a trainer to record this month's payroll.
           </Text>
         </View>
@@ -303,6 +351,7 @@ export default function AdminSalaryScreen({ navigation }) {
         )}
       </ScrollView>
     </View>
+    </SalaryCtx.Provider>
   );
 }
 
@@ -456,9 +505,11 @@ function SlipEditor({
 
 // ── Styles ───────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: palette.bg },
+  // Institution Home ambient page base — the wash SVG paints on top.
+  screen: { flex: 1, backgroundColor: INSTITUTION_BG_BASE },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
 
+  // Header — glass slab with a navy title and soft blue lift shadow.
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -466,16 +517,22 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.lg,
     paddingTop: spacing.xxl,
     paddingBottom: spacing.md,
-    backgroundColor: palette.surface,
-    ...shadows.card,
+    backgroundColor: GLASS_FILL_STRONG,
+    borderBottomWidth: 1, borderBottomColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
   },
   iconBtn: {
     width: 36, height: 36, borderRadius: 18,
     alignItems: 'center', justifyContent: 'center',
-    backgroundColor: palette.borderSoft,
+    backgroundColor: BRAND_ACCENT_SOFT,
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
   },
-  title: { ...type.h1, color: palette.text, fontSize: 20 },
-  subtitle: { ...type.caption, color: palette.textMuted, marginTop: 2 },
+  title:    { ...type.h1, color: HEADER_NAVY, fontSize: 20, letterSpacing: 0.2 },
+  subtitle: { ...type.caption, color: palette.textMuted, marginTop: 2, fontWeight: '600' },
 
   sectionLabel: {
     ...type.micro,
@@ -487,25 +544,38 @@ const styles = StyleSheet.create({
     paddingBottom: 6,
   },
 
+  // Empty state — glass panel matching the rest of the Institution
+  // Home surfaces.
   emptyCard: {
     marginHorizontal: spacing.lg,
     marginTop: 6,
     padding: spacing.xl,
-    borderRadius: radius.lg,
-    backgroundColor: palette.surface,
+    borderRadius: 16,
+    backgroundColor: GLASS_FILL_STRONG,
     alignItems: 'center',
     gap: 6,
-    ...shadows.card,
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
   },
   emptyTitle: { ...type.bodyBold, color: palette.text, marginTop: 4 },
   emptyBody: { ...type.caption, color: palette.textMuted, textAlign: 'center', maxWidth: 260 },
 
+  // Trainer list card — glass panel with matching blue lift shadow.
   list: {
     marginHorizontal: spacing.lg,
-    borderRadius: radius.lg,
-    backgroundColor: palette.surface,
+    borderRadius: 16,
+    backgroundColor: GLASS_FILL_STRONG,
     overflow: 'hidden',
-    ...shadows.card,
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
   },
   trainerRow: {
     flexDirection: 'row',

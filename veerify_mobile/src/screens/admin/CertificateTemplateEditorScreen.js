@@ -32,21 +32,31 @@ import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 import resolveAssetUrl from '../../utils/assetUrl';
 import { confirm } from '../../components/ConfirmDialog';
+// Display-only belt normalization. Storage still uses "Black Belt";
+// the certificate surface renders just the colour ("Black").
+import { stripBeltSuffix } from '../../utils/beltDisplay';
+
+// Belt-typed placeholder keys — any pin whose key is in this set
+// gets `stripBeltSuffix` applied to its sample / resolved value
+// before it's drawn on the canvas.
+const BELT_PIN_KEYS = new Set(['belt_name', 'belt_from', 'belt_to']);
 
 // Full field catalogue. Must stay in sync with the backend's
 // PLACEHOLDER_KEYS array; the backend rejects any pin with a key
 // that isn't in the catalogue.
 const PLACEHOLDER_META = [
   { key: 'student_name',      label: 'Student Name',      sample: 'Rohan Kumar' },
-  { key: 'course_name',       label: 'Course',            sample: 'Karate — Blue Belt' },
-  { key: 'belt_name',         label: 'Belt / Grade',      sample: 'Blue Belt' },
+  { key: 'course_name',       label: 'Course',            sample: 'Karate — Blue' },
+  { key: 'belt_name',         label: 'Belt / Grade',      sample: 'Blue' },
   // Belt progression — drag either pin independently so the
-  // certificate can print "White Belt → Yellow Belt" wherever the
-  // artwork calls for it. Auto-populates from the student's most
-  // recent belt promotion; blank when the certificate isn't tied
-  // to a grading event.
-  { key: 'belt_from',         label: 'Belt From',         sample: 'White Belt' },
-  { key: 'belt_to',           label: 'Belt To',           sample: 'Yellow Belt' },
+  // certificate can print "White → Yellow" wherever the artwork
+  // calls for it. Auto-populates from the student's most recent
+  // belt promotion; blank when the certificate isn't tied to a
+  // grading event. Sample values are shown short-form (colour only)
+  // to match the on-certificate rendering; storage still uses the
+  // full "White Belt" label.
+  { key: 'belt_from',         label: 'Belt From',         sample: 'White' },
+  { key: 'belt_to',           label: 'Belt To',           sample: 'Yellow' },
   { key: 'certificate_no',    label: 'Certificate No.',   sample: 'VRF-2026-45678' },
   { key: 'issue_date',        label: 'Issue Date',        sample: '13 Jul 2026' },
   { key: 'completion_date',   label: 'Completion Date',   sample: '05 Jul 2026' },
@@ -716,7 +726,11 @@ function Pin({ pin, canvasW, canvasH, selected, readOnly, imageUrl, onSelect, on
     );
   }
 
-  const text = meta?.sample || pin.label;
+  // Belt pins render short-form (colour only) on the canvas —
+  // storage stays "Black Belt" but the certificate surface never
+  // shows the redundant " Belt" suffix.
+  const rawText = meta?.sample || pin.label;
+  const text = BELT_PIN_KEYS.has(pin.key) ? stripBeltSuffix(rawText) : rawText;
   // Estimate text width based on font size + text length so we can
   // roughly center the pin visually. Pure heuristic — perfect
   // alignment happens at final render on the backend.

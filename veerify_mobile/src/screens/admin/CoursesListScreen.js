@@ -25,6 +25,9 @@ import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 import { useBellScrollHandler } from '../../components/bellScrollBus';
 import CourseImage from '../../components/CourseImage';
+// Shared Institution-admin ambient background — same light-blue
+// wash + soft glow blobs as the Home screen.
+import InstitutionScreenBackground from '../../components/InstitutionScreenBackground';
 import { billingCycleLabel } from '../../utils/billingCycle';
 
 const ASSET_HOST = (apiClient.defaults.baseURL || '').replace(/\/api\/?$/, '');
@@ -118,6 +121,8 @@ export default function CoursesListScreen({ navigation }) {
 
   return (
     <View style={styles.screen}>
+      {/* Shared ambient background — painted behind all content. */}
+      <InstitutionScreenBackground layer />
       <View style={styles.header}>
         <View>
           <Text style={styles.title}>{isSubBranch ? 'Courses at this branch' : 'My Courses'}</Text>
@@ -273,8 +278,9 @@ function ActionButton({ icon: Icon, label, accent, onPress }) {
 
 // ── Styles ───────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: palette.bg },
-  center: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: palette.bg },
+  // Base fill matches the shared Institution ambient background.
+  screen: { flex: 1, backgroundColor: '#F1F6FB' },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#F1F6FB' },
 
   // Header
   header: {
@@ -285,28 +291,63 @@ const styles = StyleSheet.create({
   title: { ...type.display, color: palette.text },
   subtitle: { ...type.caption, color: palette.textMuted, marginTop: 2 },
 
-  // Empty
+  // Empty state — glass card so the "no courses yet" panel matches
+  // the surrounding glass system rather than reading as a flat
+  // white sheet.
   emptyCard: {
-    backgroundColor: palette.surface,
-    borderRadius: radius.lg,
+    backgroundColor: 'rgba(255,255,255,0.6)',
+    borderTopWidth: 1.5,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderLeftWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.95)',
+    borderRightColor: 'rgba(255,255,255,0.6)',
+    borderBottomColor: 'rgba(255,255,255,0.6)',
+    borderLeftColor: 'rgba(255,255,255,0.6)',
+    borderRadius: radius.xl,
     padding: spacing.xl,
     alignItems: 'center',
     gap: 8,
-    ...shadows.card,
+    shadowColor: '#1E40AF',
+    shadowOpacity: 0.10,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
   },
   emptyTitle: { ...type.bodyBold, color: palette.text, marginTop: 4 },
   emptySub:   { ...type.caption, color: palette.textMuted, textAlign: 'center' },
 
-  // Card
+  // Course card — premium glass. Translucent white surface so the
+  // ambient light-blue background bleeds through and the card
+  // reads as genuine glass, not a flat white panel. Bright glossy
+  // top-edge highlight, cool-blue drop-shadow, softer sides.
   card: {
-    backgroundColor: palette.surface,
-    borderRadius: radius.lg,
+    backgroundColor: 'rgba(255,255,255,0.6)',
+    borderTopWidth: 1.5,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderLeftWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.95)',
+    borderRightColor: 'rgba(255,255,255,0.6)',
+    borderBottomColor: 'rgba(255,255,255,0.6)',
+    borderLeftColor: 'rgba(255,255,255,0.6)',
+    borderRadius: radius.xl,
     padding: spacing.md,
     marginBottom: spacing.md,
-    ...shadows.card,
+    // Cool cobalt-blue drop-shadow — matches the Home stat cards
+    // and Students rows so the whole admin login reads as one
+    // unified glass environment.
+    shadowColor: '#1E40AF',
+    shadowOpacity: 0.11,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 4,
   },
   cardTop: { flexDirection: 'row', gap: spacing.sm },
-  thumb: { width: 64, height: 64, borderRadius: radius.md, backgroundColor: palette.borderSoft },
+  // Thumb backdrop — very light translucent tint so an empty /
+  // placeholder square doesn't punch a solid grey rectangle out
+  // of the glass card surface.
+  thumb: { width: 64, height: 64, borderRadius: radius.md, backgroundColor: 'rgba(226,232,240,0.55)' },
   thumbPlaceholder: { alignItems: 'center', justifyContent: 'center' },
 
   titleRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
@@ -335,7 +376,9 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingVertical: spacing.sm,
     borderTopWidth: 1,
-    borderTopColor: palette.borderSoft,
+    // Softer divider so the internal hairline doesn't look
+    // stronger than the glass card's outer border.
+    borderTopColor: 'rgba(148,163,184,0.22)',
     marginTop: spacing.sm,
   },
   priceLabel: { ...type.caption, color: palette.textMuted },

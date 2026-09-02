@@ -24,6 +24,9 @@ import {
 
 import { palette, spacing, radius, shadows, type } from '../../../theme';
 import FAB from '../../../components/FAB';
+// Shared Institution-admin ambient background — same light-blue
+// wash + soft glow blobs as the Home screen.
+import InstitutionScreenBackground from '../../../components/InstitutionScreenBackground';
 
 // ─── Placeholder data ────────────────────────────────────────────────────────
 const BATCHES = [
@@ -110,6 +113,8 @@ export default function BatchesTabScreen() {
 
   return (
     <View style={styles.screen}>
+      {/* Shared ambient background — painted behind all content. */}
+      <InstitutionScreenBackground layer />
       {/* Header */}
       <View style={styles.header}>
         <View style={{ flex: 1 }}>
@@ -303,7 +308,8 @@ function MetaItem({ icon: Icon, label, value }) {
 
 // ─── Styles ──────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: palette.bg },
+  // Base fill matches the shared Institution ambient background.
+  screen: { flex: 1, backgroundColor: '#F1F6FB' },
 
   header: {
     flexDirection: 'row',

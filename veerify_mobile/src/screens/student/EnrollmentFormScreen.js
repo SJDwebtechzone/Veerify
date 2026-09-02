@@ -12,7 +12,7 @@
 // On second + subsequent enrollments we pre-fill the form from
 // GET /api/enrollments/my-profile so the student doesn't re-type everything.
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { createContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView, Image,
   Alert, ActivityIndicator, StyleSheet, KeyboardAvoidingView, Platform,
@@ -34,16 +34,70 @@ import { confirm } from '../../components/ConfirmDialog';
 import { useAuth } from '../../context/AuthContext';
 import { useInstitution } from '../../context/InstitutionContext';
 import { formatBatchTimeRange } from '../../utils/formatTime';
+// Institution Home visual system — ambient blue wash + glass cards
+// + dark-blue primary. Reused verbatim so this screen belongs to
+// the same design language as the rest of the institution UI.
+import InstitutionScreenBackground, {
+  INSTITUTION_BG_BASE,
+} from '../../components/InstitutionScreenBackground';
+import { useTheme } from '../../theme/ThemeContext';
+
+// ── Institution-Home glass tokens ─────────────────────────────
+// Mirror the values used by AdminDashboardScreen / TrainersList
+// etc. Kept as module-level constants so the StyleSheet block
+// below can reference them and every card, border and shadow
+// reads the same values.
+const GLASS_FILL         = 'rgba(255,255,255,0.72)';
+const GLASS_FILL_STRONG  = 'rgba(255,255,255,0.88)';
+const GLASS_BORDER_LIGHT = 'rgba(255,255,255,0.55)';
+const GLASS_HIGHLIGHT    = 'rgba(255,255,255,0.9)';
+const GLASS_SHADOW       = '#1E40AF';
+const BRAND_DARK_BLUE    = '#1E3A8A';
+const BRAND_ACCENT_SOFT  = 'rgba(30,58,138,0.10)';
+const HEADER_NAVY        = '#0F172A';
 
 // ─── Theme tokens ──────────────────────────────────────────────────────
+// Kept the SURFACE / BG / BORDER names the existing StyleSheet
+// block references so the switch to the Institution Home look
+// stays a one-line change per token. SURFACE is now the strong
+// glass fill so cards read as translucent panels on the ambient
+// wash; BG is the base blue-tinted page colour.
 const BRAND = '#E63946';
 const BRAND_SOFT = '#FFE4E6';
-const TEXT = '#111827';
+const TEXT = HEADER_NAVY;
 const TEXT_MUTED = '#6B7280';
 const TEXT_LIGHT = '#9CA3AF';
-const SURFACE = '#FFFFFF';
-const BG = '#F4F4F8';
-const BORDER = '#E5E7EB';
+const SURFACE = GLASS_FILL_STRONG;
+const BG = INSTITUTION_BG_BASE;
+const BORDER = GLASS_BORDER_LIGHT;
+
+// Local context so nested sub-components pick up dark-mode
+// overrides without prop-drilling.
+const EnrollmentCtx = createContext({ isDark: false, dark: {} });
+
+function buildDarkOverrides(pal) {
+  return StyleSheet.create({
+    screen:      { backgroundColor: pal.bg },
+    header:      { backgroundColor: pal.surface, borderBottomColor: pal.border },
+    headerTitle: { color: pal.text },
+    headerSub:   { color: pal.textMuted },
+    iconBtn:     { backgroundColor: pal.border },
+    summaryCard: { backgroundColor: pal.surface, borderColor: pal.border },
+    summaryHeading: { color: pal.textMuted },
+    summaryRow:  { borderBottomColor: pal.border },
+    summaryLabel:{ color: pal.textMuted },
+    summaryValue:{ color: pal.text },
+    sheetCard:   { backgroundColor: pal.surface },
+    sheetHandle: { backgroundColor: pal.border },
+    sheetTitle:  { color: pal.text },
+    sheetSubtitle: { color: pal.textMuted },
+    sheetOption: { backgroundColor: pal.surface, borderColor: pal.border },
+    sheetOptionTitle: { color: pal.text },
+    sheetOptionSub: { color: pal.textMuted },
+    sheetCancel: { backgroundColor: pal.border },
+    sheetCancelText: { color: pal.textMuted },
+  });
+}
 
 // Blood-group options for the dropdown picker. Standard eight ABO/Rh
 // combinations.
@@ -751,21 +805,34 @@ export default function EnrollmentFormScreen({ route, navigation }) {
   const initials = (form.full_name || ' ').split(' ')
     .map((w) => w[0]).filter(Boolean).slice(0, 2).join('').toUpperCase() || '?';
 
+  // Dark-mode overrides from the shared ThemeContext. When mode
+  // === 'dark' the background layer is skipped (the wash is an
+  // artefact of the light theme) and every card / border / text
+  // colour falls back to the theme palette.
+  const { mode, palette: themePalette } = useTheme();
+  const isDark = mode === 'dark';
+  const dark   = useMemo(() => (isDark ? buildDarkOverrides(themePalette) : {}), [isDark, themePalette]);
+
   return (
-    <KeyboardAvoidingView
-      style={styles.screen}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-    >
-      <View style={styles.header}>
+    <EnrollmentCtx.Provider value={{ isDark, dark }}>
+      <KeyboardAvoidingView
+        style={[styles.screen, isDark && dark.screen]}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
+        {/* Ambient blue wash — same component every Institution
+            Home surface uses. Skipped in dark mode to keep contrast
+            against the near-black background. */}
+        {!isDark ? <InstitutionScreenBackground layer /> : null}
+      <View style={[styles.header, isDark && dark.header]}>
         <TouchableOpacity
           onPress={() => navigation.goBack()}
-          style={styles.iconBtn}
+          style={[styles.iconBtn, isDark && dark.iconBtn]}
           activeOpacity={0.7}
         >
-          <ArrowLeft size={20} color={TEXT} strokeWidth={2.2} />
+          <ArrowLeft size={20} color={isDark ? themePalette.text : TEXT} strokeWidth={2.2} />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
-          <Text style={styles.headerTitle}>Enrollment Details</Text>
+          <Text style={[styles.headerTitle, isDark && dark.headerTitle]}>Enrollment Details</Text>
           {/* Course · Fee. The fee updates automatically whenever the
               admin picks a different batch (see freshBatch useEffect
               above) and reads "Fee Not Configured" when the course
@@ -1551,7 +1618,8 @@ export default function EnrollmentFormScreen({ route, navigation }) {
           </TouchableOpacity>
         </TouchableOpacity>
       </Modal>
-    </KeyboardAvoidingView>
+      </KeyboardAvoidingView>
+    </EnrollmentCtx.Provider>
   );
 }
 
@@ -1695,19 +1763,28 @@ function Dropdown({
 // ─── Styles ────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: BG },
+  // Header — glass-tinted white slab with the navy title colour
+  // used across the Institution Home surfaces. Subtle blue shadow
+  // so it lifts off the ambient wash.
   header: {
     flexDirection: 'row', alignItems: 'center', gap: 10,
     paddingHorizontal: 16, paddingTop: 44, paddingBottom: 12,
-    backgroundColor: SURFACE,
-    borderBottomWidth: 1, borderBottomColor: BORDER,
+    backgroundColor: GLASS_FILL_STRONG,
+    borderBottomWidth: 1, borderBottomColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
   },
   iconBtn: {
     width: 36, height: 36, borderRadius: 18,
-    backgroundColor: BG,
+    backgroundColor: BRAND_ACCENT_SOFT,
     alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
   },
-  headerTitle: { fontSize: 17, fontWeight: '800', color: TEXT },
-  headerSub: { fontSize: 11, color: TEXT_MUTED, marginTop: 2, fontWeight: '600' },
+  headerTitle: { fontSize: 17, fontWeight: '800', color: HEADER_NAVY, letterSpacing: 0.2 },
+  headerSub:   { fontSize: 11, color: TEXT_MUTED, marginTop: 2, fontWeight: '600' },
 
   body: { padding: 16, paddingBottom: 32 },
 
@@ -1795,12 +1872,19 @@ const styles = StyleSheet.create({
   // Schedule / Duration / Fee / Start Date at the top of the form so
   // the student can confirm what they picked before typing anything.
   summaryCard: {
-    backgroundColor: SURFACE,
-    borderRadius: 12,
+    backgroundColor: GLASS_FILL_STRONG,
+    borderRadius: 16,
     borderWidth: 1,
-    borderColor: BORDER,
+    borderColor: GLASS_BORDER_LIGHT,
     padding: 14,
     marginBottom: 14,
+    // Soft blue lift so cards read as translucent glass on the
+    // ambient wash — matches Institution Home.
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
   },
   summaryHeading: {
     fontSize: 12,
@@ -1838,12 +1922,17 @@ const styles = StyleSheet.create({
 
   // ── Admin-mode batch picker (only rendered when adminMode=true) ──
   adminBatchCard: {
-    backgroundColor: SURFACE,
-    borderRadius: 12,
+    backgroundColor: GLASS_FILL_STRONG,
+    borderRadius: 16,
     borderWidth: 1,
-    borderColor: BORDER,
+    borderColor: GLASS_BORDER_LIGHT,
     padding: 14,
     marginBottom: 14,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
   },
   adminBatchLabel: {
     fontSize: 11,

@@ -13,7 +13,7 @@
 //   7. Branding            — image URL, badge, trainer name, branch name
 //   8. Publish             — status (active / draft) and submit button
 
-import React, { useEffect, useState } from 'react';
+import React, { createContext, useEffect, useMemo, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView, Alert,
   ActivityIndicator, StyleSheet, Switch, Image, Modal, FlatList,
@@ -25,15 +25,51 @@ import {
 } from 'lucide-react-native';
 import { launchImageLibrary, launchCamera } from 'react-native-image-picker';
 
-import { useFocusEffect } from '@react-navigation/native';
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 import { confirm } from '../../components/ConfirmDialog';
-import TrainerPicker from '../../components/TrainerPicker';
+// Shared canonical-list dropdown — same component used by the Create
+// Trainer form's Skill + Belt fields. Backs the Category picker with
+// the master skills list from /config/enums (mirrors Academy Setup).
+import LookupDropdown, { FALLBACK_SKILLS } from '../../components/LookupDropdown';
 import {
   BILLING_CYCLE_OPTIONS,
   billingCycleLabel,
 } from '../../utils/billingCycle';
+// Institution Home visual system — ambient blue wash + glass
+// cards + navy accents. Reused verbatim so this screen belongs to
+// the same design language as the rest of the institution UI.
+import InstitutionScreenBackground, {
+  INSTITUTION_BG_BASE,
+} from '../../components/InstitutionScreenBackground';
+import { useTheme } from '../../theme/ThemeContext';
+
+// ── Institution-Home glass tokens ─────────────────────────────
+const GLASS_FILL         = 'rgba(255,255,255,0.72)';
+const GLASS_FILL_STRONG  = 'rgba(255,255,255,0.88)';
+const GLASS_BORDER_LIGHT = 'rgba(255,255,255,0.55)';
+const GLASS_HIGHLIGHT    = 'rgba(255,255,255,0.9)';
+const GLASS_SHADOW       = '#1E40AF';
+const BRAND_DARK_BLUE    = '#1E3A8A';
+const BRAND_ACCENT_SOFT  = 'rgba(30,58,138,0.10)';
+const HEADER_NAVY        = '#0F172A';
+
+// Local context so nested sub-components pick up dark-mode
+// overrides without prop-drilling.
+const CreateCourseCtx = createContext({ isDark: false, dark: {} });
+
+function buildDarkOverrides(pal) {
+  return StyleSheet.create({
+    screen:      { backgroundColor: pal.bg },
+    header:      { backgroundColor: pal.surface, borderBottomColor: pal.border },
+    headerTitle: { color: pal.text },
+    headerSub:   { color: pal.textMuted },
+    iconBtn:     { backgroundColor: pal.border },
+    card:        { backgroundColor: pal.surface, borderColor: pal.border },
+    sectionTitle:{ color: pal.text },
+    label:       { color: pal.textMuted },
+  });
+}
 
 // Resolve a stored /uploads/<file> path to an absolute URL that works on the
 // Android emulator (which can't reach localhost — it maps to 10.0.2.2).
@@ -115,31 +151,35 @@ export default function CreateCourseScreen({ navigation, route }) {
   const [timeModalVisible, setTimeModalVisible] = useState(false);
   const [activeTimeField, setActiveTimeField] = useState(null); // 'class_start_time' | 'class_end_time'
 
-  // Trainer roster used by the searchable dropdown. Reloaded on
-  // screen focus so newly-added trainers appear without the admin
-  // having to leave and re-enter Create Course.
-  const [trainers, setTrainers] = useState([]);
-  const [trainersLoading, setTrainersLoading] = useState(true);
-  useFocusEffect(
-    React.useCallback(() => {
-      let cancelled = false;
-      (async () => {
-        setTrainersLoading(true);
-        try {
-          const r = await apiClient.get('/trainers');
-          const rows = r.data?.trainers || [];
-          if (!cancelled) setTrainers(rows);
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.log('[CreateCourse] trainers load error:', err?.message);
-          if (!cancelled) setTrainers([]);
-        } finally {
-          if (!cancelled) setTrainersLoading(false);
-        }
-      })();
-      return () => { cancelled = true; };
-    }, []),
-  );
+  // Trainer selection is intentionally removed from the course form
+  // per product spec. Trainer records elsewhere in the app (Trainers
+  // tab, Batches → trainer assignment, etc.) are unaffected; only
+  // this screen no longer offers a trainer picker.
+
+  // Canonical Skill / Category list — pulled from GET /config/enums
+  // so the Category picker below renders the SAME options as the
+  // Academy Setup form's Skills field. Starts with the offline
+  // fallback (byte-identical to backend/src/config/enums.js) so the
+  // dropdown is populated even before the network answers.
+  const [canonicalCategories, setCanonicalCategories] = useState(FALLBACK_SKILLS);
+  useEffect(() => {
+    let cancelled = false;
+    apiClient
+      .get('/config/enums')
+      .then((r) => {
+        if (cancelled) return;
+        const list = Array.isArray(r.data?.skills) ? r.data.skills.map(String) : [];
+        if (list.length) setCanonicalCategories(list);
+      })
+      .catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn(
+          '[CreateCourse] /config/enums fetch failed — using local fallback:',
+          err?.response?.status || err?.message,
+        );
+      });
+    return () => { cancelled = true; };
+  }, []);
   const [form, setForm] = useState({
     // basic
     name:                  existing?.name              || '',
@@ -201,9 +241,10 @@ export default function CreateCourseScreen({ navigation, route }) {
     // free-text input stored in badge_custom.
     badge:                 existing?.badge             || 'new',
     badge_custom:          existing?.badge_custom      || '',
-    // trainer_id — foreign key to trainers.id (migration 064). The
-    // picker below saves the id; trainer_name is auto-derived server-
-    // side so this form no longer needs to carry both.
+    // Trainer picker removed from the course form per spec. Keeping
+    // the field on `existing` so an update PATCH doesn't accidentally
+    // clear a previously-assigned trainer — we forward the saved
+    // value verbatim in the submit payload without touching it.
     trainer_id:            existing?.trainer_id != null ? String(existing.trainer_id) : '',
     trainer_name:          existing?.trainer_name      || '',
     // Branch name is prefilled from the academy's institution name on
@@ -407,10 +448,18 @@ export default function CreateCourseScreen({ navigation, route }) {
     }
   };
 
+  // Dark-mode overrides from the shared ThemeContext. Ambient
+  // background layer is skipped in dark mode.
+  const { mode, palette: themePalette } = useTheme();
+  const isDark = mode === 'dark';
+  const dark   = useMemo(() => (isDark ? buildDarkOverrides(themePalette) : {}), [isDark, themePalette]);
+
   return (
-    <View style={{ flex: 1 }}>
+    <CreateCourseCtx.Provider value={{ isDark, dark }}>
+    <View style={[{ flex: 1, backgroundColor: isDark ? themePalette.bg : INSTITUTION_BG_BASE }]}>
+      {!isDark ? <InstitutionScreenBackground layer /> : null}
       <ScrollView
-        style={styles.screen}
+        style={[styles.screen, isDark && dark.screen]}
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
@@ -418,7 +467,20 @@ export default function CreateCourseScreen({ navigation, route }) {
       {/* ── Section 1: Basic info ── */}
       <Section title="Basic Info" icon={BookOpen} accent={palette.purple}>
         <Field label="Course Name *" value={form.name} onChange={(v) => update('name', v)} placeholder="e.g., Karate — Beginner" />
-        <Field label="Category"      value={form.category} onChange={(v) => update('category', v)} placeholder="Karate, Silambam, Kalaripayattu, Adimurai..." />
+        {/* Category — searchable dropdown backed by /config/enums so
+            it mirrors the Academy Setup form's Skills list. Legacy
+            values not in the canonical list are preserved by the
+            dropdown so existing courses keep displaying correctly. */}
+        <View style={styles.fieldWrap}>
+          <Text style={styles.label}>Category</Text>
+          <LookupDropdown
+            value={form.category}
+            options={canonicalCategories}
+            onSelect={(v) => update('category', v)}
+            placeholder="Choose a category"
+            emptyText="No categories available."
+          />
+        </View>
         <Field label="Short tagline" value={form.short_description} onChange={(v) => update('short_description', v)} placeholder="Start your martial arts journey..." />
         <Field label="Full description" value={form.description} onChange={(v) => update('description', v)} placeholder="What will students learn?" multiline />
       </Section>
@@ -777,22 +839,13 @@ export default function CreateCourseScreen({ navigation, route }) {
           />
         ) : null}
 
-        {/* Trainer — searchable dropdown populated from /trainers.
-            Only the trainer_id is saved; the label is derived at
-            render time so renames / skill edits show up instantly. */}
-        <View style={styles.fieldWrap}>
-          <Text style={styles.label}>Trainer</Text>
-          <TrainerPicker
-            value={form.trainer_id}
-            onChange={(id) => update('trainer_id', id != null ? String(id) : '')}
-            trainers={trainers}
-            loading={trainersLoading}
-            placeholder="Select a trainer"
-          />
-          <Text style={styles.helperText}>
-            {/* Trainer roster refreshes each time you open this form. Add trainers from More → Trainers. */}
-          </Text>
-        </View>
+        {/* Trainer picker intentionally removed from the course
+            form per product spec. Trainer records elsewhere in the
+            app (Trainers tab, Batches → trainer assignment) are
+            untouched — the previously-saved trainer_id on this
+            course row is still submitted unchanged so an existing
+            course keeps its trainer link. Nothing on this screen
+            surfaces or mutates it now. */}
 
         {/* Branch name — read-only display. The value is pulled from the
             academy setup so admins don't have to retype it and can't
@@ -862,6 +915,7 @@ export default function CreateCourseScreen({ navigation, route }) {
         }}
       />
     </View>
+    </CreateCourseCtx.Provider>
   );
 }
 
@@ -1089,22 +1143,32 @@ function DropdownModal({ visible, title, options, selectedValue, onSelect, onClo
 
 // ── Styles ───────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: palette.bg },
+  // Ambient blue-tinted page colour so the InstitutionScreenBackground
+  // wash sits on the right base. Overridden by dark palette when the
+  // theme flips.
+  screen: { flex: 1, backgroundColor: INSTITUTION_BG_BASE },
   scrollContent: { padding: spacing.lg, paddingTop: spacing.lg },
 
-  // Section
+  // Section — navy heading, translucent glass card body with a soft
+  // blue lift shadow to match Institution Home / TrainersList.
   section: { marginBottom: spacing.lg },
   sectionHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.sm },
   sectionIcon: {
     width: 28, height: 28, borderRadius: 14,
     alignItems: 'center', justifyContent: 'center',
   },
-  sectionTitle: { ...type.h2, color: palette.text, fontWeight: '700' },
+  sectionTitle: { ...type.h2, color: HEADER_NAVY, fontWeight: '800' },
   sectionBody: {
-    backgroundColor: palette.surface,
+    backgroundColor: GLASS_FILL_STRONG,
     borderRadius: radius.lg,
     padding: spacing.md,
-    ...shadows.card,
+    borderWidth: 1,
+    borderColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
   },
 
   // Field

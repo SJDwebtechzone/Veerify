@@ -18,17 +18,18 @@
 // route.params.student (passed from the Students list); if absent we render
 // a friendly empty state instead of crashing.
 
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, Image,
   StyleSheet, StatusBar, Alert, ActivityIndicator,
+  Modal, FlatList, Pressable,
 } from 'react-native';
 import apiClient from '../../api/client';
 import {
   ArrowLeft, MoreHorizontal, Edit3, Phone, Mail, MapPin,
   CalendarRange, GraduationCap, ClipboardCheck, Wallet, TrendingUp,
   ChevronRight, MessageCircle, Award, CheckCircle2, XCircle, Clock,
-  Send,
+  Send, ArrowRightLeft, Layers3, X as XIcon,
 } from 'lucide-react-native';
 
 import { palette, spacing, radius, shadows, type } from '../../theme';
@@ -68,6 +69,20 @@ export default function StudentDetailScreen({ navigation, route }) {
   // Which enrolment id is currently having its payment link resent
   // (drives the spinner + disabled state on the resend chip).
   const [resendingId, setResendingId] = useState(null);
+
+  // Active enrollment for the transfer buttons on the Enrollment card
+  // (Change Course / Transfer Batch). We take the newest enrolment as
+  // the "current" one — a student can have multiple enrolments over
+  // time; the last one is what the card renders.
+  const [activeEnrollment, setActiveEnrollment] = useState(null);
+  // Modal state for the two pickers + the reload bump.
+  const [courseModalOpen, setCourseModalOpen] = useState(false);
+  const [batchModalOpen,  setBatchModalOpen]  = useState(false);
+  const [reloadTick, setReloadTick] = useState(0);
+  const bumpReload = useCallback(() => setReloadTick((t) => t + 1), []);
+  // Local overrides that give the UI an instant response to a
+  // successful transfer while the backend refresh is in flight.
+  const [overrides, setOverrides] = useState({ course: null, batch: null });
 
   // POST /api/enrollments/:id/resend-payment-link — regenerates the
   // Razorpay link and re-emails the student. Best-effort with a friendly
@@ -148,16 +163,157 @@ export default function StudentDetailScreen({ navigation, route }) {
             .filter((id) => id != null),
         );
         const uniqueBatches = batchIds.size > 0 ? batchIds.size : mine.length;
+        // Newest enrollment = the one the Enrollment card renders.
+        // /enrollments/institution/me is ordered DESC by enrolled_at,
+        // but sort explicitly to be defensive against ordering
+        // changes on the backend.
+        const sorted = [...mine].sort((a, z) => {
+          const ta = new Date(a.enrolled_at || 0).getTime();
+          const tz = new Date(z.enrolled_at || 0).getTime();
+          return tz - ta;
+        });
+        const current = sorted[0] || null;
         if (!cancelled) {
           setPayments(mapped);
           setBatchCount(uniqueBatches);
+          setActiveEnrollment(current);
+          // Clear any local overrides once the backend refresh has
+          // landed — the source of truth is back in sync.
+          setOverrides({ course: null, batch: null });
         }
       } catch (err) {
         console.log('[StudentDetail] payments load error:', err?.message);
       }
     })();
     return () => { cancelled = true; };
-  }, [student]);
+  }, [student, reloadTick]);
+
+  // ── Change Course / Transfer Batch flows ────────────────────────
+  // Both fetch the picker options from existing endpoints — no new
+  // API surface introduced on the mobile side. Cross-cutting guards
+  // (institution match, active status) all live on the backend so
+  // the mobile stays simple.
+
+  const openCourseModal = useCallback(async () => {
+    if (!activeEnrollment) {
+      confirm({
+        title: 'No active enrollment',
+        message: 'This student does not have an enrollment to modify.',
+        variant: 'warning',
+        confirmText: 'OK',
+        hideCancel: true,
+      });
+      return;
+    }
+    setCourseModalOpen(true);
+  }, [activeEnrollment]);
+
+  const openBatchModal = useCallback(async () => {
+    if (!activeEnrollment) {
+      confirm({
+        title: 'No active enrollment',
+        message: 'This student does not have an enrollment to modify.',
+        variant: 'warning',
+        confirmText: 'OK',
+        hideCancel: true,
+      });
+      return;
+    }
+    setBatchModalOpen(true);
+  }, [activeEnrollment]);
+
+  const submitCourseChange = useCallback((course) => {
+    if (!activeEnrollment || !course) return;
+    confirm({
+      title: 'Change course?',
+      message:
+        `Move this student to "${course.name}"?\n\n`
+        + `Attendance, payments, certificates, and belt history stay in place.`
+        + (activeEnrollment.batch_id
+          ? ` You may need to Transfer Batch after this to pick a batch under the new course.`
+          : ''),
+      variant: 'destructive',
+      confirmText: 'Change course',
+      cancelText:  'Cancel',
+      onConfirm: async () => {
+        try {
+          const res = await apiClient.patch(
+            `/enrollments/${activeEnrollment.id}/course`,
+            { course_id: course.id },
+          );
+          setOverrides((prev) => ({
+            ...prev,
+            course: { id: course.id, name: res.data?.new_course_name || course.name },
+          }));
+          setCourseModalOpen(false);
+          bumpReload();
+          confirm({
+            title: 'Course changed',
+            message: res.data?.batch_mismatch
+              ? `Course updated. The student's current batch runs a different course — tap Transfer Batch to pick a new batch under "${course.name}".`
+              : `Course updated to "${course.name}".`,
+            variant: 'success',
+            confirmText: 'Done',
+            hideCancel: true,
+          });
+        } catch (err) {
+          confirm({
+            title: 'Could not change course',
+            message:
+              err?.response?.data?.message
+              || 'The transfer failed. Please try again.',
+            variant: 'warning',
+            confirmText: 'OK',
+            hideCancel: true,
+          });
+        }
+      },
+    });
+  }, [activeEnrollment, bumpReload]);
+
+  const submitBatchTransfer = useCallback((batch) => {
+    if (!activeEnrollment || !batch) return;
+    confirm({
+      title: 'Transfer batch?',
+      message:
+        `Move this student to "${batch.name}"?\n\n`
+        + `Existing attendance, payments and certificates stay linked to the old batch as historical records.`,
+      variant: 'destructive',
+      confirmText: 'Transfer',
+      cancelText:  'Cancel',
+      onConfirm: async () => {
+        try {
+          const res = await apiClient.patch(
+            `/enrollments/${activeEnrollment.id}/batch`,
+            { batch_id: batch.id },
+          );
+          setOverrides((prev) => ({
+            ...prev,
+            batch: { id: batch.id, name: res.data?.new_batch_name || batch.name },
+          }));
+          setBatchModalOpen(false);
+          bumpReload();
+          confirm({
+            title: 'Batch transferred',
+            message: `Student is now in "${batch.name}".`,
+            variant: 'success',
+            confirmText: 'Done',
+            hideCancel: true,
+          });
+        } catch (err) {
+          confirm({
+            title: 'Could not transfer batch',
+            message:
+              err?.response?.data?.message
+              || 'The transfer failed. Please try again.',
+            variant: 'warning',
+            confirmText: 'OK',
+            hideCancel: true,
+          });
+        }
+      },
+    });
+  }, [activeEnrollment, bumpReload]);
 
   // Defensive fallback so a fresh route doesn't crash if we forgot to pass data.
   if (!student) {
@@ -191,62 +347,80 @@ export default function StudentDetailScreen({ navigation, route }) {
         />
       </View>
 
-      {/* Coloured background band — visible behind the profile section,
-          starts BELOW the top bar so the title doesn't sit on the pink. */}
-      <View style={[styles.headerBand, { backgroundColor: accent.soft }]} />
-
       <ScrollView
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        {/* Status pill — sits at the top-right of the scrollable
-            content so it visually lives in the header/profile area
-            but scrolls away with the rest of the content. The old
-            implementation used position:'absolute' on the SCREEN
-            (outside the ScrollView + zIndex:3), which pinned the
-            pill over every section as the user scrolled and looked
-            like a sticky badge floating over the profile. */}
-        <View style={styles.statusPillRow}>
+        {/* ───── Premium martial-arts hero ─────
+            Dark charcoal card. Decorative art is drawn with SVG:
+              • Two organic brush-stroke paths (irregular red swipes
+                across the middle band) instead of straight rounded
+                rectangles.
+              • A hand-drawn martial-arts flying-kick silhouette in
+                dark grey that sits on the right side of the card.
+            Both live behind the avatar/name/status foreground. */}
+        <View style={styles.hero}>
+          {/* Background brush-stroke accents — layered thin rotated
+              rectangles that read as diagonal red brush swipes across
+              the middle band. Kept as primitives (no SVG) so the
+              layer can never render as an opaque box on any device.
+              The `heroArtLayer` clips overflow so extra-wide bars
+              don't spill beyond the hero card. */}
+          <View style={styles.heroArtLayer} pointerEvents="none">
+            <View style={[styles.brushStroke, styles.brushStrokeMain]} />
+            <View style={[styles.brushStroke, styles.brushStrokeAccent]} />
+            <View style={[styles.brushStroke, styles.brushStrokeThin]} />
+          </View>
+
+          {/* Active / Inactive pill — top-right of the hero. */}
           <View
             style={[
-              styles.statusPillInline,
+              styles.heroStatusPill,
               {
-                backgroundColor: student.active ? palette.green.soft : palette.borderSoft,
+                backgroundColor: student.active ? 'rgba(16,185,129,0.16)' : 'rgba(148,163,184,0.18)',
+                borderColor:     student.active ? 'rgba(16,185,129,0.55)' : 'rgba(148,163,184,0.5)',
               },
             ]}
           >
             <View
               style={[
                 styles.statusDot,
-                { backgroundColor: student.active ? palette.green.vivid : palette.textLight },
+                { backgroundColor: student.active ? '#10B981' : '#94A3B8' },
               ]}
             />
             <Text
               style={[
-                styles.statusPillText,
-                { color: student.active ? palette.green.on : palette.textMuted },
+                styles.heroStatusText,
+                { color: student.active ? '#A7F3D0' : '#CBD5E1' },
               ]}
             >
               {student.active ? 'Active' : 'Inactive'}
             </Text>
           </View>
-        </View>
 
-        {/* ───── Profile section ───── */}
-        <View style={styles.profileSection}>
-          <View style={styles.avatarWrap}>
-            <Avatar
-              uri={student.avatar || student.photo_url}
-              name={student.name}
-              size={96}
-              tone="purple"
-              style={{ borderWidth: 4, borderColor: '#FFFFFF' }}
-            />
+          {/* Circular profile photo — white outer border + red
+              accent ring. The ring is a separate wrapper so both
+              borders render crisply on Android. */}
+          <View style={styles.heroAvatarRing}>
+            <View style={styles.heroAvatarWhite}>
+              <Avatar
+                uri={student.avatar || student.photo_url}
+                name={student.name}
+                size={98}
+                tone="purple"
+              />
+            </View>
           </View>
-          <Text style={styles.name}>{student.name}</Text>
+
+          {/* Name + course underneath. */}
+          <Text style={styles.heroName} numberOfLines={1}>{student.name}</Text>
           {student.course ? (
-            <Text style={styles.studentId}>{student.course}</Text>
+            <Text style={styles.heroCourse} numberOfLines={1}>{student.course}</Text>
           ) : null}
+
+          {/* Bottom belt bar — thin red band that echoes the brush
+              strokes above and gives the card a defined foot. */}
+          <View style={styles.heroBeltBar} pointerEvents="none" />
         </View>
 
         {/* ───── Quick stats (3-up) ───── */}
@@ -304,7 +478,54 @@ export default function StudentDetailScreen({ navigation, route }) {
 
         {/* ───── Enrollment ───── */}
         <Card title="Enrollment" subtitle="Course and batch details">
-          <InfoRow icon={GraduationCap} label="Course" value={student.course || '—'} accent={accent} />
+          {/* Course row + Change Course action.
+              The picker expands inline directly below this row instead
+              of opening a bottom-sheet, so the admin stays in context
+              on the Enrollment card. The row's value prefers the local
+              override (fresh response from PATCH /enrollments/:id/course)
+              so the UI updates instantly, before the next backend
+              refresh. */}
+          <View style={styles.enrollmentRow}>
+            <View style={{ flex: 1 }}>
+              <InfoRow
+                icon={GraduationCap}
+                label="Course"
+                value={overrides.course?.name || activeEnrollment?.course_name || student.course || '—'}
+                accent={accent}
+              />
+            </View>
+            <TouchableOpacity
+              onPress={() => setCourseModalOpen((o) => !o)}
+              style={[styles.transferBtn, courseModalOpen && styles.transferBtnActive]}
+              activeOpacity={0.85}
+              accessibilityRole="button"
+              accessibilityLabel="Change course"
+            >
+              <ArrowRightLeft size={13} color={palette.purple.vivid} strokeWidth={2.4} />
+              <Text style={styles.transferBtnText}>{courseModalOpen ? 'Close' : 'Change'}</Text>
+            </TouchableOpacity>
+          </View>
+          {courseModalOpen ? (
+            <InlineTransferPicker
+              title="Change Course"
+              subtitle="Pick a new course for this student"
+              currentId={activeEnrollment?.course_id}
+              loader={async () => {
+                const r = await apiClient.get('/courses');
+                const rows = Array.isArray(r.data?.courses) ? r.data.courses : (r.data || []);
+                return rows
+                  .filter((c) => (c.status || 'active') === 'active')
+                  .map((c) => ({
+                    id:       c.id,
+                    name:     c.name,
+                    subtitle: c.category || c.level || null,
+                  }));
+              }}
+              onSubmit={submitCourseChange}
+              icon={GraduationCap}
+              emptyText="No active courses found for this institution."
+            />
+          ) : null}
           <Divider />
           <InfoRow icon={Award} label="Level" value={student.level || student.belt_category || '—'} />
           <Divider />
@@ -320,11 +541,49 @@ export default function StudentDetailScreen({ navigation, route }) {
             }
           />
           <Divider />
-          <InfoRow
-            icon={CalendarRange}
-            label="Current Batch"
-            value={student.batch || '—'}
-          />
+          <View style={styles.enrollmentRow}>
+            <View style={{ flex: 1 }}>
+              <InfoRow
+                icon={CalendarRange}
+                label="Current Batch"
+                value={overrides.batch?.name || activeEnrollment?.batch_name || student.batch || '—'}
+              />
+            </View>
+            <TouchableOpacity
+              onPress={() => setBatchModalOpen((o) => !o)}
+              style={[styles.transferBtn, batchModalOpen && styles.transferBtnActive]}
+              activeOpacity={0.85}
+              accessibilityRole="button"
+              accessibilityLabel="Transfer batch"
+            >
+              <ArrowRightLeft size={13} color={palette.purple.vivid} strokeWidth={2.4} />
+              <Text style={styles.transferBtnText}>{batchModalOpen ? 'Close' : 'Transfer'}</Text>
+            </TouchableOpacity>
+          </View>
+          {batchModalOpen ? (
+            <InlineTransferPicker
+              title="Transfer Batch"
+              subtitle="Pick a new batch under the current course"
+              currentId={activeEnrollment?.batch_id}
+              loader={async () => {
+                const courseId = activeEnrollment?.course_id;
+                if (!courseId) return [];
+                const r = await apiClient.get('/batches');
+                const rows = Array.isArray(r.data?.batches) ? r.data.batches : [];
+                return rows
+                  .filter((b) => b.course_id === courseId)
+                  .filter((b) => b.id !== activeEnrollment?.batch_id)
+                  .map((b) => ({
+                    id:       b.id,
+                    name:     b.name,
+                    subtitle: [b.days_of_week, b.branch_name].filter(Boolean).join(' · ') || null,
+                  }));
+              }}
+              onSubmit={submitBatchTransfer}
+              icon={Layers3}
+              emptyText="No other batches available for this course."
+            />
+          ) : null}
         </Card>
 
         {/* ───── Attendance summary ───── */}
@@ -406,6 +665,150 @@ export default function StudentDetailScreen({ navigation, route }) {
     </View>
   );
 }
+
+// ─── InlineTransferPicker ────────────────────────────────────────────
+// Panel that expands INLINE inside the Enrollment card, directly
+// beneath the row that opened it. Not a bottom-sheet Modal — the
+// admin stays visually anchored to the row they're changing.
+//
+// Fetches its own options on mount (via the `loader` prop) so the
+// parent doesn't need to preload them, and shows loading / empty /
+// error states inline. Row taps forward the picked item to
+// `onSubmit`, which is expected to open its own confirmation dialog
+// and collapse the picker on success.
+function InlineTransferPicker({
+  title, subtitle, currentId, loader, onSubmit, icon: Icon, emptyText,
+}) {
+  const [items, setItems]   = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError]   = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    (async () => {
+      try {
+        const rows = await loader();
+        if (!cancelled) setItems(Array.isArray(rows) ? rows : []);
+      } catch (err) {
+        if (!cancelled) setError(err?.response?.data?.message || err?.message || 'Load failed');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+    // Runs once on mount — the picker is torn down + remounted every
+    // time the admin toggles the row's button, so this gets a fresh
+    // load per open without needing an explicit `visible` dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <View style={pickerStyles.panel}>
+      <View style={pickerStyles.header}>
+        <Text style={pickerStyles.title}>{title}</Text>
+        {subtitle ? <Text style={pickerStyles.subtitle}>{subtitle}</Text> : null}
+      </View>
+
+      {loading ? (
+        <View style={pickerStyles.center}>
+          <ActivityIndicator color={palette.purple.vivid} />
+          <Text style={pickerStyles.muted}>Loading…</Text>
+        </View>
+      ) : error ? (
+        <View style={pickerStyles.center}>
+          <Text style={pickerStyles.errorText}>{error}</Text>
+        </View>
+      ) : items.length === 0 ? (
+        <View style={pickerStyles.center}>
+          <Text style={pickerStyles.muted}>{emptyText || 'No options available.'}</Text>
+        </View>
+      ) : (
+        // Rendered as a mapped list (not FlatList) so it sits
+        // naturally inside the parent ScrollView without a nested
+        // scroller stealing gestures.
+        <View>
+          {items.map((item, idx) => {
+            const isCurrent = currentId != null && item.id === currentId;
+            return (
+              <View key={String(item.id)}>
+                {idx > 0 ? <View style={pickerStyles.rowSep} /> : null}
+                <TouchableOpacity
+                  style={pickerStyles.row}
+                  onPress={() => !isCurrent && onSubmit(item)}
+                  activeOpacity={0.85}
+                  disabled={isCurrent}
+                >
+                  <View style={pickerStyles.rowIcon}>
+                    {Icon ? <Icon size={16} color={palette.purple.vivid} strokeWidth={2.2} /> : null}
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={pickerStyles.rowName} numberOfLines={1}>{item.name}</Text>
+                    {item.subtitle ? (
+                      <Text style={pickerStyles.rowMeta} numberOfLines={1}>{item.subtitle}</Text>
+                    ) : null}
+                  </View>
+                  {isCurrent ? (
+                    <Text style={pickerStyles.currentPill}>Current</Text>
+                  ) : (
+                    <ChevronRight size={16} color={palette.textLight} strokeWidth={2} />
+                  )}
+                </TouchableOpacity>
+              </View>
+            );
+          })}
+        </View>
+      )}
+    </View>
+  );
+}
+
+const pickerStyles = StyleSheet.create({
+  panel: {
+    marginTop: spacing?.sm ?? 8,
+    marginBottom: spacing?.sm ?? 8,
+    backgroundColor: palette.purple?.soft || '#FEE2E2',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: (palette.purple?.vivid || '#EF4444') + '20',
+    paddingHorizontal: spacing?.md ?? 12,
+    paddingVertical: spacing?.sm ?? 8,
+  },
+  header: {
+    marginBottom: 4,
+  },
+  title:    { fontSize: 13, fontWeight: '800', color: palette.text || '#111827', letterSpacing: 0.2 },
+  subtitle: { fontSize: 11, color: palette.textMuted || '#6B7280', marginTop: 2 },
+  center: { alignItems: 'center', paddingVertical: 18 },
+  muted:  { fontSize: 12, color: palette.textMuted || '#6B7280', marginTop: 6 },
+  errorText: { fontSize: 12, color: palette.rose?.on || '#991B1B', fontWeight: '600' },
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 2,
+  },
+  rowIcon: {
+    width: 28, height: 28, borderRadius: 14,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: '#FFFFFF',
+  },
+  rowName: { fontSize: 13, fontWeight: '700', color: palette.text || '#111827' },
+  rowMeta: { fontSize: 11, color: palette.textMuted || '#6B7280', marginTop: 2 },
+  rowSep:  { height: 1, backgroundColor: 'rgba(255,255,255,0.55)' },
+  currentPill: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: palette.textMuted || '#6B7280',
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+    overflow: 'hidden',
+  },
+});
 
 // ─── Small reusable cells ────────────────────────────────────────────────────
 function RoundButton({ icon: Icon, onPress }) {
@@ -616,6 +1019,195 @@ const styles = StyleSheet.create({
     height: 220,
   },
 
+  // ── Premium martial-arts hero ─────────────────────────────────
+  hero: {
+    marginTop: spacing.md,
+    marginBottom: spacing.xl,
+    borderRadius: radius.xl,
+    backgroundColor: '#0B0B0F',   // near-black charcoal
+    overflow: 'hidden',
+    paddingTop: spacing.lg,
+    paddingBottom: spacing.xl,
+    paddingHorizontal: spacing.lg,
+    alignItems: 'center',
+    minHeight: 260,
+    ...shadows.raised,
+  },
+  // Absolute background layer that hosts the brush-stroke bars.
+  // overflow:hidden clips the rotated bars so they don't stick out
+  // past the hero card's rounded corners.
+  heroArtLayer: {
+    ...StyleSheet.absoluteFillObject,
+    overflow: 'hidden',
+    borderRadius: radius.xl,
+  },
+  brushStroke: {
+    position: 'absolute',
+    borderRadius: 999,
+  },
+  brushStrokeMain: {
+    left: -30, right: -60,
+    top: 140,
+    height: 26,
+    backgroundColor: '#DC2626',
+    opacity: 0.75,
+    transform: [{ rotate: '-7deg' }],
+  },
+  brushStrokeAccent: {
+    left: -20, right: -40,
+    top: 168,
+    height: 14,
+    backgroundColor: '#991B1B',
+    opacity: 0.55,
+    transform: [{ rotate: '-6deg' }],
+  },
+  brushStrokeThin: {
+    left: 60, right: -80,
+    top: 110,
+    height: 8,
+    backgroundColor: '#EF4444',
+    opacity: 0.35,
+    transform: [{ rotate: '-9deg' }],
+  },
+
+  // Brush-stroke accents — absolutely positioned diagonals that
+  // sweep across the middle of the hero. Colours are tuned so they
+  // read as "brushed red" without shouting.
+  brushSlash: {
+    position: 'absolute',
+    height: 28,
+    borderRadius: 999,
+    left: -40, right: -40,
+  },
+  brushSlashA: {
+    top: 120,
+    backgroundColor: 'rgba(220, 38, 38, 0.55)',
+    transform: [{ rotate: '-8deg' }],
+  },
+  brushSlashB: {
+    top: 150,
+    height: 14,
+    backgroundColor: 'rgba(153, 27, 27, 0.85)',
+    transform: [{ rotate: '-6deg' }],
+  },
+  brushSlashC: {
+    top: 100,
+    height: 8,
+    left: 20, right: -80,
+    backgroundColor: 'rgba(239, 68, 68, 0.35)',
+    transform: [{ rotate: '-12deg' }],
+  },
+
+  // Stylised martial-arts figure — head disc + torso block + limbs.
+  silhouetteWrap: {
+    position: 'absolute',
+    right: -10,
+    top: 30,
+    width: 130,
+    height: 210,
+  },
+  silhouetteHead: {
+    position: 'absolute',
+    right: 40, top: 0,
+    width: 22, height: 22, borderRadius: 11,
+    backgroundColor: 'rgba(15,15,20,0.95)',
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)',
+  },
+  silhouetteTorso: {
+    position: 'absolute',
+    right: 32, top: 24,
+    width: 38, height: 60, borderRadius: 8,
+    backgroundColor: 'rgba(15,15,20,0.9)',
+    transform: [{ rotate: '-6deg' }],
+  },
+  silhouetteArm: {
+    position: 'absolute',
+    right: 10, top: 40,
+    width: 60, height: 12, borderRadius: 6,
+    backgroundColor: 'rgba(15,15,20,0.9)',
+    transform: [{ rotate: '25deg' }],
+  },
+  silhouetteLegBack: {
+    position: 'absolute',
+    right: 40, top: 82,
+    width: 14, height: 70, borderRadius: 6,
+    backgroundColor: 'rgba(15,15,20,0.9)',
+  },
+  // The dynamic "kicking" leg — angled outward for the flying-kick
+  // pose the reference image uses.
+  silhouetteLegKick: {
+    position: 'absolute',
+    right: 55, top: 78,
+    width: 12, height: 90, borderRadius: 6,
+    backgroundColor: 'rgba(15,15,20,0.9)',
+    transform: [{ rotate: '-40deg' }],
+  },
+
+  // Active / Inactive pill in the top-right of the hero.
+  heroStatusPill: {
+    position: 'absolute',
+    top: spacing.md,
+    right: spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 4,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+  },
+  heroStatusText: {
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0.4,
+  },
+
+  // Circular avatar treatment: outer red accent ring + inner white
+  // border. Padding is what visually creates the ring gap.
+  heroAvatarRing: {
+    width: 118, height: 118, borderRadius: 59,
+    borderWidth: 2,
+    borderColor: '#DC2626',
+    alignItems: 'center', justifyContent: 'center',
+    padding: 4,
+    marginTop: spacing.md,
+  },
+  heroAvatarWhite: {
+    width: 106, height: 106, borderRadius: 53,
+    borderWidth: 4,
+    borderColor: '#FFFFFF',
+    alignItems: 'center', justifyContent: 'center',
+    overflow: 'hidden',
+    backgroundColor: '#0B0B0F',
+  },
+
+  heroName: {
+    color: '#FFFFFF',
+    fontSize: 22,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+    marginTop: spacing.md,
+    textAlign: 'center',
+  },
+  heroCourse: {
+    color: '#F87171',    // red-400
+    fontSize: 13,
+    fontWeight: '700',
+    marginTop: 4,
+    letterSpacing: 0.4,
+    textAlign: 'center',
+  },
+
+  // Thin red belt-like bar at the foot of the hero — small
+  // decorative flourish that mirrors the brush strokes.
+  heroBeltBar: {
+    position: 'absolute',
+    left: 40, right: 40, bottom: 10,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(220, 38, 38, 0.7)',
+  },
+
   scrollContent: {
     // paddingTop trimmed to 0 — the status pill row below now carries
     // its own top spacing, so the avatar + name land at the same
@@ -661,6 +1253,35 @@ const styles = StyleSheet.create({
   },
   name: { ...type.h1, color: palette.text },
   studentId: { ...type.caption, color: palette.textMuted, marginTop: 2 },
+
+  // Enrollment card — row with an inline action button on the right
+  // (Change Course / Transfer Batch).
+  enrollmentRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  transferBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: palette.purple.soft,
+    borderWidth: 1,
+    borderColor: palette.purple.vivid + '40',
+  },
+  transferBtnActive: {
+    backgroundColor: palette.purple.vivid + '20',
+    borderColor: palette.purple.vivid,
+  },
+  transferBtnText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: palette.purple.vivid,
+    letterSpacing: 0.3,
+  },
   // Inline variant — sits inside the ScrollView at the top so the
   // Active/Inactive badge scrolls away with the header/profile
   // section instead of floating over every card below it.

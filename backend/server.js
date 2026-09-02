@@ -4,6 +4,22 @@ const path = require('path');
 require('dotenv').config();
 require('./src/config/db');
 
+// One-line boot log for the WhatsApp verify token so we can tell at
+// a glance whether .env is being loaded and the value is the right
+// LENGTH — WITHOUT ever printing the token itself. Bracketed the
+// last 2 chars so the operator can eyeball it against Meta's UI.
+(function logWhatsAppVerifyTokenStatus() {
+  const tok = process.env.WHATSAPP_VERIFY_TOKEN
+    || process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN
+    || '';
+  if (!tok) {
+    console.log('[whatsapp][boot] verify token: MISSING (set WHATSAPP_VERIFY_TOKEN or WHATSAPP_WEBHOOK_VERIFY_TOKEN in .env)');
+  } else {
+    const hint = tok.length > 2 ? `••${tok.slice(-2)}` : '••';
+    console.log(`[whatsapp][boot] verify token loaded — length=${tok.length}, tail=${hint}`);
+  }
+})();
+
 const authRoutes = require('./src/routes/auth.routes');
 const institutionRoutes = require('./src/routes/institution.routes');
 const courseRoutes = require('./src/routes/course.routes');
@@ -28,12 +44,24 @@ const notificationRoutes = require('./src/routes/notification.routes');
 const salaryRoutes = require('./src/routes/salary.routes');
 const adminRoutes = require('./src/routes/admin.routes');
 const announcementRoutes = require('./src/routes/announcement.routes');
+// Super-admin approval queue for Intra-Level (cross-institution)
+// mobile events. See src/controllers/intraEventApproval.controller.js.
+const intraEventApprovalRoutes = require('./src/routes/intraEventApproval.routes');
+// MODULE 1: Registration-form builder for events. Read + write
+// endpoints under /api/events/:eventId/registration-form.
+const eventRegistrationFormRoutes = require('./src/routes/eventRegistrationForm.routes');
+// MODULE 2: Select-students-for-event flow (eligible list + duplicate probe).
+const eventRegistrationRoutes = require('./src/routes/eventRegistration.routes');
+// MODULE 4: Organizer registration management.
+const eventRegistrationOrganizerRoutes = require('./src/routes/eventRegistrationOrganizer.routes');
 const curriculumRoutes   = require('./src/routes/curriculum.routes');
 const branchRoutes       = require('./src/routes/branch.routes');
 const academyRoutes      = require('./src/routes/academy.routes');
 const studentRoutes = require('./src/routes/student.routes');
 const courseVideoRoutes = require('./src/routes/courseVideo.routes');
 const marketplaceRoutes = require('./src/routes/marketplace.routes');
+const whatsappWebhookRoutes =
+  require('./src/routes/whatsappWebhook.routes');
 
 
 const app = express();
@@ -111,6 +139,16 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/salaries', salaryRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/announcements', announcementRoutes);
+app.use('/api/intra-events', intraEventApprovalRoutes);
+// Registration-form builder mounts at /api so the routes match
+// their canonical URLs (/api/events/:id/registration-form and
+// /api/config/registration-form).
+app.use('/api', eventRegistrationFormRoutes);
+app.use('/api', eventRegistrationRoutes);
+app.use('/api', eventRegistrationOrganizerRoutes);
+// Student-facing "Are you interested to participate?" endpoints.
+// Kept alongside the other event-scoped routes.
+app.use('/api', require('./src/routes/eventInterest.routes'));
 app.use('/api/curriculum-progress', curriculumRoutes);
 app.use('/api/branches', branchRoutes);
 // Per-institution promotional banners shown on student / trainer
@@ -128,6 +166,14 @@ app.use('/api/certificate-templates', require('./src/routes/certificateTemplate.
 // controllers/beltPromotionRequest.controller.js.
 app.use('/api/belt-promotion-requests', require('./src/routes/beltPromotionRequest.routes'));
 app.use('/api/academies', academyRoutes);
+// Shared enumerations (skills, belt levels, ...) — canonical arrays
+// exposed to every client so Web Admin filters / Academy Setup form /
+// Student Enrollment form all render the same options. See
+// src/config/enums.js for the source of truth.
+app.get('/api/config/enums', (_req, res) => {
+  const { SKILL_OPTIONS, BELT_OPTIONS } = require('./src/config/enums');
+  res.json({ skills: SKILL_OPTIONS, belts: BELT_OPTIONS });
+});
 app.use('/api/students', studentRoutes);
 app.use('/api/course-videos', courseVideoRoutes);
 app.use('/api/uploads', uploadRoutes);
@@ -159,6 +205,17 @@ if (process.env.NODE_ENV !== 'production') {
   app.use('/api/dev/email-test', require('./src/routes/emailTest.routes'));
 }
 
+// ── Public certificate verification page ─────────────────────────
+// The mobile certificate carries a "Verify Certificate" button that
+// opens THIS URL (not the JSON API). The page is a single-file HTML
+// bundle that reads the token from the path, calls the existing
+// GET /api/certificates/verify/:token endpoint client-side, and
+// renders a clean verifier view — no login required. Keeps the raw
+// API URL out of end-user hands.
+app.get('/certificates/verify/:token', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'certificate-verify.html'));
+});
+app.use('/api', whatsappWebhookRoutes);
 app.use((req, res) => {
   res.status(404).json({ message: 'Route not found' });
 });
@@ -191,5 +248,19 @@ app.listen(PORT, () => {
     subscriptionExpiry.start();
   } catch (err) {
     console.warn('[startup] subscriptionExpiry scheduler not started:', err?.message);
+  }
+
+  // Pre-expiry WhatsApp reminders — T-3 / T-2 / T-1 daily nudges to
+  // the institution admin with plan + expiry + days-left + renewal
+  // link. Dedup by (institution, subscription_end date, days_before)
+  // so a renewal automatically starts a fresh cycle and no reminder
+  // ever fires twice in the same day. WA failures are logged only —
+  // subscription / payment processing is untouched. See
+  // services/subscriptionExpiryReminder.service.js.
+  try {
+    const expiryReminder = require('./src/services/subscriptionExpiryReminder.service');
+    expiryReminder.start();
+  } catch (err) {
+    console.warn('[startup] subscriptionExpiryReminder scheduler not started:', err?.message);
   }
 });

@@ -53,6 +53,9 @@ router.get('/counts',  verifyToken, onboardingController.getOnboardingCounts);
 // Subscription payments made by institutions (recent first). Static path -
 // must come before /:id below.
 router.get('/recent-payments', verifyToken, onboardingController.getRecentInstitutionPayments);
+// Web-admin growth chart data — 12-month series of new institutions
+// and new students per calendar month. Static path, ahead of /:id.
+router.get('/growth', verifyToken, onboardingController.getGrowthSeries);
 // Full subscription-payments ledger — powers Web Admin → Payments →
 // Subscription Payments. Static path, must come before /:id.
 router.get('/subscription-payments', verifyToken, onboardingController.listSubscriptionPayments);

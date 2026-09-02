@@ -4,7 +4,7 @@
 // Lists every pending draft with sender + target + content, plus Approve
 // and Reject actions. Approval fans out to recipients server-side.
 
-import React, { useCallback, useState } from 'react';
+import React, { createContext, useCallback, useMemo, useState } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity, TextInput, Alert,
   ActivityIndicator, RefreshControl, StyleSheet, StatusBar, Platform,
@@ -17,7 +17,27 @@ import {
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
+// Institution Home visual system — ambient blue wash + glass
+// cards + navy accents. Reused verbatim so this screen belongs to
+// the same design language as the rest of the institution UI.
+import InstitutionScreenBackground, {
+  INSTITUTION_BG_BASE,
+} from '../../components/InstitutionScreenBackground';
+import { useTheme } from '../../theme/ThemeContext';
 
+// ── Institution-Home glass tokens ─────────────────────────────
+const GLASS_FILL         = 'rgba(255,255,255,0.72)';
+const GLASS_FILL_STRONG  = 'rgba(255,255,255,0.88)';
+const GLASS_BORDER_LIGHT = 'rgba(255,255,255,0.55)';
+const GLASS_HIGHLIGHT    = 'rgba(255,255,255,0.9)';
+const GLASS_SHADOW       = '#1E40AF';
+const BRAND_DARK_BLUE    = '#1E3A8A';
+const BRAND_ACCENT_SOFT  = 'rgba(30,58,138,0.10)';
+const HEADER_NAVY        = '#0F172A';
+
+// Local theme tokens — names kept unchanged so every existing
+// card / border / text style inherits the Institution Home look
+// automatically.
 const BRAND       = '#E63946';
 const BRAND_SOFT  = '#FFE4E6';
 const GREEN       = '#10B981';
@@ -26,12 +46,29 @@ const AMBER       = '#F59E0B';
 const AMBER_SOFT  = '#FEF3C7';
 const RED         = '#EF4444';
 const RED_SOFT    = '#FEE2E2';
-const TEXT        = '#111827';
+const TEXT        = HEADER_NAVY;
 const TEXT_MUTED  = '#6B7280';
 const TEXT_LIGHT  = '#9CA3AF';
-const SURFACE     = '#FFFFFF';
-const BG          = '#F4F4F8';
-const BORDER      = '#E5E7EB';
+const SURFACE     = GLASS_FILL_STRONG;
+const BG          = INSTITUTION_BG_BASE;
+const BORDER      = GLASS_BORDER_LIGHT;
+
+// Local context so nested sub-components pick up dark-mode
+// overrides without prop-drilling.
+const PendingApprovalsCtx = createContext({ isDark: false, dark: {} });
+
+function buildDarkOverrides(pal) {
+  return StyleSheet.create({
+    screen:      { backgroundColor: pal.bg },
+    header:      { backgroundColor: pal.surface, borderBottomColor: pal.border },
+    headerTitle: { color: pal.text },
+    headerSub:   { color: pal.textMuted },
+    iconBtn:     { backgroundColor: pal.border },
+    card:        { backgroundColor: pal.surface, borderColor: pal.border },
+    tabBar:      { backgroundColor: pal.surface, borderBottomColor: pal.border },
+    label:       { color: pal.textMuted },
+  });
+}
 
 // Tabs shown at the top of the screen — each maps to a `status` query
 // param on /notifications/pending-approval.
@@ -151,25 +188,37 @@ export default function PendingAnnouncementsScreen({ navigation }) {
     }
   };
 
+  // Dark-mode overrides pulled from the shared ThemeContext. The
+  // Institution Home ambient wash is skipped in dark mode.
+  const { mode, palette: themePalette } = useTheme();
+  const isDark = mode === 'dark';
+  const dark   = useMemo(() => (isDark ? buildDarkOverrides(themePalette) : {}), [isDark, themePalette]);
+
   if (loading) {
     return (
-      <View style={[styles.screen, styles.center]}>
+      <PendingApprovalsCtx.Provider value={{ isDark, dark }}>
+      <View style={[styles.screen, styles.center, isDark && dark.screen]}>
         <StatusBar barStyle="dark-content" backgroundColor={BG} />
-        <ActivityIndicator size="large" color={BRAND} />
+        {!isDark ? <InstitutionScreenBackground layer /> : null}
+        <ActivityIndicator size="large" color={BRAND_DARK_BLUE} />
       </View>
+      </PendingApprovalsCtx.Provider>
     );
   }
 
   return (
-    <View style={styles.screen}>
+    <PendingApprovalsCtx.Provider value={{ isDark, dark }}>
+    <View style={[styles.screen, isDark && dark.screen]}>
       <StatusBar barStyle="dark-content" backgroundColor={SURFACE} />
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.iconBtn} hitSlop={8}>
-          <ArrowLeft size={20} color={TEXT} strokeWidth={2.4} />
+      {/* Institution Home ambient wash — sits behind all content. */}
+      {!isDark ? <InstitutionScreenBackground layer /> : null}
+      <View style={[styles.header, isDark && dark.header]}>
+        <TouchableOpacity onPress={() => navigation.goBack()} style={[styles.iconBtn, isDark && dark.iconBtn]} hitSlop={8}>
+          <ArrowLeft size={20} color={isDark ? themePalette.text : TEXT} strokeWidth={2.4} />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
-          <Text style={styles.headerTitle}>Trainer Approvals</Text>
-          <Text style={styles.headerSub}>
+          <Text style={[styles.headerTitle, isDark && dark.headerTitle]}>Trainer Approvals</Text>
+          <Text style={[styles.headerSub, isDark && dark.headerSub]}>
             {tab === 'pending'
               ? (counts.pending > 0
                   ? `${counts.pending} awaiting your review`
@@ -374,6 +423,7 @@ export default function PendingAnnouncementsScreen({ navigation }) {
         </View>
       </Modal>
     </View>
+    </PendingApprovalsCtx.Provider>
   );
 }
 
@@ -381,23 +431,31 @@ const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: BG },
   center: { alignItems: 'center', justifyContent: 'center' },
 
+  // Header — glass slab with navy title and a soft blue lift
+  // shadow. Matches every other Institution Home surface.
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 16,
     paddingTop: Platform.OS === 'ios' ? 48 : 16,
     paddingBottom: 12,
-    backgroundColor: SURFACE,
-    borderBottomWidth: 1, borderBottomColor: BORDER,
+    backgroundColor: GLASS_FILL_STRONG,
+    borderBottomWidth: 1, borderBottomColor: GLASS_BORDER_LIGHT,
     gap: 10,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
   },
   iconBtn: {
     width: 32, height: 32, borderRadius: 16,
-    backgroundColor: BG,
+    backgroundColor: BRAND_ACCENT_SOFT,
     alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
   },
-  headerTitle: { fontSize: 16, fontWeight: '800', color: TEXT },
-  headerSub: { fontSize: 11, color: TEXT_MUTED, fontWeight: '600', marginTop: 1 },
+  headerTitle: { fontSize: 16, fontWeight: '800', color: HEADER_NAVY, letterSpacing: 0.2 },
+  headerSub:   { fontSize: 11, color: TEXT_MUTED, fontWeight: '600', marginTop: 1 },
 
   // Tab strip — Pending / Approved / Rejected / All
   tabsRow: {
@@ -454,11 +512,19 @@ const styles = StyleSheet.create({
 
   viewMoreHint: { marginTop: 6, fontSize: 11, color: TEXT_LIGHT, fontWeight: '700' },
 
+  // Approval card — translucent glass fill + light glass border +
+  // soft blue lift shadow so each card reads as a glass panel on
+  // the Institution Home ambient wash.
   card: {
-    backgroundColor: SURFACE,
-    borderRadius: 14,
+    backgroundColor: GLASS_FILL_STRONG,
+    borderRadius: 16,
     padding: 14,
-    borderWidth: 1, borderColor: BORDER,
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
   },
   metaRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 10 },
   metaPill: {

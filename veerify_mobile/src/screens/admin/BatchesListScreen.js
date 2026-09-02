@@ -1,10 +1,124 @@
 import React, { useState, useCallback, useEffect, useMemo } from 'react';
-import { View, Text, FlatList, TouchableOpacity, Alert, RefreshControl, ActivityIndicator } from 'react-native';
+import { View, Text, FlatList, TouchableOpacity, Alert, RefreshControl, ActivityIndicator, StyleSheet } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import apiClient from '../../api/client';
 import { useBellScrollHandler } from '../../components/bellScrollBus';
 import { colors, commonStyles } from '../../utils/styles';
 import { confirm } from '../../components/ConfirmDialog';
+// Institution Home glass system — ambient wash + glass cards +
+// dark-blue primary. Layered on top of commonStyles via inline style
+// arrays so this screen matches Institution Home without changing
+// the shared commonStyles module (which other screens rely on).
+import InstitutionScreenBackground, {
+  INSTITUTION_BG_BASE,
+} from '../../components/InstitutionScreenBackground';
+import { useTheme } from '../../theme/ThemeContext';
+
+const GLASS_FILL_STRONG  = 'rgba(255,255,255,0.88)';
+const GLASS_BORDER_LIGHT = 'rgba(255,255,255,0.55)';
+const GLASS_HIGHLIGHT    = 'rgba(255,255,255,0.9)';
+const GLASS_SHADOW       = '#1E40AF';
+const BRAND_DARK_BLUE    = '#1E3A8A';
+const BRAND_ACCENT_SOFT  = 'rgba(30,58,138,0.10)';
+const HEADER_NAVY        = '#0F172A';
+
+// Local overrides layered on top of commonStyles so cards/headers
+// paint as Institution Home glass without touching the shared file.
+const local = StyleSheet.create({
+  screen:      { flex: 1, backgroundColor: INSTITUTION_BG_BASE },
+  header:      {
+    backgroundColor: '#FFFFFF',
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(148,163,184,0.22)',
+    paddingTop: 48,
+    paddingBottom: 14,
+    paddingHorizontal: 16,
+  },
+  headerTitle:    { color: HEADER_NAVY, fontSize: 20, fontWeight: '800', letterSpacing: -0.2 },
+  headerSubtitle: { color: '#64748B', fontSize: 12, fontWeight: '600', marginTop: 2 },
+  card: {
+    backgroundColor: GLASS_FILL_STRONG,
+    borderRadius: 20,
+    borderTopWidth: 1.5,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderLeftWidth: 1,
+    borderTopColor: GLASS_HIGHLIGHT,
+    borderRightColor: GLASS_BORDER_LIGHT,
+    borderBottomColor: GLASS_BORDER_LIGHT,
+    borderLeftColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.11,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 5,
+    marginBottom: 12,
+  },
+  cardTitle:    { color: HEADER_NAVY, fontWeight: '800' },
+  cardSubtitle: { color: '#64748B', fontWeight: '600' },
+  scheduleRow:  {
+    backgroundColor: 'rgba(241,246,251,0.9)',
+    borderWidth: 1,
+    borderColor: 'rgba(148,163,184,0.22)',
+    borderRadius: 10,
+  },
+  scheduleDayPill: {
+    backgroundColor: BRAND_ACCENT_SOFT,
+  },
+  scheduleDayText: { color: BRAND_DARK_BLUE },
+  addStudentBtn: {
+    backgroundColor: BRAND_DARK_BLUE,
+    shadowColor: BRAND_DARK_BLUE,
+    shadowOpacity: 0.25,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
+  },
+  emptyState: {
+    backgroundColor: GLASS_FILL_STRONG,
+    borderRadius: 20,
+    borderTopWidth: 1.5,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderLeftWidth: 1,
+    borderTopColor: GLASS_HIGHLIGHT,
+    borderRightColor: GLASS_BORDER_LIGHT,
+    borderBottomColor: GLASS_BORDER_LIGHT,
+    borderLeftColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.11,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 5,
+    padding: 24,
+    marginTop: 24,
+  },
+  emptyText: { color: '#64748B' },
+  fab: {
+    backgroundColor: BRAND_DARK_BLUE,
+    shadowColor: BRAND_DARK_BLUE,
+    shadowOpacity: 0.32,
+    shadowOffset: { width: 0, height: 6 },
+    shadowRadius: 14,
+    elevation: 8,
+  },
+});
+
+// Dark-mode overrides.
+function buildDarkOverrides(pal) {
+  return StyleSheet.create({
+    screen:         { backgroundColor: pal.bg },
+    header:         { backgroundColor: pal.surface, borderBottomColor: pal.border },
+    headerTitle:    { color: pal.text },
+    headerSubtitle: { color: pal.textMuted },
+    card:           { backgroundColor: pal.surface, borderTopColor: pal.border, borderRightColor: pal.border, borderBottomColor: pal.border, borderLeftColor: pal.border },
+    cardTitle:      { color: pal.text },
+    cardSubtitle:   { color: pal.textMuted },
+    scheduleRow:    { backgroundColor: pal.border, borderColor: pal.border },
+    emptyState:     { backgroundColor: pal.surface, borderTopColor: pal.border, borderRightColor: pal.border, borderBottomColor: pal.border, borderLeftColor: pal.border },
+    emptyText:      { color: pal.textMuted },
+  });
+}
 // Ongoing / upcoming split — a batch whose end time already passed
 // today rolls forward to next week's session so past slots never
 // appear at the top of the list.
@@ -56,6 +170,9 @@ function buildSchedule(batch) {
 }
 
 export default function BatchesListScreen({ navigation, route }) {
+  const { mode, palette: themePalette } = useTheme();
+  const isDark = mode === 'dark';
+  const dark   = useMemo(() => buildDarkOverrides(themePalette), [themePalette]);
   // Institution Home → Branch View passes { branchId, branchName } so
   // this screen renders only that branch's batches. When absent, the
   // default main-admin scope (b.branch_id IS NULL) still applies.
@@ -169,15 +286,23 @@ export default function BatchesListScreen({ navigation, route }) {
     });
   };
 
-  if (loading) return <View style={[commonStyles.screen, { justifyContent: 'center' }]}><ActivityIndicator size="large" color={colors.primary} /></View>;
+  if (loading) return (
+    <View style={[commonStyles.screen, local.screen, isDark && dark.screen, { justifyContent: 'center' }]}>
+      {!isDark ? <InstitutionScreenBackground layer /> : null}
+      <ActivityIndicator size="large" color={BRAND_DARK_BLUE} />
+    </View>
+  );
 
   return (
-    <View style={commonStyles.screen}>
-      <View style={commonStyles.header}>
-        <Text style={commonStyles.headerTitle}>
+    <View style={[commonStyles.screen, local.screen, isDark && dark.screen]}>
+      {!isDark ? <InstitutionScreenBackground layer /> : null}
+      <View style={[commonStyles.header, local.header, isDark && dark.header]}>
+        <Text style={[commonStyles.headerTitle, local.headerTitle, isDark && dark.headerTitle]}>
           {branchNameParam ? `${branchNameParam} — Batches` : 'My Batches'}
         </Text>
-        <Text style={commonStyles.headerSubtitle}>{batches.length} batches</Text>
+        <Text style={[commonStyles.headerSubtitle, local.headerSubtitle, isDark && dark.headerSubtitle]}>
+          {batches.length} batches
+        </Text>
       </View>
 
       <FlatList
@@ -187,14 +312,27 @@ export default function BatchesListScreen({ navigation, route }) {
         contentContainerStyle={{ padding: 20 }}
         onScroll={useBellScrollHandler()}
         scrollEventThrottle={16}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
-        ListEmptyComponent={<View style={commonStyles.emptyState}><Text style={{ fontSize: 60 }}>📅</Text><Text style={commonStyles.emptyText}>No batches yet.{'\n'}Create a course first, then add batches.</Text></View>}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => { setRefreshing(true); load(); }}
+            tintColor={BRAND_DARK_BLUE}
+          />
+        }
+        ListEmptyComponent={
+          <View style={[commonStyles.emptyState, local.emptyState, isDark && dark.emptyState]}>
+            <Text style={{ fontSize: 60 }}>📅</Text>
+            <Text style={[commonStyles.emptyText, local.emptyText, isDark && dark.emptyText]}>
+              No batches yet.{'\n'}Create a course first, then add batches.
+            </Text>
+          </View>
+        }
         renderItem={({ item }) => (
           // Tap anywhere on the card → drill into the batch's enrolled
           // students. The two inline action buttons below stopPropagation
           // so they still work independently.
           <TouchableOpacity
-            style={commonStyles.card}
+            style={[commonStyles.card, local.card, isDark && dark.card]}
             activeOpacity={0.85}
             onPress={() => navigation.navigate('AdminBatchStudents', {
               batchId: item.id,
@@ -202,7 +340,7 @@ export default function BatchesListScreen({ navigation, route }) {
             })}
           >
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-              <Text style={[commonStyles.cardTitle, { flexShrink: 1 }]}>{item.name}</Text>
+              <Text style={[commonStyles.cardTitle, local.cardTitle, isDark && dark.cardTitle, { flexShrink: 1 }]}>{item.name}</Text>
               {item._next?.isOngoing ? (
                 <View style={{
                   backgroundColor: '#dcfce7',
@@ -216,7 +354,7 @@ export default function BatchesListScreen({ navigation, route }) {
                 </View>
               ) : null}
             </View>
-            <Text style={commonStyles.cardSubtitle}>{item.course_name}</Text>
+            <Text style={[commonStyles.cardSubtitle, local.cardSubtitle, isDark && dark.cardSubtitle]}>{item.course_name}</Text>
 
             {/* Per-day schedule — each active weekday on its own row
                 with its own start–end range. Reads batch.schedule
@@ -230,30 +368,34 @@ export default function BatchesListScreen({ navigation, route }) {
                   {rows.map((r) => (
                     <View
                       key={r.day}
-                      style={{
-                        flexDirection: 'row',
-                        alignItems: 'center',
-                        gap: 8,
-                        paddingVertical: 4,
-                        paddingHorizontal: 8,
-                        borderRadius: 8,
-                        backgroundColor: '#FFF5F5',
-                      }}
+                      style={[
+                        {
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          gap: 8,
+                          paddingVertical: 4,
+                          paddingHorizontal: 8,
+                        },
+                        local.scheduleRow,
+                        isDark && dark.scheduleRow,
+                      ]}
                     >
                       <View
-                        style={{
-                          width: 44,
-                          paddingVertical: 2,
-                          borderRadius: 6,
-                          backgroundColor: '#FFE4E6',
-                          alignItems: 'center',
-                        }}
+                        style={[
+                          {
+                            width: 44,
+                            paddingVertical: 2,
+                            borderRadius: 6,
+                            alignItems: 'center',
+                          },
+                          local.scheduleDayPill,
+                        ]}
                       >
-                        <Text style={{ fontSize: 10.5, fontWeight: '800', color: '#B91C1C', letterSpacing: 0.4 }}>
+                        <Text style={[{ fontSize: 10.5, fontWeight: '800', letterSpacing: 0.4 }, local.scheduleDayText]}>
                           {r.day.toUpperCase()}
                         </Text>
                       </View>
-                      <Text style={{ fontSize: 12, color: colors.text, fontWeight: '700' }}>
+                      <Text style={{ fontSize: 12, color: isDark ? themePalette.text : HEADER_NAVY, fontWeight: '700' }}>
                         {r.start && r.end ? `${to12h(r.start)} – ${to12h(r.end)}` : 'Time not set'}
                       </Text>
                     </View>
@@ -282,15 +424,17 @@ export default function BatchesListScreen({ navigation, route }) {
                     course: { id: item.course_id, name: item.course_name },
                   });
                 }}
-                style={{
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: 4,
-                  paddingHorizontal: 10,
-                  paddingVertical: 6,
-                  borderRadius: 999,
-                  backgroundColor: '#E63946',
-                }}
+                style={[
+                  {
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: 4,
+                    paddingHorizontal: 10,
+                    paddingVertical: 6,
+                    borderRadius: 999,
+                  },
+                  local.addStudentBtn,
+                ]}
                 activeOpacity={0.85}
               >
                 <Text style={{ color: '#fff', fontWeight: '700', fontSize: 12 }}>+ Add Student</Text>
@@ -306,7 +450,7 @@ export default function BatchesListScreen({ navigation, route }) {
                       navigation.navigate('CreateBatch', { batch: item });
                     }}
                   >
-                    <Text style={{ color: colors.primary, fontWeight: '700' }}>Edit</Text>
+                    <Text style={{ color: BRAND_DARK_BLUE, fontWeight: '700' }}>Edit</Text>
                   </TouchableOpacity>
 
                   <TouchableOpacity onPress={(e) => { e.stopPropagation?.(); onDelete(item); }}>
@@ -323,7 +467,10 @@ export default function BatchesListScreen({ navigation, route }) {
           Only main-institution admins can create batches; branch
           admins operate on batches provisioned by the parent. */}
       {!isBranchAdmin ? (
-        <TouchableOpacity style={commonStyles.fab} onPress={() => navigation.navigate('CreateBatch')}>
+        <TouchableOpacity
+          style={[commonStyles.fab, local.fab]}
+          onPress={() => navigation.navigate('CreateBatch')}
+        >
           <Text style={commonStyles.fabText}>+</Text>
         </TouchableOpacity>
       ) : null}

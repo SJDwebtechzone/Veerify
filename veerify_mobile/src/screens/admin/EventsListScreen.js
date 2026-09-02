@@ -1,37 +1,75 @@
 // src/screens/admin/EventsListScreen.js
 //
-// Admin "Events" tile in the More tab opens this screen. Lists every
-// event the institution has ever published — upcoming first, past
-// below — with a FAB to jump into the CreateEvent form. Same look-and-
-// feel as BatchesList / TrainersList so the admin doesn't have to learn
-// a new layout.
+// Admin "Events" tile in the More tab opens this screen. Splits the
+// list into "My Institution Events" (with an Upcoming / History
+// toggle) and "Other Institution Events" (approved intras from other
+// academies). Event creation is initiated from the Dashboard's
+// "Add Event" quick action, not from here. Same look-and-feel as
+// BatchesList / TrainersList so the admin doesn't have to learn a
+// new layout.
 
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useMemo, useState } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity, Image,
   StyleSheet, ActivityIndicator, RefreshControl, Alert,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import {
-  ArrowLeft, Calendar, MapPin, CalendarPlus, CheckCircle2, Clock,
-  Check, X, AlertCircle,
+  ArrowLeft, Calendar, MapPin, CheckCircle2, Clock,
+  Check, X, AlertCircle, Pencil,
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
-import FAB from '../../components/FAB';
 import resolveAssetUrl from '../../utils/assetUrl';
 import { palette, spacing, radius, type } from '../../theme';
 import { confirm } from '../../components/ConfirmDialog';
+// Institution Home visual system — ambient blue wash + glass
+// cards + navy accents. Reused verbatim so this screen belongs to
+// the same design language as the rest of the institution UI.
+import InstitutionScreenBackground, {
+  INSTITUTION_BG_BASE,
+} from '../../components/InstitutionScreenBackground';
+import { useTheme } from '../../theme/ThemeContext';
 
+// ── Institution-Home glass tokens ─────────────────────────────
+const GLASS_FILL         = 'rgba(255,255,255,0.72)';
+const GLASS_FILL_STRONG  = 'rgba(255,255,255,0.88)';
+const GLASS_BORDER_LIGHT = 'rgba(255,255,255,0.55)';
+const GLASS_HIGHLIGHT    = 'rgba(255,255,255,0.9)';
+const GLASS_SHADOW       = '#1E40AF';
+const BRAND_DARK_BLUE    = '#1E3A8A';
+const BRAND_ACCENT_SOFT  = 'rgba(30,58,138,0.10)';
+const HEADER_NAVY        = '#0F172A';
+
+// Local tokens — names kept unchanged so every existing card /
+// border / text style inherits the Institution Home look
+// automatically.
 const BRAND       = '#E63946';
 const BRAND_SOFT  = '#FFE4E6';
-const TEXT        = '#111827';
+const TEXT        = HEADER_NAVY;
 const TEXT_MUTED  = '#6B7280';
 const TEXT_LIGHT  = '#9CA3AF';
-const SURFACE     = '#FFFFFF';
-const BG          = '#F4F4F8';
-const BORDER      = '#E5E7EB';
+const SURFACE     = GLASS_FILL_STRONG;
+const BG          = INSTITUTION_BG_BASE;
+const BORDER      = GLASS_BORDER_LIGHT;
 const GREEN       = '#10B981';
+
+// Local context so nested sub-components pick up dark-mode
+// overrides without prop-drilling.
+const EventsListCtx = createContext({ isDark: false, dark: {} });
+
+function buildDarkOverrides(pal) {
+  return StyleSheet.create({
+    screen:      { backgroundColor: pal.bg },
+    header:      { backgroundColor: pal.surface, borderBottomColor: pal.border },
+    headerTitle: { color: pal.text },
+    headerSub:   { color: pal.textMuted },
+    iconBtn:     { backgroundColor: pal.border },
+    card:        { backgroundColor: pal.surface, borderColor: pal.border },
+    sectionTitle:{ color: pal.textMuted },
+    label:       { color: pal.textMuted },
+  });
+}
 
 // Format an ISO date as "22 Jun 2026" — short month + 4-digit year.
 function formatDate(iso) {
@@ -139,20 +177,44 @@ export default function EventsListScreen({ navigation }) {
   // published a new event, comes back to this screen" path.
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
-  // Split into upcoming + past so the active stuff sits at the top.
-  const { upcoming, past } = useMemo(() => {
-    const u = [];
-    const p = [];
+  // MODULE 5: separate the API's flat event list into three buckets:
+  //   • My Institution Events — Upcoming (own + is_own=true, status
+  //     not 'past'/'rejected')
+  //   • My Institution Events — History (own + past OR rejected)
+  //   • Other Institution Events — approved intras from OTHER
+  //     institutions. Backend already filters these to event_date >=
+  //     CURRENT_DATE so expired externals aren't in the payload.
+  const [historyOpen, setHistoryOpen] = useState(false);
+
+  const { myUpcoming, myHistory, otherUpcoming } = useMemo(() => {
+    const mu = [];
+    const mh = [];
+    const ou = [];
+    const nowMs = Date.now();
     events.forEach((e) => {
-      if (e.status === 'past') p.push(e); else u.push(e);
+      const isOwn = e.is_own !== false; // undefined defaults to own
+      const eventMs = e.event_date ? new Date(e.event_date).getTime() : null;
+      const isPast = e.status === 'past'
+        || e.status === 'rejected'
+        || (eventMs != null && eventMs < nowMs - 24 * 60 * 60 * 1000);
+      if (isOwn) {
+        if (isPast) mh.push(e); else mu.push(e);
+      } else {
+        // External rows the backend returned are already upcoming.
+        // Extra client-side guard in case the API sent a same-day
+        // row after the event finished.
+        if (!isPast) ou.push(e);
+      }
     });
-    // Upcoming sorted soonest first, past newest first (already DESC from API).
-    u.sort((a, b) => new Date(a.event_date) - new Date(b.event_date));
-    return { upcoming: u, past: p };
+    mu.sort((a, b) => new Date(a.event_date) - new Date(b.event_date));
+    mh.sort((a, b) => new Date(b.event_date) - new Date(a.event_date));
+    ou.sort((a, b) => new Date(a.event_date) - new Date(b.event_date));
+    return { myUpcoming: mu, myHistory: mh, otherUpcoming: ou };
   }, [events]);
 
   // Flatten into a single list with section headers so we get one
-  // smooth FlatList instead of two stacked ScrollViews.
+  // smooth FlatList. History rows are only emitted when the History
+  // toggle is on.
   const data = useMemo(() => {
     const rows = [];
     // Pending branch approvals sit above everything else — that's what
@@ -163,20 +225,102 @@ export default function EventsListScreen({ navigation }) {
         rows.push({ type: 'pending', event: e })
       );
     }
-    if (upcoming.length) {
-      rows.push({ type: 'header', label: `Upcoming · ${upcoming.length}` });
-      upcoming.forEach((e) => rows.push({ type: 'event', event: e }));
+
+    // ── My Institution Events ─────────────────────────────
+    rows.push({
+      type:     'group',
+      label:    'My Institution Events',
+      // Right-side action button — jumps to History and back.
+      // Always tappable so the admin can enter the History view
+      // even when it's empty (the empty-state row explains why).
+      action:   {
+        label: historyOpen
+          ? 'Show upcoming'
+          : (myHistory.length ? `History · ${myHistory.length}` : 'History'),
+        onPress: () => setHistoryOpen((v) => !v),
+      },
+    });
+    if (!historyOpen) {
+      if (myUpcoming.length === 0) {
+        rows.push({ type: 'emptyOwn' });
+      } else {
+        rows.push({ type: 'header', label: `Upcoming · ${myUpcoming.length}` });
+        myUpcoming.forEach((e) => rows.push({ type: 'event', event: e }));
+      }
+    } else {
+      if (myHistory.length === 0) {
+        rows.push({ type: 'emptyHistory' });
+      } else {
+        rows.push({ type: 'header', label: `Conducted / Past · ${myHistory.length}` });
+        myHistory.forEach((e) => rows.push({ type: 'event', event: e }));
+      }
     }
-    if (past.length) {
-      rows.push({ type: 'header', label: `Past · ${past.length}` });
-      past.forEach((e) => rows.push({ type: 'event', event: e }));
+
+    // ── Other Institution Events ──────────────────────────
+    rows.push({ type: 'group', label: 'Other Institution Events' });
+    if (otherUpcoming.length === 0) {
+      rows.push({ type: 'emptyOther' });
+    } else {
+      rows.push({ type: 'header', label: `Upcoming · ${otherUpcoming.length}` });
+      otherUpcoming.forEach((e) => rows.push({ type: 'event', event: e }));
     }
     return rows;
-  }, [upcoming, past, pendingBranchEvents]);
+  }, [myUpcoming, myHistory, otherUpcoming, pendingBranchEvents, historyOpen]);
 
   const renderItem = ({ item }) => {
+    if (item.type === 'group') {
+      // Big group heading — "My Institution Events" / "Other
+      // Institution Events". Includes an optional right-side
+      // action (History toggle for the My section).
+      return (
+        <View style={{
+          flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+          marginTop: 18, marginBottom: 4,
+        }}>
+          <Text style={[styles.sectionTitle, { fontSize: 15, marginTop: 0 }]}>
+            {item.label}
+          </Text>
+          {item.action ? (
+            <TouchableOpacity
+              onPress={item.action.onPress}
+              activeOpacity={0.7}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              style={{
+                paddingHorizontal: 12, paddingVertical: 7, borderRadius: 999,
+                borderWidth: 1, borderColor: BRAND,
+                backgroundColor: BRAND_SOFT,
+              }}
+            >
+              <Text style={{ fontSize: 11, fontWeight: '800', color: BRAND }}>
+                {item.action.label}
+              </Text>
+            </TouchableOpacity>
+          ) : null}
+        </View>
+      );
+    }
     if (item.type === 'header') {
       return <Text style={styles.sectionTitle}>{item.label}</Text>;
+    }
+    if (item.type === 'emptyOwn') {
+      return (
+        <Text style={{ color: TEXT_MUTED, fontSize: 12, paddingVertical: 12 }}>
+          You haven't published any upcoming events yet.   </Text>
+      );
+    }
+    if (item.type === 'emptyHistory') {
+      return (
+        <Text style={{ color: TEXT_MUTED, fontSize: 12, paddingVertical: 12 }}>
+          Your conducted events will appear here after they finish.
+        </Text>
+      );
+    }
+    if (item.type === 'emptyOther') {
+      return (
+        <Text style={{ color: TEXT_MUTED, fontSize: 12, paddingVertical: 12 }}>
+          No cross-institution events from other academies right now.
+        </Text>
+      );
     }
     if (item.type === 'pending') {
       return (
@@ -185,29 +329,54 @@ export default function EventsListScreen({ navigation }) {
           busy={deciding[item.event.id]}
           onApprove={() => approveBranchEvent(item.event)}
           onReject={() => rejectBranchEvent(item.event)}
-          onPress={() => navigation.navigate('EventDetail', { event: item.event })}
+          onPress={() => navigation.navigate('InstitutionEventDetail', { event: item.event })}
         />
       );
     }
     return (
       <EventCard
         event={item.event}
-        onPress={() => navigation.navigate('EventDetail', { event: item.event })}
+        onPress={() => navigation.navigate('InstitutionEventDetail', { event: item.event })}
+        // Edit is only offered on Inter-Level (event_type='intra')
+        // events that the current institution owns AND that are
+        // still awaiting super-admin approval. Passing null makes
+        // EventCard skip the Edit button entirely — approved /
+        // rejected / non-intra / other-institution rows never see
+        // it, so the check lives entirely in this parent decision.
+        onEdit={
+          item.event.event_type === 'intra'
+            && item.event.is_own !== false
+            && (item.event.status === 'pending' || item.event.approval_status === 'pending')
+            ? () => navigation.navigate('CreateEvent', {
+                eventType: 'intra',
+                editEvent: item.event,
+              })
+            : null
+        }
       />
     );
   };
 
+  // Dark-mode overrides pulled from the shared ThemeContext.
+  // Institution Home's ambient background is skipped in dark mode.
+  const { mode, palette: themePalette } = useTheme();
+  const isDark = mode === 'dark';
+  const dark   = useMemo(() => (isDark ? buildDarkOverrides(themePalette) : {}), [isDark, themePalette]);
+
   return (
-    <View style={styles.screen}>
+    <EventsListCtx.Provider value={{ isDark, dark }}>
+    <View style={[styles.screen, isDark && dark.screen]}>
+      {/* Institution Home ambient wash — sits behind all content. */}
+      {!isDark ? <InstitutionScreenBackground layer /> : null}
       {/* ───── Header ───── */}
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.iconBtn} activeOpacity={0.7}>
-          <ArrowLeft size={20} color={TEXT} strokeWidth={2.2} />
+      <View style={[styles.header, isDark && dark.header]}>
+        <TouchableOpacity onPress={() => navigation.goBack()} style={[styles.iconBtn, isDark && dark.iconBtn]} activeOpacity={0.7}>
+          <ArrowLeft size={20} color={isDark ? themePalette.text : TEXT} strokeWidth={2.2} />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
-          <Text style={styles.headerTitle}>Events</Text>
-          <Text style={styles.headerSub}>
-            {events.length} total · {upcoming.length} upcoming
+          <Text style={[styles.headerTitle, isDark && dark.headerTitle]}>Events</Text>
+          <Text style={[styles.headerSub, isDark && dark.headerSub]}>
+            {myUpcoming.length} upcoming · {otherUpcoming.length} from other academies
           </Text>
         </View>
       </View>
@@ -231,9 +400,14 @@ export default function EventsListScreen({ navigation }) {
       ) : (
         <FlatList
           data={data}
-          keyExtractor={(item, i) =>
-            item.type === 'header' ? `h-${i}` : `e-${item.event.id}`
-          }
+          keyExtractor={(item, i) => {
+            // New row types added in MODULE 5 don't carry an event
+            // reference — they're pure UI rows (group headings and
+            // empty-state placeholders). Only 'event' / 'pending'
+            // rows have item.event, so guard the id access.
+            if (item.event && item.event.id != null) return `e-${item.type}-${item.event.id}`;
+            return `${item.type}-${i}`;
+          }}
           renderItem={renderItem}
           contentContainerStyle={{ padding: 16, paddingBottom: 110 }}
           refreshControl={
@@ -247,19 +421,13 @@ export default function EventsListScreen({ navigation }) {
         />
       )}
 
-      {/* ───── FAB to add a new event ───── */}
-      <FAB
-        icon={CalendarPlus}
-        bottom={32}
-        onPress={() => navigation.navigate('CreateEvent')}
-        accent={palette.rose || { vivid: BRAND, soft: BRAND_SOFT, on: '#fff' }}
-      />
     </View>
+    </EventsListCtx.Provider>
   );
 }
 
 // ─── Event card ─────────────────────────────────────────────────────────
-function EventCard({ event, onPress }) {
+function EventCard({ event, onPress, onEdit }) {
   const d = event.event_date ? new Date(event.event_date) : null;
   const day = d ? String(d.getDate()).padStart(2, '0') : '--';
   const mon = d ? d.toLocaleString('en-US', { month: 'short' }).toUpperCase() : '---';
@@ -297,9 +465,55 @@ function EventCard({ event, onPress }) {
         </View>
 
         <View style={{ flex: 1 }}>
-          <Text style={styles.title} numberOfLines={2}>{event.title}</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+            <Text style={styles.title} numberOfLines={2}>{event.title}</Text>
+            {/* Type badge — stored event_type is inverted from the UI
+                label: 'intra' in DB = Inter-Level (cross-institution).
+                Show INTER badge for cross-institution events, INTRA for
+                institution-local. */}
+            {event.event_type === 'intra' ? (
+              <View style={{
+                paddingHorizontal: 6, paddingVertical: 2,
+                borderRadius: 4,
+                backgroundColor: '#DBEAFE',
+              }}>
+                <Text style={{
+                  fontSize: 9, fontWeight: '800', color: '#1E40AF',
+                  letterSpacing: 0.5,
+                }}>
+                  INTER
+                </Text>
+              </View>
+            ) : event.event_type === 'inter' ? (
+              <View style={{
+                paddingHorizontal: 6, paddingVertical: 2,
+                borderRadius: 4,
+                backgroundColor: '#EDE9FE',
+              }}>
+                <Text style={{
+                  fontSize: 9, fontWeight: '800', color: '#6D28D9',
+                  letterSpacing: 0.5,
+                }}>
+                  INTRA
+                </Text>
+              </View>
+            ) : null}
+          </View>
           {event.subtitle ? (
             <Text style={styles.subtitle} numberOfLines={1}>{event.subtitle}</Text>
+          ) : null}
+          {/* Organizer line — shown for cross-institution intras
+              (event.is_own === false) so admins immediately see
+              WHICH academy submitted the event they're looking at.
+              Hidden for the admin's own rows to avoid the noise of
+              seeing their own academy's name on every card. */}
+          {event.event_type === 'intra' && event.is_own === false && event.organizing_institution_name ? (
+            <Text
+              style={[styles.metaText, { color: BRAND, fontWeight: '700', marginTop: 2 }]}
+              numberOfLines={1}
+            >
+              Organized by {event.organizing_institution_name}
+            </Text>
           ) : null}
           <View style={styles.metaRow}>
             <View style={styles.metaPiece}>
@@ -364,12 +578,16 @@ function EventCard({ event, onPress }) {
         </View>
       </View>
 
-      {/* Banner image (if any) */}
+      {/* Banner image (if any) — use resizeMode="contain" so the
+          uploaded image preserves its original aspect ratio (portrait,
+          landscape, square, 4:3, 16:9 all render without cropping
+          or stretching). The container is a max-height frame so the
+          image can grow vertically for tall portrait shots. */}
       {event.image_url ? (
         <Image
           source={{ uri: resolveAssetUrl(event.image_url) }}
           style={styles.banner}
-          resizeMode="cover"
+          resizeMode="contain"
         />
       ) : null}
 
@@ -378,6 +596,29 @@ function EventCard({ event, onPress }) {
         <Text style={styles.description} numberOfLines={3}>
           {event.description}
         </Text>
+      ) : null}
+
+      {/* Edit — only rendered when the parent decided this row is
+          eligible (own Inter-Level event still awaiting super-admin
+          approval). onEdit is null for every other card, so the
+          button never even mounts. Uses stopPropagation-equivalent
+          by not bubbling to the outer TouchableOpacity's onPress
+          when the small button is tapped (RN nested Touchables
+          swallow the tap by default). */}
+      {onEdit ? (
+        <View style={styles.editRow}>
+          <TouchableOpacity
+            onPress={onEdit}
+            activeOpacity={0.85}
+            style={styles.editBtn}
+          >
+            <Pencil size={12} color={BRAND} strokeWidth={2.6} />
+            <Text style={styles.editBtnText}>Edit event</Text>
+          </TouchableOpacity>
+          <Text style={styles.editHint}>
+            Editable until the platform reviewer approves.
+          </Text>
+        </View>
       ) : null}
     </TouchableOpacity>
   );
@@ -479,18 +720,26 @@ function PendingApprovalCard({ event, busy, onApprove, onReject, onPress }) {
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: BG },
 
+  // Header — glass slab with navy title and a soft blue lift
+  // shadow. Matches every other Institution Home surface.
   header: {
     flexDirection: 'row', alignItems: 'center', gap: 10,
     paddingHorizontal: 16, paddingTop: 44, paddingBottom: 12,
-    backgroundColor: SURFACE,
-    borderBottomWidth: 1, borderBottomColor: BORDER,
+    backgroundColor: GLASS_FILL_STRONG,
+    borderBottomWidth: 1, borderBottomColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
   },
   iconBtn: {
     width: 36, height: 36, borderRadius: 18,
-    backgroundColor: BG,
+    backgroundColor: BRAND_ACCENT_SOFT,
     alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
   },
-  headerTitle: { fontSize: 17, fontWeight: '800', color: TEXT },
+  headerTitle: { fontSize: 17, fontWeight: '800', color: HEADER_NAVY, letterSpacing: 0.2 },
   headerSub:   { fontSize: 11, color: TEXT_MUTED, marginTop: 2, fontWeight: '600' },
 
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
@@ -512,12 +761,19 @@ const styles = StyleSheet.create({
     marginTop: 12, marginBottom: 8,
   },
 
-  // Event card
+  // Event card — translucent glass fill + light glass border + soft
+  // blue lift shadow so each card reads as a glass panel on the
+  // Institution Home ambient wash.
   card: {
-    backgroundColor: SURFACE,
-    borderRadius: 14,
-    borderWidth: 1, borderColor: BORDER,
+    backgroundColor: GLASS_FILL_STRONG,
+    borderRadius: 16,
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
     padding: 14, marginBottom: 12,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
   },
   cardPast: { opacity: 0.85 },
 
@@ -546,8 +802,15 @@ const styles = StyleSheet.create({
   },
   statusText: { fontSize: 10, fontWeight: '800', letterSpacing: 0.3 },
 
+  // Adaptive banner frame — width fills, height caps at 220 so a
+  // portrait image can stretch tall without dominating the card,
+  // and a landscape image letterboxes cleanly inside the frame.
+  // resizeMode="contain" on the Image itself preserves the
+  // original aspect ratio without cropping or stretching.
   banner: {
-    width: '100%', height: 140, borderRadius: 10,
+    width: '100%',
+    height: 220,
+    borderRadius: 10,
     marginTop: 12,
     backgroundColor: BG,
   },
@@ -555,6 +818,34 @@ const styles = StyleSheet.create({
   description: {
     fontSize: 12, color: TEXT_MUTED,
     lineHeight: 17, marginTop: 10,
+  },
+
+  // Edit row on Inter-Level events awaiting super-admin approval.
+  // Sits at the bottom of the card, gets its own separator so it
+  // reads as a distinct affordance rather than another meta line.
+  editRow: {
+    marginTop: 12,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: BORDER,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flexWrap: 'wrap',
+  },
+  editBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingHorizontal: 12, paddingVertical: 7,
+    borderRadius: 999,
+    backgroundColor: BRAND_SOFT,
+    borderWidth: 1, borderColor: BRAND_SOFT,
+  },
+  editBtnText: {
+    fontSize: 11, fontWeight: '800', color: BRAND, letterSpacing: 0.2,
+  },
+  editHint: {
+    flex: 1,
+    fontSize: 10, color: TEXT_MUTED, fontWeight: '600',
   },
 
   // ── Pending-approval card ────────────────────────────────────────

@@ -22,7 +22,7 @@
 // Tapping any action navigates to PlanSelection with the target plan
 // pre-selected, so the existing payment flow handles the rest.
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, ActivityIndicator,
   StyleSheet, RefreshControl, Linking, AppState, Modal, Image,
@@ -38,18 +38,56 @@ import apiClient from '../../api/client';
 import { confirm } from '../../components/ConfirmDialog';
 import resolveAssetUrl from '../../utils/assetUrl';
 import DownloadInvoiceButton from '../../components/DownloadInvoiceButton';
+// Institution Home visual system — ambient blue wash + glass
+// cards + navy accents. Reused verbatim so this screen belongs to
+// the same design language as the rest of the institution UI.
+import InstitutionScreenBackground, {
+  INSTITUTION_BG_BASE,
+} from '../../components/InstitutionScreenBackground';
+import { useTheme } from '../../theme/ThemeContext';
 
+// ── Institution-Home glass tokens ─────────────────────────────
+const GLASS_FILL         = 'rgba(255,255,255,0.72)';
+const GLASS_FILL_STRONG  = 'rgba(255,255,255,0.88)';
+const GLASS_BORDER_LIGHT = 'rgba(255,255,255,0.55)';
+const GLASS_HIGHLIGHT    = 'rgba(255,255,255,0.9)';
+const GLASS_SHADOW       = '#1E40AF';
+const BRAND_DARK_BLUE    = '#1E3A8A';
+const BRAND_ACCENT_SOFT  = 'rgba(30,58,138,0.10)';
+const HEADER_NAVY        = '#0F172A';
+
+// Local tokens — names kept unchanged so every existing card /
+// border / text style inherits the Institution Home look
+// automatically.
 const BRAND       = '#E63946';
 const BRAND_SOFT  = '#FFE4E6';
-const TEXT        = '#111827';
+const TEXT        = HEADER_NAVY;
 const TEXT_MUTED  = '#6B7280';
 const TEXT_LIGHT  = '#9CA3AF';
-const SURFACE     = '#FFFFFF';
-const BG          = '#F4F4F8';
-const BORDER      = '#E5E7EB';
+const SURFACE     = GLASS_FILL_STRONG;
+const BG          = INSTITUTION_BG_BASE;
+const BORDER      = GLASS_BORDER_LIGHT;
 const GREEN       = '#10B981';
 const AMBER       = '#F59E0B';
 const SLATE       = '#475569';
+
+// Local context so nested sub-components pick up dark-mode
+// overrides without prop-drilling.
+const PricingCtx = createContext({ isDark: false, dark: {} });
+
+function buildDarkOverrides(pal) {
+  return StyleSheet.create({
+    screen:      { backgroundColor: pal.bg },
+    header:      { backgroundColor: pal.surface, borderBottomColor: pal.border },
+    headerTitle: { color: pal.text },
+    headerSub:   { color: pal.textMuted },
+    iconBtn:     { backgroundColor: pal.border },
+    card:        { backgroundColor: pal.surface, borderColor: pal.border },
+    planCard:    { backgroundColor: pal.surface, borderColor: pal.border },
+    sectionTitle:{ color: pal.textMuted },
+    label:       { color: pal.textMuted },
+  });
+}
 
 // Human labels for each per-term billing key.
 const TERM_LABEL = {
@@ -335,24 +373,36 @@ export default function PricingPlansScreen({ navigation }) {
     startPayment(target, label);
   };
 
+  // Dark-mode overrides pulled from the shared ThemeContext.
+  // Institution Home's ambient background is skipped in dark mode.
+  const { mode, palette: themePalette } = useTheme();
+  const isDark = mode === 'dark';
+  const dark   = useMemo(() => (isDark ? buildDarkOverrides(themePalette) : {}), [isDark, themePalette]);
+
   if (loading) {
     return (
-      <View style={[styles.screen, styles.center]}>
-        <ActivityIndicator size="large" color={BRAND} />
+      <PricingCtx.Provider value={{ isDark, dark }}>
+      <View style={[styles.screen, styles.center, isDark && dark.screen]}>
+        {!isDark ? <InstitutionScreenBackground layer /> : null}
+        <ActivityIndicator size="large" color={BRAND_DARK_BLUE} />
       </View>
+      </PricingCtx.Provider>
     );
   }
 
   return (
-    <View style={styles.screen}>
+    <PricingCtx.Provider value={{ isDark, dark }}>
+    <View style={[styles.screen, isDark && dark.screen]}>
+      {/* Institution Home ambient wash — sits behind all content. */}
+      {!isDark ? <InstitutionScreenBackground layer /> : null}
       {/* ───── Header ───── */}
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.iconBtn} activeOpacity={0.7}>
-          <ArrowLeft size={20} color={TEXT} strokeWidth={2.2} />
+      <View style={[styles.header, isDark && dark.header]}>
+        <TouchableOpacity onPress={() => navigation.goBack()} style={[styles.iconBtn, isDark && dark.iconBtn]} activeOpacity={0.7}>
+          <ArrowLeft size={20} color={isDark ? themePalette.text : TEXT} strokeWidth={2.2} />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
-          <Text style={styles.headerTitle}>Pricing & Plans</Text>
-          <Text style={styles.headerSub}>Manage your academy's subscription</Text>
+          <Text style={[styles.headerTitle, isDark && dark.headerTitle]}>Pricing & Plans</Text>
+          <Text style={[styles.headerSub, isDark && dark.headerSub]}>Manage your academy's subscription</Text>
         </View>
       </View>
 
@@ -432,6 +482,7 @@ export default function PricingPlansScreen({ navigation }) {
         }}
       />
     </View>
+    </PricingCtx.Provider>
   );
 }
 
@@ -864,33 +915,39 @@ const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: BG },
   center: { alignItems: 'center', justifyContent: 'center' },
 
-  // Header
+  // Header — glass slab with navy title and soft blue lift shadow.
   header: {
     flexDirection: 'row', alignItems: 'center', gap: 10,
     paddingHorizontal: 16, paddingTop: 44, paddingBottom: 12,
-    backgroundColor: SURFACE,
-    borderBottomWidth: 1, borderBottomColor: BORDER,
+    backgroundColor: GLASS_FILL_STRONG,
+    borderBottomWidth: 1, borderBottomColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
   },
   iconBtn: {
     width: 36, height: 36, borderRadius: 18,
-    backgroundColor: BG,
+    backgroundColor: BRAND_ACCENT_SOFT,
     alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
   },
-  headerTitle: { fontSize: 17, fontWeight: '800', color: TEXT },
+  headerTitle: { fontSize: 17, fontWeight: '800', color: HEADER_NAVY, letterSpacing: 0.2 },
   headerSub:   { fontSize: 11, color: TEXT_MUTED, marginTop: 2, fontWeight: '600' },
 
-  // Current plan card
+  // Current plan card — translucent glass fill + blue lift shadow.
   currentCard: {
-    backgroundColor: SURFACE,
+    backgroundColor: GLASS_FILL_STRONG,
     borderRadius: 18,
     paddingTop: 20, paddingHorizontal: 16, paddingBottom: 16,
-    borderWidth: 1, borderColor: BORDER,
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
     overflow: 'hidden',
-    shadowColor: BRAND,
-    shadowOpacity: 0.12,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 6,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
   },
   currentAccent: {
     position: 'absolute',

@@ -1,6 +1,10 @@
 const pool = require('../config/db');
 const Razorpay = require('razorpay');
 const { insertNotification } = require('./notification.controller');
+// Fire-and-forget WhatsApp fan-out for freshly-created events. Never
+// throws — the caller's response path stays clean even if the WA
+// provider is down or unreachable.
+const { notifyEventCreatedWA } = require('../services/eventWhatsApp.service');
 
 // Lazy Razorpay client — shared with utils/razorpay.js but instantiated
 // separately so this controller can build the tiny event-fee payment
@@ -86,26 +90,102 @@ exports.getAllInstitutions = async (req, res) => {
   }
 };
 
-// GET single institution by ID (public)
+// GET single institution by ID (public). Branch-aware:
+//   • For a main institution, returns its own row untouched.
+//   • For a branch (parent_institution_id IS NOT NULL) the row's own
+//     identity (name, address, phone, city) is preserved, but any
+//     BRANDING field that's empty on the branch falls back to the
+//     parent's value (logo_url, description, theme colors) so the
+//     Guest branch details view shows the parent's identity at the
+//     top without an extra round-trip.
+// The response also carries a `parent` payload so the mobile can show
+// the "A Branch of <Institution Name>" chip.
 exports.getInstitutionById = async (req, res) => {
   try {
     const { id } = req.params;
 
+    // Pull the row + its parent row (LEFT JOIN so mains work too).
+    // We ask for a broad column set so any branding field the mobile
+    // needs (logo, description, banner) is available and any missing
+    // column on older schemas fails softly.
     const result = await pool.query(
-      `SELECT id, name, description, address, city, pincode, phone, email, logo_url, status, created_at
-       FROM institutions
-       WHERE id = $1
-         AND status = 'approved'
-         AND deleted_at IS NULL`,
-      [id]
+      `SELECT
+         i.id, i.name, i.description, i.address, i.city, i.pincode,
+         i.phone, i.email, i.logo_url, i.institution_type, i.status,
+         i.parent_institution_id, i.created_at,
+         p.id           AS parent_id,
+         p.name         AS parent_name,
+         p.description  AS parent_description,
+         p.logo_url     AS parent_logo_url
+       FROM institutions i
+       LEFT JOIN institutions p ON p.id = i.parent_institution_id
+       WHERE i.id = $1
+         AND COALESCE(i.is_active, TRUE) = TRUE
+         AND i.deleted_at IS NULL`,
+      [id],
     );
 
     if (result.rows.length === 0) {
       return res.status(404).json({ message: 'Institution not found' });
     }
 
-    res.json({ institution: result.rows[0] });
+    const row = result.rows[0];
+    const isBranch = row.parent_institution_id != null;
+
+    // Fold parent branding onto the response when this is a branch —
+    // fields that are already set on the branch win, so an academy
+    // can still override its per-branch logo if it wants to.
+    const institution = {
+      id: row.id,
+      name: row.name,
+      description: row.description || (isBranch ? row.parent_description : null),
+      address: row.address,
+      city: row.city,
+      pincode: row.pincode,
+      phone: row.phone,
+      email: row.email,
+      logo_url: row.logo_url || (isBranch ? row.parent_logo_url : null),
+      institution_type: row.institution_type,
+      status: row.status,
+      created_at: row.created_at,
+      parent_institution_id: row.parent_institution_id,
+      is_branch: isBranch,
+      // Explicit chip payload — the mobile renders
+      // "A Branch of <parent_institution_name>" from this. Null when
+      // the row IS the main institution.
+      parent_institution_name: isBranch ? row.parent_name : null,
+      parent: isBranch
+        ? {
+            id: row.parent_id,
+            name: row.parent_name,
+            logo_url: row.parent_logo_url,
+            description: row.parent_description,
+          }
+        : null,
+    };
+
+    res.json({ institution });
   } catch (err) {
+    // On older DBs without parent_institution_id, fall back to the
+    // legacy row-only query so we never 500 a guest.
+    if (err && err.code === '42703') {
+      try {
+        const legacy = await pool.query(
+          `SELECT id, name, description, address, city, pincode, phone, email,
+                  logo_url, status, created_at
+             FROM institutions
+            WHERE id = $1
+              AND deleted_at IS NULL`,
+          [req.params.id],
+        );
+        if (legacy.rows.length === 0) {
+          return res.status(404).json({ message: 'Institution not found' });
+        }
+        return res.json({
+          institution: { ...legacy.rows[0], is_branch: false, parent_institution_name: null, parent: null },
+        });
+      } catch (_) { /* fall through to 500 */ }
+    }
     console.error('Get institution error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
@@ -693,24 +773,66 @@ exports.getNearbyInstitutions = async (req, res) => {
 };
 
 // GET /api/institutions/:id/programs?featured=true&limit=20
-// Institution-scoped program list for the student app. Joins course info with
-// the trainer's display name (if courses.trainer_id exists in this schema).
+// Institution-scoped program list for the student app.
+//
+// Branch-aware:
+//   • For a MAIN institution (parent_institution_id IS NULL), returns
+//     every active course owned by that institution — same as before.
+//   • For a BRANCH, returns only the parent's courses that have at
+//     least one batch scheduled at that specific branch. This matches
+//     the spec: "Display only the courses offered by that selected
+//     branch (not all institution courses)." Course rows themselves
+//     live under the parent's institution_id — the branch mapping is
+//     via batches.branch_id.
+//
+// Browsability: guests can only fetch programs from a browsable main
+// or a branch whose parent is browsable. A paused main hides its
+// branches' programs automatically.
 exports.getInstitutionPrograms = async (req, res) => {
   try {
     const { id } = req.params;
     const featuredOnly = req.query.featured === 'true';
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
 
-    // Make sure the institution itself is student-browsable before exposing
-    // its programs to a guest. Stops a deactivated academy's content leaking.
-    const inst = await pool.query(
-      `SELECT id FROM institutions i
-        WHERE i.id = $1 AND ${STUDENT_BROWSABLE}`,
+    // Resolve whether this id points at a main or a branch, and pull
+    // the parent id if it's a branch. One query, so failure of the
+    // parent_institution_id column falls into the 42703 catch below.
+    const meta = await pool.query(
+      `SELECT id, parent_institution_id
+         FROM institutions
+        WHERE id = $1
+          AND COALESCE(is_active, TRUE) = TRUE
+          AND deleted_at IS NULL`,
       [id],
     );
-    if (inst.rows.length === 0) {
+    if (meta.rows.length === 0) {
+      return res.status(404).json({ message: 'Institution not found' });
+    }
+    const isBranch = meta.rows[0].parent_institution_id != null;
+    const rootId   = isBranch ? meta.rows[0].parent_institution_id : Number(id);
+
+    // Gate on the ROOT institution being browsable — a branch inherits
+    // its parent's activation state.
+    const guard = await pool.query(
+      `SELECT i.id FROM institutions i
+        WHERE i.id = $1 AND ${STUDENT_BROWSABLE}`,
+      [rootId],
+    );
+    if (guard.rows.length === 0) {
       return res.status(404).json({ message: 'Institution not found or not accepting students' });
     }
+
+    // For a branch, only courses that have at least one batch at that
+    // branch are surfaced. For a main, show every active course.
+    const params = [rootId, limit];
+    const branchFilter = isBranch
+      ? `AND EXISTS (
+           SELECT 1 FROM batches b
+            WHERE b.course_id = c.id
+              AND b.branch_id = $3
+         )`
+      : '';
+    if (isBranch) params.push(Number(id));
 
     const result = await pool.query(
       `SELECT c.*
@@ -718,6 +840,7 @@ exports.getInstitutionPrograms = async (req, res) => {
         WHERE c.institution_id = $1
           AND COALESCE(c.status, 'active') = 'active'
           ${featuredOnly ? 'AND c.is_featured = TRUE' : ''}
+          ${branchFilter}
         ORDER BY
           c.is_featured DESC NULLS LAST,
           CASE c.badge
@@ -728,26 +851,67 @@ exports.getInstitutionPrograms = async (req, res) => {
           END,
           c.created_at DESC
         LIMIT $2`,
-      [id, limit],
+      params,
     );
 
     res.json({ count: result.rows.length, programs: result.rows });
   } catch (err) {
+    // Missing parent_institution_id column (pre-035) or missing
+    // batches.branch_id (pre-045) — retry with the legacy main-only
+    // query so the response never 500s a guest.
+    if (err && err.code === '42703') {
+      try {
+        const { id } = req.params;
+        const featuredOnly = req.query.featured === 'true';
+        const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
+        const legacy = await pool.query(
+          `SELECT c.*
+             FROM courses c
+            WHERE c.institution_id = $1
+              AND COALESCE(c.status, 'active') = 'active'
+              ${featuredOnly ? 'AND c.is_featured = TRUE' : ''}
+            ORDER BY c.created_at DESC
+            LIMIT $2`,
+          [id, limit],
+        );
+        return res.json({ count: legacy.rows.length, programs: legacy.rows });
+      } catch (_) { /* fall through */ }
+    }
     console.error('getInstitutionPrograms error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
 
 // GET /api/institutions/:id/batches
+// Branch-aware:
+//   • Main institution id → every batch at that academy (any branch).
+//   • Branch id           → only batches at that specific branch
+//                           (batches.branch_id = <this id>).
 exports.getInstitutionBatches = async (req, res) => {
   try {
     const { id } = req.params;
-    // Join courses + trainers + the (optional) branch institution row
-    // so the mobile can render the batch card + the student-side
-    // enrollment summary WITHOUT a second round-trip per batch. Every
-    // field the enrollment form's summary card needs — course_name,
-    // course_price, duration_months, trainer_name, branch_name — is
-    // produced right here in one query.
+
+    // Resolve whether this id is a branch and pull the parent's id if
+    // so. Falls into the 42703 catch on pre-035 schemas.
+    let isBranch = false;
+    let rootId = Number(id);
+    try {
+      const meta = await pool.query(
+        `SELECT parent_institution_id FROM institutions WHERE id = $1`,
+        [id],
+      );
+      if (meta.rows.length > 0 && meta.rows[0].parent_institution_id != null) {
+        isBranch = true;
+        rootId = meta.rows[0].parent_institution_id;
+      }
+    } catch (metaErr) {
+      if (!(metaErr && metaErr.code === '42703')) throw metaErr;
+      // No parent_institution_id column — treat every id as a main.
+    }
+
+    const branchFilter = isBranch ? 'AND b.branch_id = $2' : '';
+    const params = isBranch ? [rootId, Number(id)] : [rootId];
+
     const result = await pool.query(
       `SELECT b.*,
               c.name             AS course_name,
@@ -761,31 +925,94 @@ exports.getInstitutionBatches = async (req, res) => {
          LEFT JOIN users    u  ON t.user_id    = u.id
          LEFT JOIN institutions br ON b.branch_id = br.id
         WHERE b.institution_id = $1
+          ${branchFilter}
         ORDER BY b.created_at DESC
         LIMIT 100`,
-      [id],
+      params,
     );
     res.json({ count: result.rows.length, batches: result.rows });
   } catch (err) {
+    // Pre-045: no batches.branch_id column. Retry unfiltered so the
+    // list still renders.
+    if (err && err.code === '42703') {
+      try {
+        const legacy = await pool.query(
+          `SELECT b.*, c.name AS course_name, c.price AS course_price,
+                  c.duration_months AS course_duration_months, u.name AS trainer_name
+             FROM batches b
+             LEFT JOIN courses  c ON b.course_id  = c.id
+             LEFT JOIN trainers t ON b.trainer_id = t.id
+             LEFT JOIN users    u ON t.user_id    = u.id
+            WHERE b.institution_id = $1
+            ORDER BY b.created_at DESC
+            LIMIT 100`,
+          [req.params.id],
+        );
+        return res.json({ count: legacy.rows.length, batches: legacy.rows });
+      } catch (_) { /* fall through */ }
+    }
     console.error('getInstitutionBatches error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
 
 // GET /api/institutions/:id/trainers
+// Branch-aware:
+//   • Main id   → every trainer on the academy roster.
+//   • Branch id → only trainers who teach at least one batch at that
+//                 branch (via batches.branch_id).
 exports.getInstitutionTrainers = async (req, res) => {
   try {
     const { id } = req.params;
-    const result = await pool.query(
-      `SELECT t.*
-         FROM trainers t
-        WHERE t.institution_id = $1
-        ORDER BY t.created_at DESC
-        LIMIT 100`,
-      [id],
-    );
+
+    let isBranch = false;
+    let rootId = Number(id);
+    try {
+      const meta = await pool.query(
+        `SELECT parent_institution_id FROM institutions WHERE id = $1`,
+        [id],
+      );
+      if (meta.rows.length > 0 && meta.rows[0].parent_institution_id != null) {
+        isBranch = true;
+        rootId = meta.rows[0].parent_institution_id;
+      }
+    } catch (metaErr) {
+      if (!(metaErr && metaErr.code === '42703')) throw metaErr;
+    }
+
+    const result = isBranch
+      ? await pool.query(
+          `SELECT DISTINCT t.*
+             FROM trainers t
+             JOIN batches b ON b.trainer_id = t.id
+            WHERE t.institution_id = $1
+              AND b.branch_id      = $2
+            ORDER BY t.created_at DESC
+            LIMIT 100`,
+          [rootId, Number(id)],
+        )
+      : await pool.query(
+          `SELECT t.*
+             FROM trainers t
+            WHERE t.institution_id = $1
+            ORDER BY t.created_at DESC
+            LIMIT 100`,
+          [rootId],
+        );
     res.json({ count: result.rows.length, trainers: result.rows });
   } catch (err) {
+    if (err && err.code === '42703') {
+      try {
+        const legacy = await pool.query(
+          `SELECT t.* FROM trainers t
+            WHERE t.institution_id = $1
+            ORDER BY t.created_at DESC
+            LIMIT 100`,
+          [req.params.id],
+        );
+        return res.json({ count: legacy.rows.length, trainers: legacy.rows });
+      } catch (_) { /* fall through */ }
+    }
     console.error('getInstitutionTrainers error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
@@ -844,7 +1071,16 @@ exports.getInstitutionEvents = async (req, res) => {
          e.publish_at,
          e.sort_order,
          e.institution_id,
-         CASE WHEN e.institution_id IS NULL THEN 'global' ELSE 'institution' END AS source,
+         e.event_type,
+         e.registration_enabled,
+         -- Organizer info for the card's "Organized by ..." line.
+         i.name     AS organizing_institution_name,
+         i.logo_url AS organizing_institution_logo,
+         CASE
+           WHEN e.event_type = 'intra'       THEN 'global'
+           WHEN e.institution_id IS NULL     THEN 'global'
+           ELSE 'institution'
+         END AS source,
          EXISTS (
            SELECT 1 FROM event_payments ep
             WHERE ep.event_id = e.id
@@ -852,14 +1088,21 @@ exports.getInstitutionEvents = async (req, res) => {
               AND ep.status   = 'paid'
          ) AS has_paid
        FROM mobile_events e
+       LEFT JOIN institutions i ON i.id = e.institution_id
        WHERE e.is_active = TRUE
          AND e.event_date >= CURRENT_DATE
-         -- Academy-group match: event belongs to the root itself or to
-         -- any sub-branch of that root, OR it's a global (NULL) row.
-         -- This lets a sub-branch's approved event surface for every
-         -- student in the same group, not just the sub-branch's own.
+         -- Visibility rule:
+         --   • Global (super-admin curated) rows: institution_id IS NULL.
+         --   • Approved Intra-Level rows: event_type='intra' — these are
+         --     cross-institution events promoted by the super-admin
+         --     and must fan out to EVERY academy's students, trainers
+         --     and guests. Rejected / pending intras never pass the
+         --     approval_status gate below, so they stay hidden.
+         --   • Academy-group rows: belong to this root or any sub-branch
+         --     of it.
          AND (
-           e.institution_id IS NULL
+           e.event_type = 'intra'
+           OR e.institution_id IS NULL
            OR e.institution_id IN (
              SELECT id FROM institutions
              WHERE id = $2 OR parent_institution_id = $2
@@ -872,6 +1115,7 @@ exports.getInstitutionEvents = async (req, res) => {
          -- Approval gate: sub-branches insert as 'pending'; only rows
          -- the parent has explicitly approved (or main-branch rows,
          -- which default to 'approved') ever reach students / guests.
+         -- Same gate blocks rejected / pending intras from any feed.
          AND e.approval_status = 'approved'
        ORDER BY e.event_date ASC
        LIMIT 50`,
@@ -917,7 +1161,6 @@ exports.createInstitutionEvent = async (req, res) => {
     const inst = instRow.rows[0] || {};
     const parentInstitutionId = inst.parent_institution_id || null;
     const isSubBranch = !!parentInstitutionId;
-    const approvalStatus = isSubBranch ? 'pending' : 'approved';
 
     const {
       title,
@@ -928,6 +1171,18 @@ exports.createInstitutionEvent = async (req, res) => {
       image_url,
       link,
       registration_closing_date,
+      // Inter-Level (default) = institution-local event, published to
+      // this institution's own students/trainers. Preserves the
+      // existing behaviour verbatim.
+      //
+      // Intra-Level = a cross-institution event that MUST be reviewed
+      // by the super-admin (web) before it becomes visible. On create
+      // we always park it at approval_status = 'pending' regardless
+      // of whether the caller is a main or sub-branch admin — the
+      // super-admin flips it to 'approved' from the web console,
+      // which then promotes it to every institution's feed via the
+      // OR-in on getMyEvents / listMyInstitutionEvents.
+      event_type: eventTypeRaw,
       // Payment gate — when true, payment_amount is mandatory and the
       // student/trainer app shows a "Pay Now" button that opens an
       // integrated Razorpay Payment Link (same flow as the subscription
@@ -940,6 +1195,14 @@ exports.createInstitutionEvent = async (req, res) => {
       // NOW() catches up, at which point it appears automatically —
       // no cron job needed because we filter on read.
       publish_at,
+      // Optional start time (HH:MM 24h). Stored on the event so the
+      // student/trainer feed can render "When" as date + time.
+      event_time,
+      // Categories × skills configured via Event Creation → Categories
+      // & Skills. Persisted so the participant Registration Form can
+      // populate its Skills dropdown from THIS event's own list — no
+      // hardcoded catalog.
+      categories,
     } = req.body || {};
 
     if (!title || !String(title).trim()) {
@@ -994,14 +1257,54 @@ exports.createInstitutionEvent = async (req, res) => {
       }
     }
 
+    // ── Event type + approval routing ────────────────────────────
+    // Normalise the incoming event_type. Anything other than the
+    // string literal 'intra' collapses to 'inter' so a bad client
+    // payload can never sneak an unexpected value in.
+    const eventType = eventTypeRaw === 'intra' ? 'intra' : 'inter';
+
+    // Approval routing:
+    //   intra  → always 'pending' → awaits super-admin approval.
+    //   inter  → sub-branch keeps the existing parent-approval gate
+    //            ('pending'), main-branch admins auto-approve.
+    const approvalStatus = eventType === 'intra'
+      ? 'pending'
+      : (isSubBranch ? 'pending' : 'approved');
+
+    // submittedAt captures the moment the intra event entered the
+    // queue — the super-admin queue UI uses it as "Submitted date".
+    const submittedAt = eventType === 'intra' ? new Date() : null;
+
+    // Normalise the optional event_time to a simple HH:MM string, or
+    // NULL when omitted. We keep the column TEXT so downstream reads
+    // don't have to defensively cast around drivers that stringify
+    // Postgres TIME back in weird ways.
+    const eventTimeStr = (() => {
+      if (event_time == null) return null;
+      const s = String(event_time).trim();
+      if (!s) return null;
+      const m = s.match(/^(\d{1,2}):(\d{2})/);
+      if (!m) return null;
+      const hh = String(Math.max(0, Math.min(23, Number(m[1])))).padStart(2, '0');
+      const mm = String(Math.max(0, Math.min(59, Number(m[2])))).padStart(2, '0');
+      return `${hh}:${mm}`;
+    })();
+
+    // Categories payload is trusted-shape only — we accept whatever
+    // the mobile builder posted (shape validated client-side) and
+    // store as JSONB. Missing/invalid input collapses to [].
+    const categoriesJson = Array.isArray(categories) ? categories : [];
+
     const result = await pool.query(
       `INSERT INTO mobile_events
-         (title, subtitle, description, location, event_date,
+         (title, subtitle, description, location, event_date, event_time,
           registration_closing_date, image_url, link,
           payment_required, payment_amount, publish_at,
           institution_id, created_by, approval_status,
+          event_type, submitted_at,
+          categories,
           is_active, sort_order)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, TRUE, 0)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18::jsonb, TRUE, 0)
        RETURNING *`,
       [
         String(title).trim(),
@@ -1009,6 +1312,7 @@ exports.createInstitutionEvent = async (req, res) => {
         description ? String(description).trim() : null,
         location ? String(location).trim() : null,
         event_date,
+        eventTimeStr,
         registration_closing_date || null,
         image_url || null,
         link || null,
@@ -1018,6 +1322,9 @@ exports.createInstitutionEvent = async (req, res) => {
         institutionId,
         adminId,
         approvalStatus,
+        eventType,
+        submittedAt,
+        JSON.stringify(categoriesJson),
       ],
     );
     const eventRow = result.rows[0];
@@ -1058,7 +1365,60 @@ exports.createInstitutionEvent = async (req, res) => {
       }
     }
 
+    // ── Intra-Level: notify every super-admin so their bell fires.
+    // Best-effort — a notification blip never fails the create.
+    // Each super_admin gets one row; clicking the bell entry deep-
+    // links to the Event Approvals page (data.screen='EventApprovals').
+    if (eventType === 'intra') {
+      try {
+        const supers = await pool.query(
+          `SELECT id FROM users WHERE role = 'super_admin' AND is_active <> FALSE`,
+        );
+        for (const su of supers.rows) {
+          await insertNotification({
+            user_id:        su.id,
+            institution_id: null,
+            category:       'system',
+            title:          'Intra-Level event awaiting approval',
+            message:        `${inst.name || 'An institution'} submitted "${eventRow.title}" for platform approval.`,
+            data: {
+              // Web Admin bell deep-links on click. The Web Admin
+              // reads data.screen and navigates to '/events/approvals'.
+              screen:   'EventApprovals',
+              kind:     'intra_event_pending',
+              event_id: eventRow.id,
+              url:      '/events/approvals',
+            },
+            created_by: adminId,
+          });
+        }
+      } catch (err) {
+        console.warn('[event/create] super-admin notify failed:', err?.message);
+      }
+    }
+
     const isScheduled = !!publishAtIso;
+
+    // ── WhatsApp fan-out ─────────────────────────────────────────
+    // Institution main admin creates event → notify all students of
+    // that institution PLUS every sub-branch's students. Skip for:
+    //   • Sub-branch creates       — WA fires on parent approval.
+    //   • Scheduled (publish_at)   — WA fires when the row becomes
+    //                                visible; kicking off now would
+    //                                blast students hours or days
+    //                                before the event actually
+    //                                appears in the app. TODO: a
+    //                                cron job will handle scheduled
+    //                                publishes; for now we skip.
+    // Fire-and-forget so WhatsApp outages never block the response.
+    if (!isSubBranch && !isScheduled) {
+      notifyEventCreatedWA(eventRow, {
+        scope:          'institution',
+        institutionId:  institutionId,
+        institutionName: inst.name || null,
+      }).catch(() => { /* swallowed inside the helper */ });
+    }
+
     let message;
     if (isSubBranch) {
       message = 'Event submitted — the main institution will review and approve it before students see it.';
@@ -1074,6 +1434,174 @@ exports.createInstitutionEvent = async (req, res) => {
     });
   } catch (err) {
     console.error('createInstitutionEvent error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────
+// PUT /api/institutions/me/events/:eventId
+//
+// Institution admin edits one of their own events. Intended for the
+// "Edit while pending" flow: the mobile Events list surfaces an Edit
+// button on Inter-Level (event_type='intra') events that are still
+// awaiting super-admin approval. Once the super-admin flips the row
+// to 'approved', edits are refused.
+//
+// Rules:
+//   • Only the OWNING institution admin can edit.
+//   • Only rows with approval_status='pending' AND event_type='intra'
+//     are editable. Approved / rejected / non-intra rows return 403.
+//   • approval_status stays 'pending' after the update — the super-
+//     admin re-reviews the fresh values.
+//   • submitted_at is bumped to NOW() so the queue sorts by "most
+//     recently edited" and the reviewer sees the latest attempt on top.
+// ─────────────────────────────────────────────────────────────────────────
+exports.updateInstitutionEvent = async (req, res) => {
+  try {
+    const adminId = req.user.id;
+    const eventId = Number(req.params.eventId);
+    if (!Number.isFinite(eventId)) {
+      return res.status(400).json({ message: 'Bad event id.' });
+    }
+
+    const u = await pool.query(
+      `SELECT institution_id FROM users WHERE id = $1`,
+      [adminId],
+    );
+    const institutionId = u.rows[0]?.institution_id;
+    if (!institutionId) {
+      return res.status(403).json({ message: 'No institution linked to this admin.' });
+    }
+
+    // Ownership + state gate — we need approval_status, event_type
+    // and institution_id up front to decide whether this admin is
+    // allowed to touch the row at all.
+    const cur = await pool.query(
+      `SELECT id, institution_id, approval_status, event_type
+         FROM mobile_events
+        WHERE id = $1`,
+      [eventId],
+    );
+    if (cur.rowCount === 0) {
+      return res.status(404).json({ message: 'Event not found.' });
+    }
+    const row = cur.rows[0];
+    if (Number(row.institution_id) !== Number(institutionId)) {
+      return res.status(403).json({ message: 'You can only edit events created by your institution.' });
+    }
+    // Only intra + pending events are editable. Everything else
+    // (approved intra, inter, rejected) is locked down here.
+    if (row.event_type !== 'intra') {
+      return res.status(403).json({ message: 'Only Inter-Level (cross-institution) events can be edited from here.' });
+    }
+    if (row.approval_status !== 'pending') {
+      return res.status(403).json({ message: 'This event has already been reviewed and can no longer be edited.' });
+    }
+
+    const {
+      title, subtitle, description, event_date, event_time,
+      registration_closing_date, location, image_url, link,
+      payment_required, payment_amount, publish_at,
+      categories,
+    } = req.body || {};
+
+    if (!title || !String(title).trim()) {
+      return res.status(400).json({ field: 'title', message: 'Title is required.' });
+    }
+    if (!event_date) {
+      return res.status(400).json({ field: 'event_date', message: 'Event date is required.' });
+    }
+
+    // Payment re-validation mirrors the create handler exactly.
+    const paymentOn = payment_required === true || payment_required === 'true';
+    let feeRupees = null;
+    if (paymentOn) {
+      feeRupees = Number(payment_amount);
+      if (!Number.isFinite(feeRupees) || feeRupees < 1) {
+        return res.status(400).json({
+          field: 'payment_amount',
+          message: 'Enter a positive amount (in ₹, minimum ₹1) when payment is required.',
+        });
+      }
+      feeRupees = Math.round(feeRupees * 100) / 100;
+    }
+
+    // Same publish_at normalisation as the create path.
+    let publishAtIso = null;
+    if (publish_at) {
+      const d = new Date(publish_at);
+      if (Number.isNaN(d.getTime())) {
+        return res.status(400).json({ field: 'publish_at', message: 'Scheduled time is invalid.' });
+      }
+      if (d.getTime() > Date.now() + 30 * 1000) {
+        publishAtIso = d.toISOString();
+      }
+    }
+
+    // event_time → HH:MM string, or NULL.
+    const eventTimeStr = (() => {
+      if (event_time == null) return null;
+      const s = String(event_time).trim();
+      if (!s) return null;
+      const m = s.match(/^(\d{1,2}):(\d{2})/);
+      if (!m) return null;
+      const hh = String(Math.max(0, Math.min(23, Number(m[1])))).padStart(2, '0');
+      const mm = String(Math.max(0, Math.min(59, Number(m[2])))).padStart(2, '0');
+      return `${hh}:${mm}`;
+    })();
+
+    const categoriesJson = Array.isArray(categories) ? categories : [];
+
+    // approval_status is deliberately re-set to 'pending' (already
+    // was, but explicit here) and submitted_at is refreshed to NOW()
+    // so the super-admin queue shows the edited row at the top.
+    const upd = await pool.query(
+      `UPDATE mobile_events
+          SET title                     = $2,
+              subtitle                  = $3,
+              description               = $4,
+              location                  = $5,
+              event_date                = $6,
+              event_time                = $7,
+              registration_closing_date = $8,
+              image_url                 = $9,
+              link                      = $10,
+              payment_required          = $11,
+              payment_amount            = $12,
+              publish_at                = $13,
+              categories                = $14::jsonb,
+              approval_status           = 'pending',
+              submitted_at              = NOW(),
+              approved_at               = NULL,
+              approved_by               = NULL,
+              rejected_at               = NULL,
+              rejected_by               = NULL
+        WHERE id = $1
+        RETURNING *`,
+      [
+        eventId,
+        String(title).trim(),
+        subtitle ? String(subtitle).trim() : null,
+        description ? String(description).trim() : null,
+        location ? String(location).trim() : null,
+        event_date,
+        eventTimeStr,
+        registration_closing_date || null,
+        image_url || null,
+        link || null,
+        paymentOn,
+        paymentOn ? feeRupees : null,
+        publishAtIso,
+        JSON.stringify(categoriesJson),
+      ],
+    );
+
+    res.json({
+      message: 'Event updated. It remains awaiting approval — the reviewer will see the latest values.',
+      event: upd.rows[0],
+    });
+  } catch (err) {
+    console.error('updateInstitutionEvent error:', err);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
@@ -1790,29 +2318,68 @@ exports.listMyInstitutionEvents = async (req, res) => {
     }
     const result = await pool.query(
       `SELECT
-         id, title, subtitle, description, image_url, event_date,
-         registration_closing_date, location, link, is_active, sort_order,
-         payment_required, payment_amount, publish_at,
-         approval_status, approval_reason, approval_decided_at,
-         institution_id, created_at,
+         e.id, e.title, e.subtitle, e.description, e.image_url, e.event_date,
+         -- event_time + categories persisted by migration 096. Selected
+         -- here so InstitutionEventDetailScreen can render the Event
+         -- Time meta row and the Categories & Skills section without a
+         -- second round-trip.
+         e.event_time, e.categories,
+         e.registration_closing_date, e.location, e.link, e.is_active, e.sort_order,
+         e.payment_required, e.payment_amount, e.publish_at,
+         e.approval_status, e.approval_reason, e.approval_decided_at,
+         e.event_type, e.submitted_at, e.approved_at, e.rejected_at,
+         e.registration_enabled,
+         e.institution_id, e.created_at,
+         i.name     AS institution_name,
+         i.name     AS organizing_institution_name,
+         i.logo_url AS organizing_institution_logo,
          -- Four-way status so the admin's EventsList can badge each row.
          -- Approval outcomes win over publish/date state — a rejected
          -- event is rejected regardless of when it was scheduled.
          CASE
-           WHEN approval_status = 'pending'                    THEN 'pending'
-           WHEN approval_status = 'rejected'                   THEN 'rejected'
-           WHEN publish_at IS NOT NULL AND publish_at > NOW()  THEN 'scheduled'
-           WHEN event_date <  CURRENT_DATE                     THEN 'past'
-           ELSE                                                     'upcoming'
-         END AS status
-       FROM mobile_events
-       WHERE institution_id = $1
+           WHEN e.approval_status = 'pending'                      THEN 'pending'
+           WHEN e.approval_status = 'rejected'                     THEN 'rejected'
+           WHEN e.publish_at IS NOT NULL AND e.publish_at > NOW()  THEN 'scheduled'
+           WHEN e.event_date <  CURRENT_DATE                       THEN 'past'
+           ELSE                                                         'upcoming'
+         END AS status,
+         -- Ownership flag so the mobile EventsList can show manage
+         -- affordances (edit / delete / approval status) only on
+         -- rows this admin actually owns. Approved cross-institution
+         -- intras from OTHER academies come through as read-only.
+         (e.institution_id = $1) AS is_own
+       FROM mobile_events e
+       LEFT JOIN institutions i ON i.id = e.institution_id
+       WHERE
+         -- The admin's own institution — every status (pending,
+         -- approved, rejected, scheduled, past, upcoming).
+         e.institution_id = $1
+         OR (
+           -- Every APPROVED intra-level event submitted by ANY
+           -- other institution — these are cross-institution events
+           -- promoted by the super-admin and must fan out to every
+           -- academy's admin dashboard too, not just students.
+           -- Rejected / pending intras from other academies stay
+           -- hidden (approval_status gate).
+           --
+           -- MODULE 5: EXTERNAL events also age out — once their
+           -- event_date has passed we drop them from the current
+           -- institution's active feed. The organizing institution
+           -- still sees the row in ITS OWN History (upper branch of
+           -- the OR keeps their institution_id = $1 case unfiltered).
+           -- The row itself is preserved; only the participant-side
+           -- listing hides it.
+           e.event_type = 'intra'
+           AND e.approval_status = 'approved'
+           AND e.institution_id <> $1
+           AND e.event_date >= CURRENT_DATE
+         )
        ORDER BY
          CASE
-           WHEN publish_at IS NOT NULL AND publish_at > NOW() THEN 0
+           WHEN e.publish_at IS NOT NULL AND e.publish_at > NOW() THEN 0
            ELSE 1
          END,
-         event_date DESC
+         e.event_date DESC
        LIMIT 200`,
       [institutionId],
     );
@@ -1853,9 +2420,14 @@ exports.listPendingBranchEvents = async (req, res) => {
     // Pending events from any institution whose parent is our home id.
     const result = await pool.query(
       `SELECT e.id, e.title, e.subtitle, e.description, e.image_url,
-              e.event_date, e.registration_closing_date, e.location, e.link,
+              e.event_date, e.event_time,
+              e.registration_closing_date, e.location, e.link,
               e.payment_required, e.payment_amount, e.publish_at,
               e.approval_status, e.institution_id, e.created_at,
+              -- categories block so the pending-event detail view can
+              -- render Categories & Skills exactly like the approved
+              -- event detail does.
+              e.categories,
               i.name AS branch_name
          FROM mobile_events e
          JOIN institutions i ON i.id = e.institution_id
@@ -1951,6 +2523,20 @@ async function decideBranchEvent({ res, decidingUserId, eventId, decision, reaso
     console.warn('[event/decide] branch notify failed:', err?.message);
   }
 
+  // ── WhatsApp fan-out on approval ─────────────────────────────
+  // Branch admin's event is only visible after the parent approves
+  // it, so the WA blast fires HERE (not at create time). Scope is
+  // 'branch' — only students of THAT branch receive the message.
+  // The plan gate lives on the parent institution and is checked
+  // per-student inside the helper.
+  if (decision === 'approved') {
+    notifyEventCreatedWA(updated.rows[0], {
+      scope:           'branch',
+      institutionId:   row.institution_id,       // the branch id
+      institutionName: row.branch_name || null,
+    }).catch(() => { /* swallowed inside the helper */ });
+  }
+
   return res.json({
     message: decision === 'approved'
       ? 'Event approved — it is now visible to students and trainers.'
@@ -2020,10 +2606,16 @@ exports.getMyEvents = async (req, res) => {
     // from anywhere in their academy GROUP (root + every sub-branch),
     // so an event a sub-branch created and the parent approved shows
     // up for students at any branch of the same academy.
+    //
+    // Intra-Level (approved) events additionally fan out to EVERY
+    // institution — they are super-admin promoted, cross-institution
+    // events. We OR-in that condition regardless of the caller's
+    // institution linkage so signed-in users at any academy see them.
     let where, params;
     if (rootId) {
       where = `(
-        e.institution_id IS NULL
+        e.event_type = 'intra'
+        OR e.institution_id IS NULL
         OR e.institution_id IN (
           SELECT id FROM institutions
           WHERE id = $2 OR parent_institution_id = $2
@@ -2031,17 +2623,33 @@ exports.getMyEvents = async (req, res) => {
       )`;
       params = [callerUserId, rootId];
     } else {
-      where  = `e.institution_id IS NULL`;
+      where  = `(e.event_type = 'intra' OR e.institution_id IS NULL)`;
       params = [callerUserId];
     }
 
     const result = await pool.query(
       `SELECT
          e.id, e.title, e.subtitle, e.description, e.image_url, e.event_date,
+         -- event_time + categories persisted by migration 096. Selected
+         -- so student/trainer detail views (and the Institution detail
+         -- when the row is opened from a cross-institution list) can
+         -- render Event Time + Categories & Skills.
+         e.event_time, e.categories,
          e.registration_closing_date, e.location, e.link,
          e.payment_required, e.payment_amount, e.publish_at,
-         e.sort_order, e.institution_id,
-         CASE WHEN e.institution_id IS NULL THEN 'global' ELSE 'institution' END AS source,
+         e.sort_order, e.institution_id, e.event_type,
+         e.registration_enabled,
+         -- Organizer / submitting institution surfaced so every card
+         -- can render "Organized by: <academy name>". Sourced from
+         -- the row's original submitting institution — never hard-
+         -- coded on the client.
+         i.name     AS organizing_institution_name,
+         i.logo_url AS organizing_institution_logo,
+         CASE
+           WHEN e.event_type = 'intra'       THEN 'global'
+           WHEN e.institution_id IS NULL     THEN 'global'
+           ELSE 'institution'
+         END AS source,
          EXISTS (
            SELECT 1 FROM event_payments ep
             WHERE ep.event_id = e.id
@@ -2049,6 +2657,7 @@ exports.getMyEvents = async (req, res) => {
               AND ep.status   = 'paid'
          ) AS has_paid
        FROM mobile_events e
+       LEFT JOIN institutions i ON i.id = e.institution_id
        WHERE e.is_active = TRUE
          AND e.event_date >= CURRENT_DATE
          AND (e.publish_at IS NULL OR e.publish_at <= NOW())

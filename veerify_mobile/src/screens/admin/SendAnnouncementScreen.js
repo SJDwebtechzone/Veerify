@@ -9,7 +9,7 @@
 //   GET  /api/announcements/audience-counts   -> { counts: { staff, students, all } }
 //   POST /api/announcements                   -> { audience, title, message, category }
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { createContext, useEffect, useMemo, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView, Alert,
   ActivityIndicator, StyleSheet, KeyboardAvoidingView, Platform,
@@ -21,17 +21,53 @@ import {
 
 import apiClient from '../../api/client';
 import { confirm } from '../../components/ConfirmDialog';
+// Institution Home visual system — ambient blue wash + glass
+// cards + navy accents. Reused verbatim so this screen belongs to
+// the same design language as the rest of the institution UI.
+import InstitutionScreenBackground, {
+  INSTITUTION_BG_BASE,
+} from '../../components/InstitutionScreenBackground';
+import { useTheme } from '../../theme/ThemeContext';
+
+// ── Institution-Home glass tokens ─────────────────────────────
+const GLASS_FILL         = 'rgba(255,255,255,0.72)';
+const GLASS_FILL_STRONG  = 'rgba(255,255,255,0.88)';
+const GLASS_BORDER_LIGHT = 'rgba(255,255,255,0.55)';
+const GLASS_HIGHLIGHT    = 'rgba(255,255,255,0.9)';
+const GLASS_SHADOW       = '#1E40AF';
+const BRAND_DARK_BLUE    = '#1E3A8A';
+const BRAND_ACCENT_SOFT  = 'rgba(30,58,138,0.10)';
+const HEADER_NAVY        = '#0F172A';
 
 // ─── Theme tokens ──────────────────────────────────────────────────────
+// Names kept unchanged so every existing card / border / text
+// style inherits the Institution Home look automatically.
 const BRAND = '#E63946';
 const BRAND_SOFT = '#FFE4E6';
-const TEXT = '#111827';
+const TEXT = HEADER_NAVY;
 const TEXT_MUTED = '#6B7280';
 const TEXT_LIGHT = '#9CA3AF';
-const SURFACE = '#FFFFFF';
-const BG = '#F4F4F8';
-const BORDER = '#E5E7EB';
+const SURFACE = GLASS_FILL_STRONG;
+const BG = INSTITUTION_BG_BASE;
+const BORDER = GLASS_BORDER_LIGHT;
 const GREEN = '#10B981';
+
+// Local context so nested sub-components pick up dark-mode
+// overrides without prop-drilling.
+const SendAnnouncementCtx = createContext({ isDark: false, dark: {} });
+
+function buildDarkOverrides(pal) {
+  return StyleSheet.create({
+    screen:      { backgroundColor: pal.bg },
+    header:      { backgroundColor: pal.surface, borderBottomColor: pal.border },
+    headerTitle: { color: pal.text },
+    headerSub:   { color: pal.textMuted },
+    iconBtn:     { backgroundColor: pal.border },
+    card:        { backgroundColor: pal.surface, borderColor: pal.border },
+    sectionTitle:{ color: pal.textMuted },
+    label:       { color: pal.textMuted },
+  });
+}
 
 const AUDIENCES = [
   { key: 'students', label: 'Students', icon: Users,         sub: 'All enrolled' },
@@ -143,23 +179,32 @@ export default function SendAnnouncementScreen({ navigation }) {
   };
 
   // ── Compose screen ───────────────────────────────────────────────────
+  // Dark-mode overrides pulled from the shared ThemeContext.
+  // Institution Home's ambient background is skipped in dark mode.
+  const { mode, palette: themePalette } = useTheme();
+  const isDark = mode === 'dark';
+  const dark   = useMemo(() => (isDark ? buildDarkOverrides(themePalette) : {}), [isDark, themePalette]);
+
   return (
+    <SendAnnouncementCtx.Provider value={{ isDark, dark }}>
     <KeyboardAvoidingView
-      style={styles.screen}
+      style={[styles.screen, isDark && dark.screen]}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      <View style={styles.header}>
+      {/* Institution Home ambient wash. */}
+      {!isDark ? <InstitutionScreenBackground layer /> : null}
+      <View style={[styles.header, isDark && dark.header]}>
         <TouchableOpacity
           onPress={() => navigation.goBack()}
-          style={styles.iconBtn}
+          style={[styles.iconBtn, isDark && dark.iconBtn]}
           activeOpacity={0.7}
           disabled={sending}
         >
-          <ArrowLeft size={20} color={TEXT} strokeWidth={2.2} />
+          <ArrowLeft size={20} color={isDark ? themePalette.text : TEXT} strokeWidth={2.2} />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
-          <Text style={styles.headerTitle}>Send Announcement</Text>
-          <Text style={styles.headerSub}>Compose a broadcast for your academy</Text>
+          <Text style={[styles.headerTitle, isDark && dark.headerTitle]}>Send Announcement</Text>
+          <Text style={[styles.headerSub, isDark && dark.headerSub]}>Compose a broadcast for your academy</Text>
         </View>
         {/* Sent-history shortcut — lets the admin audit what they've
             dispatched without leaving the announcement flow. */}
@@ -301,6 +346,7 @@ export default function SendAnnouncementScreen({ navigation }) {
         </TouchableOpacity>
       </View>
     </KeyboardAvoidingView>
+    </SendAnnouncementCtx.Provider>
   );
 }
 
@@ -313,19 +359,27 @@ function SectionTitle({ text }) {
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: BG },
 
+  // Header — glass slab with a navy title and soft blue lift
+  // shadow. Matches every other Institution Home surface.
   header: {
     flexDirection: 'row', alignItems: 'center', gap: 10,
     paddingHorizontal: 16, paddingTop: 44, paddingBottom: 12,
-    backgroundColor: SURFACE,
-    borderBottomWidth: 1, borderBottomColor: BORDER,
+    backgroundColor: GLASS_FILL_STRONG,
+    borderBottomWidth: 1, borderBottomColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
   },
   iconBtn: {
     width: 36, height: 36, borderRadius: 18,
-    backgroundColor: BG,
+    backgroundColor: BRAND_ACCENT_SOFT,
     alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
   },
-  headerTitle: { fontSize: 17, fontWeight: '800', color: TEXT },
-  headerSub: { fontSize: 11, color: TEXT_MUTED, marginTop: 2, fontWeight: '600' },
+  headerTitle: { fontSize: 17, fontWeight: '800', color: HEADER_NAVY, letterSpacing: 0.2 },
+  headerSub:   { fontSize: 11, color: TEXT_MUTED, marginTop: 2, fontWeight: '600' },
   historyBtn: {
     paddingHorizontal: 12,
     paddingVertical: 6,

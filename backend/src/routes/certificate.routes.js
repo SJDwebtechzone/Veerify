@@ -9,6 +9,9 @@ router.get('/verify/:token', ctrl.verify);
 
 // Authed reads.
 router.get('/my',                    verifyToken, requireRole('student'), ctrl.listMy);
+// Institution → Dispatched Certificates. MUST sit above the '/:id'
+// catch-all or Express would treat 'institution' as an id.
+router.get('/institution',           verifyToken, requireRole('admin'),   ctrl.listInstitution);
 router.get('/student/:studentId',    verifyToken, ctrl.listForStudent);
 router.get('/:id',                   verifyToken, ctrl.getById);
 

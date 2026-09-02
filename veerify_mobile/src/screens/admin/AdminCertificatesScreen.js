@@ -24,12 +24,22 @@ import { useFocusEffect } from '@react-navigation/native';
 import {
   ArrowLeft, Award, ShieldCheck, BookOpen, Calendar,
   User, MessageSquare, Send, Trophy, X as XIcon, Eye, FileCheck2,
+  ChevronRight, Archive,
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 import { confirm } from '../../components/ConfirmDialog';
 import resolveAssetUrl from '../../utils/assetUrl';
+// Display-only: strip trailing " Belt" from belt pins so the
+// preview matches the certificate ("Black" not "Black Belt").
+import { stripBeltSuffix } from '../../utils/beltDisplay';
+
+const BELT_PIN_KEYS = new Set(['belt_name', 'belt_from', 'belt_to']);
+// Shared Institution ambient background — light-blue wash + soft
+// glow blobs. Sits behind the header + scrollable list so the
+// screen never looks like a flat white block below the last card.
+import InstitutionScreenBackground from '../../components/InstitutionScreenBackground';
 
 function fmtDate(iso) {
   if (!iso) return '—';
@@ -125,7 +135,16 @@ export default function AdminCertificatesScreen({ navigation }) {
         `/belt-promotion-requests/${notifyModal.id}/notify-trainer`,
         { remarks },
       );
-      setPromoRequests((prev) => prev.filter((r) => r.id !== notifyModal.id));
+      // MODULE FIX — instead of dropping the row (old behaviour), flip
+      // it in place to 'sent_for_recheck' so the admin immediately
+      // sees the "Sent for Recheck" ribbon + passive footer. Backend
+      // listInstitution keeps the row visible on the next full reload,
+      // so this in-memory update just avoids the flash-of-empty.
+      setPromoRequests((prev) => prev.map((r) => (
+        r.id === notifyModal.id
+          ? { ...r, status: 'sent_for_recheck', institution_remarks: remarks }
+          : r
+      )));
       setNotifyModal(null);
       setNotifyRemarks('');
       setTimeout(() => confirm({
@@ -249,29 +268,64 @@ export default function AdminCertificatesScreen({ navigation }) {
 
   return (
     <View style={styles.screen}>
+      {/* Ambient light-blue background + soft glow blobs. Painted
+          absolutely behind everything so the header and scroll list
+          both sit on the same premium blue backdrop — no more flat
+          white area under the last card. */}
+      <InstitutionScreenBackground layer />
       <View style={styles.header}>
-        <TouchableOpacity
-          onPress={() => navigation.goBack()}
-          style={styles.iconBtn}
-          hitSlop={8}
-          activeOpacity={0.85}
-        >
-          <ArrowLeft size={20} color={'#111827'} strokeWidth={2.4} />
-        </TouchableOpacity>
-        <View style={{ flex: 1 }}>
+        <View style={styles.headerTopRow}>
+          <TouchableOpacity
+            onPress={() => navigation.goBack()}
+            style={styles.iconBtn}
+            hitSlop={8}
+            activeOpacity={0.85}
+          >
+            <ArrowLeft size={20} color={'#0F172A'} strokeWidth={2.4} />
+          </TouchableOpacity>
           <Text style={styles.title}>Certificates</Text>
-          <Text style={styles.subtitle}>
-            {promoRequests.length > 0
-              ? `${promoRequests.length} belt request${promoRequests.length === 1 ? '' : 's'} · ${rows.length} awaiting certificate`
-              : rows.length === 0
-                ? 'Nothing pending'
-                : `${rows.length} awaiting certificate`}
-          </Text>
         </View>
-        <View style={styles.headerBadge}>
-          <Award size={13} color="#B45309" strokeWidth={2.4} />
-          <Text style={styles.headerBadgeText}>{rows.length + promoRequests.length}</Text>
+        {/* Compact summary strip with coloured status dots — one
+            for pending belt requests, one for awaiting certificates.
+            Reads more scannable than a long subtitle. */}
+        <View style={styles.summaryStrip}>
+          <View style={styles.summaryItem}>
+            <View style={[styles.summaryDot, { backgroundColor: '#F59E0B' }]} />
+            <Text style={styles.summaryText}>
+              {promoRequests.length} Belt Request{promoRequests.length === 1 ? '' : 's'}
+            </Text>
+          </View>
+          <Text style={styles.summarySep}>•</Text>
+          <View style={styles.summaryItem}>
+            <View style={[styles.summaryDot, { backgroundColor: '#10B981' }]} />
+            <Text style={styles.summaryText}>
+              {rows.length} Awaiting Certificate
+            </Text>
+          </View>
         </View>
+      </View>
+
+      {/* Dispatched Certificates entry — always visible so admins can
+          browse the archive even when the inbox is empty. Opens the
+          full list with previews; tapping a card renders the exact
+          artwork the student received. */}
+      <View style={styles.archiveWrap}>
+        <TouchableOpacity
+          onPress={() => navigation.navigate('AdminDispatchedCertificates')}
+          activeOpacity={0.85}
+          style={styles.archiveTile}
+        >
+          <View style={styles.archiveIcon}>
+            <Archive size={18} color="#1E3A8A" strokeWidth={2.4} />
+          </View>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={styles.archiveTitle}>Dispatched Certificates</Text>
+            <Text style={styles.archiveSub} numberOfLines={1}>
+              View every certificate your academy has issued
+            </Text>
+          </View>
+          <ChevronRight size={18} color="#1E3A8A" strokeWidth={2.4} />
+        </TouchableOpacity>
       </View>
 
       {loading && promoLoading ? (
@@ -288,7 +342,7 @@ export default function AdminCertificatesScreen({ navigation }) {
         </View>
       ) : (
         <ScrollView
-          contentContainerStyle={{ padding: spacing.lg, paddingBottom: 120 }}
+          contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing.xxl }}
           refreshControl={
             <RefreshControl
               refreshing={refreshing}
@@ -455,7 +509,7 @@ function PreviewModal({
           </View>
         </View>
 
-        <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: 120 }}>
+        <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing.xxl }}>
           {/* Template picker chips */}
           {templates.length > 1 ? (
             <ScrollView
@@ -525,7 +579,14 @@ function PreviewModal({
                     />
                   );
                 }
-                const est = Math.max(60, String(pin.value || pin.label).length * (pin.font_size || 16) * 0.55);
+                // Belt pins render short-form on the certificate
+                // preview so what the admin sees matches what the
+                // student will get.
+                const rawValue = String(pin.value || '');
+                const displayValue = BELT_PIN_KEYS.has(pin.key)
+                  ? stripBeltSuffix(rawValue)
+                  : rawValue;
+                const est = Math.max(60, (displayValue || pin.label).length * (pin.font_size || 16) * 0.55);
                 return (
                   <View
                     key={i}
@@ -543,7 +604,7 @@ function PreviewModal({
                       fontStyle: pin.italic ? 'italic' : 'normal',
                       textAlign: pin.align || 'center',
                     }}>
-                      {String(pin.value || '')}
+                      {displayValue}
                     </Text>
                   </View>
                 );
@@ -598,20 +659,49 @@ function PreviewModal({
   );
 }
 
+// Map common belt names to their canonical swatch colour so the
+// badge feels informational at a glance. Unknown / freeform labels
+// fall back to a neutral slate.
+function beltColor(label) {
+  const s = String(label || '').toLowerCase();
+  if (s.includes('white'))  return '#F9FAFB';
+  if (s.includes('yellow')) return '#FACC15';
+  if (s.includes('orange')) return '#F97316';
+  if (s.includes('green'))  return '#22C55E';
+  if (s.includes('blue'))   return '#3B82F6';
+  if (s.includes('purple') || s.includes('violet')) return '#8B5CF6';
+  if (s.includes('brown'))  return '#92400E';
+  if (s.includes('red'))    return '#EF4444';
+  if (s.includes('black'))  return '#111827';
+  return '#94A3B8';
+}
+
 // ─── Belt Promotion Request card ───────────────────────────────────
 function PromotionRequestCard({ request, acting, onNotify, onApprove }) {
   const att = request.attendance_summary || {};
   const percent = Number.isFinite(Number(att.percent)) ? Number(att.percent) : 0;
+  // MODULE FIX — a request the institution has already sent back to
+  // the trainer stays on this screen, but reads as an informational
+  // stub: no Approve / Notify actions, a purple "Sent for Recheck"
+  // ribbon, and the trainer remarks + belt transition kept visible
+  // so the admin can see the state they left the request in.
+  const isRecheck = request.status === 'sent_for_recheck';
   return (
-    <View style={[styles.card, { borderColor: palette.purple.soft, borderWidth: 1 }]}>
-      <View style={[styles.ribbon, { backgroundColor: palette.purple.soft }]}>
-        <Award size={12} color={palette.purple.on} strokeWidth={2.6} />
-        <Text style={[styles.ribbonText, { color: palette.purple.on }]}>Belt Promotion Request</Text>
+    <View style={styles.card}>
+      <View style={[styles.ribbon, isRecheck && styles.ribbonRecheck]}>
+        <Award
+          size={12}
+          color={isRecheck ? '#6D28D9' : '#1E3A8A'}
+          strokeWidth={2.6}
+        />
+        <Text style={[styles.ribbonText, isRecheck && styles.ribbonTextRecheck]}>
+          {isRecheck ? 'Sent for Recheck' : 'Belt Promotion Request'}
+        </Text>
       </View>
 
       <View style={styles.cardHeader}>
         <View style={styles.avatar}>
-          <User size={18} color={palette.purple.vivid} strokeWidth={2.4} />
+          <User size={18} color={'#1E3A8A'} strokeWidth={2.4} />
         </View>
         <View style={{ flex: 1 }}>
           <Text style={styles.studentName} numberOfLines={1}>
@@ -624,17 +714,27 @@ function PromotionRequestCard({ request, acting, onNotify, onApprove }) {
         </View>
       </View>
 
-      {/* Belt transition line — current → requested */}
+      {/* Belt transition + attendance — three glass mini-cells.
+          Current + Requested render as coloured belt badges so the
+          organiser can compare at a glance instead of reading text. */}
       <View style={styles.metaRow}>
         <View style={styles.metaItem}>
           <Text style={styles.metaLabel}>Current</Text>
-          <Text style={styles.metaValue}>{request.current_belt || '—'}</Text>
+          <View style={styles.beltBadge}>
+            <View style={[styles.beltDot, { backgroundColor: beltColor(request.current_belt) }]} />
+            <Text style={styles.beltBadgeText} numberOfLines={1}>
+              {request.current_belt || '—'}
+            </Text>
+          </View>
         </View>
         <View style={styles.metaItem}>
           <Text style={styles.metaLabel}>Requested</Text>
-          <Text style={[styles.metaValue, { color: palette.purple.vivid }]}>
-            {request.requested_belt || '—'}
-          </Text>
+          <View style={styles.beltBadge}>
+            <View style={[styles.beltDot, { backgroundColor: beltColor(request.requested_belt) }]} />
+            <Text style={styles.beltBadgeText} numberOfLines={1}>
+              {request.requested_belt || '—'}
+            </Text>
+          </View>
         </View>
         <View style={styles.metaItem}>
           <Text style={styles.metaLabel}>Attendance</Text>
@@ -643,38 +743,50 @@ function PromotionRequestCard({ request, acting, onNotify, onApprove }) {
       </View>
 
       {request.trainer_remarks ? (
-        <View style={styles.remarksBox}>
-          <Text style={styles.remarksLabel}>Trainer Remarks</Text>
-          <Text style={styles.remarksText}>{request.trainer_remarks}</Text>
+        <View style={styles.promoRemarksBox}>
+          <Text style={styles.promoRemarksLabel}>Trainer Remarks</Text>
+          <Text style={styles.promoRemarksText}>{request.trainer_remarks}</Text>
         </View>
       ) : null}
 
-      <View style={styles.actionRow}>
-        <TouchableOpacity
-          onPress={onNotify}
-          disabled={acting}
-          style={[styles.ghostBtn, acting && { opacity: 0.6 }]}
-          activeOpacity={0.85}
-        >
-          <MessageSquare size={14} color={palette.purple.vivid} strokeWidth={2.4} />
-          <Text style={styles.ghostBtnText}>Notify Trainer</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          onPress={onApprove}
-          disabled={acting}
-          style={[styles.sendBtn, acting && { opacity: 0.6 }]}
-          activeOpacity={0.85}
-        >
-          {acting
-            ? <ActivityIndicator color="#fff" size="small" />
-            : (
-              <>
-                <Send size={14} color="#fff" strokeWidth={2.4} />
-                <Text style={styles.sendBtnText}>Send Certificate</Text>
-              </>
-            )}
-        </TouchableOpacity>
-      </View>
+      {isRecheck ? (
+        // Passive status footer — no actions. The trainer owns the
+        // next move (resubmit); the institution row exists purely as
+        // an audit trail of what they sent back.
+        <View style={styles.recheckFooter}>
+          <MessageSquare size={12} color={'#6D28D9'} strokeWidth={2.4} />
+          <Text style={styles.recheckFooterText} numberOfLines={2}>
+            Waiting for the trainer to review and resubmit.
+          </Text>
+        </View>
+      ) : (
+        <View style={styles.actionRow}>
+          <TouchableOpacity
+            onPress={onNotify}
+            disabled={acting}
+            style={[styles.ghostBtn, acting && { opacity: 0.6 }]}
+            activeOpacity={0.85}
+          >
+            <MessageSquare size={14} color={'#1E3A8A'} strokeWidth={2.4} />
+            <Text style={styles.ghostBtnText}>Notify Trainer</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={onApprove}
+            disabled={acting}
+            style={[styles.sendBtn, acting && { opacity: 0.6 }]}
+            activeOpacity={0.85}
+          >
+            {acting
+              ? <ActivityIndicator color="#fff" size="small" />
+              : (
+                <>
+                  <Send size={14} color="#fff" strokeWidth={2.4} />
+                  <Text style={styles.sendBtnText}>Send Certificate</Text>
+                </>
+              )}
+          </TouchableOpacity>
+        </View>
+      )}
     </View>
   );
 }
@@ -723,7 +835,7 @@ function AwaitingCard({ row, sending, onSend }) {
         <ReadOnlyField
           icon={Award}
           label="Belt"
-          value={row.belt_name || row.batch_name || '—'}
+          value={stripBeltSuffix(row.belt_name) || row.batch_name || '—'}
         />
       </View>
 
@@ -773,32 +885,73 @@ function ReadOnlyField({ icon: Icon, label, value }) {
 
 // ─── Styles ─────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  screen:   { flex: 1, backgroundColor: palette.bg },
+  // Light-blue ambient base matching the Institution glass system.
+  screen:   { flex: 1, backgroundColor: '#F1F6FB' },
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center' },
 
+  // Compact premium header — back + title on the top row, summary
+  // strip with status dots underneath.
   header: {
-    flexDirection: 'row', alignItems: 'center',
     paddingHorizontal: spacing.lg,
     paddingTop: spacing.xxl,
     paddingBottom: spacing.md,
-    backgroundColor: palette.surface,
-    ...shadows.card,
-    gap: spacing.md,
+    backgroundColor: '#FFFFFF',
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(148,163,184,0.18)',
+  },
+  headerTopRow: {
+    flexDirection: 'row', alignItems: 'center', gap: spacing.md,
   },
   iconBtn: {
     width: 36, height: 36, borderRadius: 18,
     alignItems: 'center', justifyContent: 'center',
-    backgroundColor: palette.borderSoft,
+    backgroundColor: '#EEF2F7',
   },
-  title:    { ...type.h1, color: palette.text, fontSize: 18 },
-  subtitle: { ...type.caption, color: palette.textMuted, marginTop: 1 },
-  headerBadge: {
-    flexDirection: 'row', alignItems: 'center', gap: 4,
-    paddingHorizontal: 10, paddingVertical: 5,
-    borderRadius: radius.pill,
-    backgroundColor: '#FEF3C7',
+  title:    { ...type.h1, color: '#0F172A', fontSize: 18 },
+  summaryStrip: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    marginTop: 10, paddingLeft: 48,
   },
-  headerBadgeText: { ...type.micro, color: '#B45309', fontWeight: '800' },
+  summaryItem: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+  },
+  summaryDot: { width: 8, height: 8, borderRadius: 4 },
+  summaryText: { fontSize: 12, color: '#334155', fontWeight: '700' },
+  summarySep:  { color: '#CBD5E1', fontSize: 12 },
+
+  // Dispatched Certificates entry — full-width glass tile with the
+  // brand dark-blue accent to match Certificates → Belt Promotion
+  // Requests actions. Sits right under the header so admins can
+  // reach the archive with a single tap.
+  archiveWrap: {
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.md,
+  },
+  archiveTile: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    backgroundColor: 'rgba(255,255,255,0.92)',
+    borderRadius: radius.xl,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 14,
+    borderWidth: 1, borderColor: 'rgba(30,58,138,0.14)',
+    shadowColor: '#1E40AF',
+    shadowOpacity: 0.10,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
+  },
+  archiveIcon: {
+    width: 36, height: 36, borderRadius: 18,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(30,58,138,0.10)',
+  },
+  archiveTitle: {
+    fontSize: 14, fontWeight: '800', color: '#0F172A',
+    letterSpacing: 0.2,
+  },
+  archiveSub: {
+    fontSize: 12, color: '#475569', marginTop: 2,
+  },
 
   emptyCard: {
     marginHorizontal: spacing.lg, marginTop: spacing.xl,
@@ -820,44 +973,77 @@ const styles = StyleSheet.create({
   },
 
   // Belt promotion — meta row (current / requested / attendance).
+  // Three equal glassy cells inside the outer glass card. Each cell
+  // has a subtle border so it feels like a mini-panel rather than
+  // three unrelated columns.
   metaRow: {
-    flexDirection: 'row', gap: spacing.md,
-    marginTop: spacing.md,
-    paddingHorizontal: spacing.sm,
-  },
-  metaItem: { flex: 1, minWidth: 0 },
-  metaLabel: {
-    fontSize: 10, color: palette.textLight, fontWeight: '800',
-    textTransform: 'uppercase', letterSpacing: 0.4,
-  },
-  metaValue: {
-    fontSize: 13, color: palette.text, fontWeight: '700', marginTop: 2,
-  },
-  remarksBox: {
-    marginTop: spacing.md,
-    padding: spacing.sm,
-    borderRadius: radius.md,
-    backgroundColor: palette.bg,
-  },
-  remarksLabel: {
-    fontSize: 10, color: palette.textLight, fontWeight: '800',
-    textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 4,
-  },
-  remarksText: { fontSize: 12, color: palette.text, lineHeight: 18 },
-  actionRow: {
     flexDirection: 'row', gap: spacing.sm,
     marginTop: spacing.md,
   },
+  metaItem: {
+    flex: 1, minWidth: 0,
+    backgroundColor: 'rgba(241,246,251,0.9)',
+    borderWidth: 1, borderColor: 'rgba(148,163,184,0.22)',
+    borderRadius: radius.md,
+    paddingHorizontal: 10, paddingVertical: 10,
+  },
+  metaLabel: {
+    fontSize: 10, color: '#64748B', fontWeight: '800',
+    textTransform: 'uppercase', letterSpacing: 0.4,
+  },
+  metaValue: {
+    fontSize: 13, color: '#0F172A', fontWeight: '700', marginTop: 6,
+  },
+  // Belt badge — coloured dot + label. Reads better than plain
+  // text and matches the belt palette used elsewhere.
+  beltBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    marginTop: 6,
+  },
+  beltDot: {
+    width: 14, height: 14, borderRadius: 7,
+    borderWidth: 1.5, borderColor: 'rgba(15,23,42,0.18)',
+  },
+  beltBadgeText: {
+    fontSize: 14, color: '#0F172A', fontWeight: '800',
+    letterSpacing: 0.2,
+  },
+  // Promo-card remarks box. Named with a `promo` prefix to avoid
+  // colliding with the AwaitingCard's amber `remarksBox` further
+  // down — StyleSheet.create merges keys and the later definition
+  // used to silently win, killing this card's marginTop and causing
+  // the Trainer Remarks pane to collide with the meta row above.
+  promoRemarksBox: {
+    marginTop: spacing.lg,
+    padding: spacing.md,
+    borderRadius: radius.md,
+    backgroundColor: palette.bg,
+    borderWidth: 1,
+    borderColor: 'rgba(148,163,184,0.22)',
+  },
+  promoRemarksLabel: {
+    fontSize: 10, color: palette.textLight, fontWeight: '800',
+    textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 6,
+  },
+  promoRemarksText: { fontSize: 12, color: palette.text, lineHeight: 18 },
+  actionRow: {
+    flexDirection: 'row', gap: spacing.sm,
+    marginTop: spacing.lg,
+  },
+  // Notify Trainer — secondary outlined button. White surface,
+  // dark-blue border + label. Sits alongside the primary action
+  // without stealing attention.
   ghostBtn: {
     flex: 1,
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
     gap: 6,
-    paddingVertical: 10, paddingHorizontal: 12,
+    height: 44,
+    paddingHorizontal: 12,
     borderRadius: radius.md,
-    backgroundColor: palette.purple.soft,
-    borderWidth: 1, borderColor: palette.purple.soft,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1.5, borderColor: '#1E3A8A',
   },
-  ghostBtnText: { color: palette.purple.on, fontWeight: '800', fontSize: 12 },
+  ghostBtnText: { color: '#1E3A8A', fontWeight: '800', fontSize: 13 },
 
   // Notify Trainer modal
   notifyOverlay: {
@@ -913,32 +1099,63 @@ const styles = StyleSheet.create({
   },
   notifySubmitText: { color: '#fff', fontWeight: '800', fontSize: 13 },
 
+  // Premium frosted-glass card matching the Institution Home
+  // language: translucent white surface, glossy top-edge highlight,
+  // cool cobalt-blue drop-shadow that reads as glass caught in
+  // ambient light. Radius bumped so the corners feel more premium.
   card: {
-    backgroundColor: palette.surface,
-    borderRadius: radius.lg,
-    padding: spacing.lg,
+    backgroundColor: 'rgba(255,255,255,0.85)',
+    borderTopWidth: 1.5,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderLeftWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.95)',
+    borderRightColor: 'rgba(255,255,255,0.6)',
+    borderBottomColor: 'rgba(255,255,255,0.6)',
+    borderLeftColor: 'rgba(255,255,255,0.6)',
+    borderRadius: radius.xl,
+    padding: spacing.xl,
     marginBottom: spacing.md,
-    ...shadows.card,
+    shadowColor: '#1E40AF',
+    shadowOpacity: 0.12,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 5,
   },
   ribbon: {
     flexDirection: 'row', alignItems: 'center', gap: 5,
     alignSelf: 'flex-start',
     paddingHorizontal: 10, paddingVertical: 4,
     borderRadius: radius.pill,
-    backgroundColor: palette.blue.soft,
+    backgroundColor: '#E0E7FF',
     marginBottom: spacing.md,
   },
-  ribbonText: { ...type.micro, color: palette.blue.on, fontWeight: '800', letterSpacing: 0.4 },
+  ribbonText: { ...type.micro, color: '#1E3A8A', fontWeight: '800', letterSpacing: 0.4 },
+  // "Sent for Recheck" chip + passive footer — purple so admins can
+  // tell recheck rows apart from actionable pending ones at a glance.
+  ribbonRecheck:     { backgroundColor: '#EDE9FE' },
+  ribbonTextRecheck: { color: '#6D28D9' },
+  recheckFooter: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    marginTop: spacing.md,
+    paddingHorizontal: spacing.md, paddingVertical: 10,
+    borderRadius: radius.md,
+    backgroundColor: '#F5F3FF',
+    borderWidth: 1, borderColor: '#DDD6FE',
+  },
+  recheckFooterText: {
+    fontSize: 12, color: '#5B21B6', fontWeight: '700', flex: 1,
+  },
   cardHeader: {
-    flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
+    flexDirection: 'row', alignItems: 'center', gap: spacing.md,
     marginBottom: spacing.md,
   },
   avatar: {
-    width: 40, height: 40, borderRadius: 20,
-    backgroundColor: palette.purple.soft,
+    width: 44, height: 44, borderRadius: 22,
+    backgroundColor: '#E0E7FF',
     alignItems: 'center', justifyContent: 'center',
   },
-  studentName: { ...type.bodyBold, color: palette.text, fontSize: 15 },
+  studentName: { ...type.bodyBold, color: '#0F172A', fontSize: 16, fontWeight: '800' },
   courseRow:   { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 },
   courseName:  { ...type.caption, color: palette.textMuted, fontWeight: '700', flexShrink: 1 },
   trainerLine: { ...type.micro, color: palette.textLight, fontWeight: '600', marginTop: 2 },
@@ -983,13 +1200,20 @@ const styles = StyleSheet.create({
     fontWeight: '600', lineHeight: 18,
   },
 
+  // Send Certificate — primary action. Dark Veerify blue matches
+  // the app's primary CTA colour; no more alarming red for a
+  // routine approval action. Same height as the ghost button so
+  // the pair reads as a matched set.
   sendBtn: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
-    backgroundColor: '#E63946',
-    paddingVertical: spacing.md,
+    flex: 1,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 6,
+    height: 44,
+    paddingHorizontal: 12,
     borderRadius: radius.md,
+    backgroundColor: '#1E3A8A',
   },
   sendBtnText: {
-    color: '#fff', fontSize: 14, fontWeight: '800', letterSpacing: 0.3,
+    color: '#fff', fontSize: 13, fontWeight: '800', letterSpacing: 0.3,
   },
 });

@@ -3,7 +3,7 @@
 // Read-only settings page showing Commission Settings, Settlement explanation,
 // and a live calculator preview. Hits GET /api/marketplace-settings.
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { createContext, useState, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -22,6 +22,38 @@ import {
 } from 'lucide-react-native';
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
+// Institution Home visual system — ambient blue wash + glass
+// cards + navy accents. Reused verbatim so this screen belongs to
+// the same design language as the rest of the institution UI.
+import InstitutionScreenBackground, {
+  INSTITUTION_BG_BASE,
+} from '../../components/InstitutionScreenBackground';
+import { useTheme } from '../../theme/ThemeContext';
+
+// ── Institution-Home glass tokens ─────────────────────────────
+const GLASS_FILL         = 'rgba(255,255,255,0.72)';
+const GLASS_FILL_STRONG  = 'rgba(255,255,255,0.88)';
+const GLASS_BORDER_LIGHT = 'rgba(255,255,255,0.55)';
+const GLASS_HIGHLIGHT    = 'rgba(255,255,255,0.9)';
+const GLASS_SHADOW       = '#1E40AF';
+const BRAND_DARK_BLUE    = '#1E3A8A';
+const BRAND_ACCENT_SOFT  = 'rgba(30,58,138,0.10)';
+const HEADER_NAVY        = '#0F172A';
+
+// Local context so nested sub-components pick up dark-mode
+// overrides without prop-drilling.
+const SettingsCtx = createContext({ isDark: false, dark: {} });
+
+function buildDarkOverrides(pal) {
+  return StyleSheet.create({
+    screen:      { backgroundColor: pal.bg },
+    card:        { backgroundColor: pal.surface, borderColor: pal.border },
+    cardTitle:   { color: pal.text },
+    fieldLabel:  { color: pal.textMuted },
+    fieldValue:  { color: pal.text },
+    errorText:   { color: pal.textMuted },
+  });
+}
 
 const GATEWAY_PERCENT = 2; // Fixed for calculator preview
 
@@ -56,26 +88,42 @@ export default function SettingsScreen() {
     return { amount, commissionFee, earnings };
   }, [calcAmount, settings]);
 
+  // Dark-mode overrides pulled from the shared ThemeContext.
+  // Institution Home's ambient background is skipped in dark mode.
+  const { mode, palette: themePalette } = useTheme();
+  const isDark = mode === 'dark';
+  const dark   = useMemo(() => (isDark ? buildDarkOverrides(themePalette) : {}), [isDark, themePalette]);
+
   if (loading) {
     return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" color={palette.purple.vivid} />
+      <SettingsCtx.Provider value={{ isDark, dark }}>
+      <View style={[styles.center, isDark && dark.screen]}>
+        {!isDark ? <InstitutionScreenBackground layer /> : null}
+        <ActivityIndicator size="large" color={BRAND_DARK_BLUE} />
         <Text style={styles.loadingText}>Loading settings...</Text>
       </View>
+      </SettingsCtx.Provider>
     );
   }
 
   if (error || !settings) {
     return (
-      <View style={styles.center}>
-        <Text style={styles.errorText}>{error || 'Settings not available.'}</Text>
+      <SettingsCtx.Provider value={{ isDark, dark }}>
+      <View style={[styles.center, isDark && dark.screen]}>
+        {!isDark ? <InstitutionScreenBackground layer /> : null}
+        <Text style={[styles.errorText, isDark && dark.errorText]}>{error || 'Settings not available.'}</Text>
       </View>
+      </SettingsCtx.Provider>
     );
   }
 
   return (
+    <SettingsCtx.Provider value={{ isDark, dark }}>
+    <View style={[styles.screen, isDark && dark.screen]}>
+      {/* Institution Home ambient wash — sits behind all content. */}
+      {!isDark ? <InstitutionScreenBackground layer /> : null}
     <ScrollView
-      style={styles.screen}
+      style={{ flex: 1 }}
       contentContainerStyle={styles.scrollContent}
       keyboardShouldPersistTaps="handled"
       showsVerticalScrollIndicator={false}
@@ -200,6 +248,8 @@ export default function SettingsScreen() {
 
       <View style={{ height: 40 }} />
     </ScrollView>
+    </View>
+    </SettingsCtx.Provider>
   );
 }
 
@@ -215,9 +265,10 @@ function Step({ num, text }) {
 }
 
 const styles = StyleSheet.create({
+  // Institution Home ambient page base — the wash SVG paints on top.
   screen: {
     flex: 1,
-    backgroundColor: palette.bg,
+    backgroundColor: INSTITUTION_BG_BASE,
   },
   scrollContent: {
     padding: spacing.lg,
@@ -226,7 +277,7 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: palette.bg,
+    backgroundColor: INSTITUTION_BG_BASE,
     padding: spacing.xxl,
   },
   loadingText: {
@@ -240,13 +291,20 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
 
-  // Cards
+  // Cards — translucent glass fill + light glass border + soft blue
+  // lift shadow so each card reads as a glass panel on the
+  // Institution Home ambient wash.
   card: {
-    backgroundColor: palette.surface,
-    borderRadius: radius.lg,
+    backgroundColor: GLASS_FILL_STRONG,
+    borderRadius: 16,
     padding: spacing.lg,
     marginBottom: spacing.lg,
-    ...shadows.card,
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
   },
   cardHeader: {
     flexDirection: 'row',

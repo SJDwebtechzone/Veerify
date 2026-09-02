@@ -21,7 +21,7 @@
 //   markers so the answer stays readable without needing an HTML
 //   engine.
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, ActivityIndicator, TextInput,
   StyleSheet, RefreshControl, LayoutAnimation, UIManager, Platform,
@@ -32,6 +32,42 @@ import {
 
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
+// Institution Home visual system — ambient blue wash + glass
+// cards + navy accents. Reused verbatim so this screen belongs to
+// the same design language as the rest of the institution UI.
+import InstitutionScreenBackground, {
+  INSTITUTION_BG_BASE,
+} from '../../components/InstitutionScreenBackground';
+import { useTheme } from '../../theme/ThemeContext';
+
+// ── Institution-Home glass tokens ─────────────────────────────
+const GLASS_FILL         = 'rgba(255,255,255,0.72)';
+const GLASS_FILL_STRONG  = 'rgba(255,255,255,0.88)';
+const GLASS_BORDER_LIGHT = 'rgba(255,255,255,0.55)';
+const GLASS_HIGHLIGHT    = 'rgba(255,255,255,0.9)';
+const GLASS_SHADOW       = '#1E40AF';
+const BRAND_DARK_BLUE    = '#1E3A8A';
+const BRAND_ACCENT_SOFT  = 'rgba(30,58,138,0.10)';
+const HEADER_NAVY        = '#0F172A';
+
+// Local context so nested sub-components pick up dark-mode
+// overrides without prop-drilling.
+const FaqCtx = createContext({ isDark: false, dark: {} });
+
+function buildDarkOverrides(pal) {
+  return StyleSheet.create({
+    screen:      { backgroundColor: pal.bg },
+    header:      { backgroundColor: pal.surface, borderBottomColor: pal.border },
+    headerTitle: { color: pal.text },
+    headerSub:   { color: pal.textMuted },
+    iconBtn:     { backgroundColor: pal.border },
+    card:        { backgroundColor: pal.surface, borderColor: pal.border },
+    faqCard:     { backgroundColor: pal.surface, borderColor: pal.border },
+    sectionTitle:{ color: pal.textMuted },
+    searchWrap:  { backgroundColor: pal.surface, borderColor: pal.border },
+    searchInput: { color: pal.text },
+  });
+}
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -141,18 +177,27 @@ export default function FaqScreen({ navigation }) {
     });
   };
 
+  // Dark-mode overrides pulled from the shared ThemeContext.
+  // Institution Home's ambient background is skipped in dark mode.
+  const { mode, palette: themePalette } = useTheme();
+  const isDark = mode === 'dark';
+  const dark   = useMemo(() => (isDark ? buildDarkOverrides(themePalette) : {}), [isDark, themePalette]);
+
   return (
-    <View style={styles.screen}>
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.iconBtn} hitSlop={8}>
-          <ArrowLeft size={20} color={palette.text} strokeWidth={2.4} />
+    <FaqCtx.Provider value={{ isDark, dark }}>
+    <View style={[styles.screen, isDark && dark.screen]}>
+      {/* Institution Home ambient wash — sits behind all content. */}
+      {!isDark ? <InstitutionScreenBackground layer /> : null}
+      <View style={[styles.header, isDark && dark.header]}>
+        <TouchableOpacity onPress={() => navigation.goBack()} style={[styles.iconBtn, isDark && dark.iconBtn]} hitSlop={8}>
+          <ArrowLeft size={20} color={isDark ? themePalette.text : HEADER_NAVY} strokeWidth={2.4} />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
-          <Text style={styles.title}>FAQs</Text>
-          <Text style={styles.subtitle}>Quick answers to common questions</Text>
+          <Text style={[styles.title, isDark && dark.headerTitle]}>FAQs</Text>
+          <Text style={[styles.subtitle, isDark && dark.headerSub]}>Quick answers to common questions</Text>
         </View>
         <View style={styles.headerIcon}>
-          <HelpCircle size={18} color={palette.purple.vivid} strokeWidth={2.2} />
+          <HelpCircle size={18} color={BRAND_DARK_BLUE} strokeWidth={2.2} />
         </View>
       </View>
 
@@ -171,7 +216,7 @@ export default function FaqScreen({ navigation }) {
 
       {loading ? (
         <View style={styles.centered}>
-          <ActivityIndicator size="large" color={palette.purple.vivid} />
+          <ActivityIndicator size="large" color={BRAND_DARK_BLUE} />
         </View>
       ) : grouped.length === 0 ? (
         <View style={styles.emptyCard}>
@@ -193,7 +238,7 @@ export default function FaqScreen({ navigation }) {
             <RefreshControl
               refreshing={refreshing}
               onRefresh={() => { setRefreshing(true); load(); }}
-              tintColor={palette.purple.vivid}
+              tintColor={BRAND_DARK_BLUE}
             />
           }
         >
@@ -222,7 +267,7 @@ export default function FaqScreen({ navigation }) {
                       ]}>
                         <ChevronDown
                           size={18}
-                          color={open ? '#fff' : palette.purple.vivid}
+                          color={open ? '#fff' : BRAND_DARK_BLUE}
                           strokeWidth={2.4}
                           style={{ transform: [{ rotate: open ? '180deg' : '0deg' }] }}
                         />
@@ -243,81 +288,116 @@ export default function FaqScreen({ navigation }) {
         </ScrollView>
       )}
     </View>
+    </FaqCtx.Provider>
   );
 }
 
 // ─── Styles ─────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: palette.bg },
+  // Base uses the Institution Home ambient wash so the glass
+  // cards below read as translucent panels floating on it.
+  screen: { flex: 1, backgroundColor: INSTITUTION_BG_BASE },
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center' },
 
+  // Header — glass slab with navy title and a soft blue lift shadow.
   header: {
     flexDirection: 'row', alignItems: 'center', gap: spacing.md,
     paddingHorizontal: spacing.lg,
     paddingTop: spacing.xxl,
     paddingBottom: spacing.md,
-    backgroundColor: palette.surface,
-    ...shadows.card,
+    backgroundColor: GLASS_FILL_STRONG,
+    borderBottomWidth: 1,
+    borderBottomColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
   },
   iconBtn: {
     width: 36, height: 36, borderRadius: 18,
     alignItems: 'center', justifyContent: 'center',
-    backgroundColor: palette.borderSoft,
+    backgroundColor: BRAND_ACCENT_SOFT,
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
   },
-  title:    { ...type.h1, color: palette.text, fontSize: 18 },
-  subtitle: { ...type.caption, color: palette.textMuted, marginTop: 1 },
+  title:    { ...type.h1, color: HEADER_NAVY, fontSize: 18, fontWeight: '800', letterSpacing: 0.2 },
+  subtitle: { ...type.caption, color: '#64748B', marginTop: 1 },
   headerIcon: {
     width: 36, height: 36, borderRadius: 18,
     alignItems: 'center', justifyContent: 'center',
-    backgroundColor: palette.purple.soft,
+    backgroundColor: BRAND_ACCENT_SOFT,
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
   },
 
+  // Search — glass pill on the ambient wash.
   searchWrap: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
     marginHorizontal: spacing.lg,
     marginTop: spacing.lg,
-    backgroundColor: palette.surface,
+    backgroundColor: GLASS_FILL_STRONG,
     borderRadius: radius.lg,
     paddingHorizontal: spacing.lg,
     height: 48,
-    ...shadows.card,
+    borderWidth: 1,
+    borderColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.08,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 2,
   },
-  searchInput: { flex: 1, ...type.body, color: palette.text, padding: 0 },
+  searchInput: { flex: 1, ...type.body, color: HEADER_NAVY, padding: 0 },
 
+  // Empty state — glass card.
   emptyCard: {
     marginHorizontal: spacing.lg,
     marginTop: spacing.xl,
     padding: spacing.xxl,
     borderRadius: radius.lg,
-    backgroundColor: palette.surface,
+    backgroundColor: GLASS_FILL_STRONG,
+    borderWidth: 1,
+    borderColor: GLASS_BORDER_LIGHT,
     alignItems: 'center',
     gap: 6,
-    ...shadows.card,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
   },
-  emptyTitle: { ...type.bodyBold, color: palette.text, marginTop: 6 },
-  emptySub:   { ...type.caption, color: palette.textMuted, textAlign: 'center' },
+  emptyTitle: { ...type.bodyBold, color: HEADER_NAVY, marginTop: 6 },
+  emptySub:   { ...type.caption, color: '#64748B', textAlign: 'center' },
 
   section: { marginBottom: spacing.lg },
   sectionHead: {
     flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
     marginBottom: spacing.sm,
   },
-  sectionTitle: { ...type.h2, color: palette.text, fontSize: 15, fontWeight: '800' },
+  sectionTitle: { ...type.h2, color: HEADER_NAVY, fontSize: 15, fontWeight: '800' },
   countPill: {
-    backgroundColor: palette.purple.soft,
+    backgroundColor: BRAND_ACCENT_SOFT,
     paddingHorizontal: 8, paddingVertical: 2,
     borderRadius: radius.pill,
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
   },
-  countPillText: { ...type.micro, color: palette.purple.on, fontWeight: '800' },
+  countPillText: { ...type.micro, color: BRAND_DARK_BLUE, fontWeight: '800' },
 
+  // FAQ card — translucent glass fill + light glass border + soft
+  // blue lift shadow so each Q/A reads as a glass panel.
   qaCard: {
-    backgroundColor: palette.surface,
+    backgroundColor: GLASS_FILL,
     borderRadius: radius.lg,
     marginBottom: spacing.sm,
     overflow: 'hidden',
-    ...shadows.card,
+    borderWidth: 1,
+    borderColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.08,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 2,
   },
   qaHead: {
     flexDirection: 'row', alignItems: 'center', gap: spacing.md,
@@ -325,16 +405,18 @@ const styles = StyleSheet.create({
   },
   question: {
     flex: 1,
-    ...type.bodyBold, color: palette.text, fontSize: 14, fontWeight: '700',
+    ...type.bodyBold, color: HEADER_NAVY, fontSize: 14, fontWeight: '700',
     lineHeight: 20,
   },
   chevWrap: {
     width: 30, height: 30, borderRadius: 15,
     alignItems: 'center', justifyContent: 'center',
-    backgroundColor: palette.purple.soft,
+    backgroundColor: BRAND_ACCENT_SOFT,
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
   },
   chevWrapOpen: {
-    backgroundColor: palette.purple.vivid,
+    backgroundColor: BRAND_DARK_BLUE,
+    borderColor: BRAND_DARK_BLUE,
   },
   qaBody: {
     paddingHorizontal: spacing.md,
@@ -342,7 +424,7 @@ const styles = StyleSheet.create({
   },
   answer: {
     ...type.body,
-    color: palette.textMuted,
+    color: '#475569',
     lineHeight: 22,
     fontSize: 13,
   },

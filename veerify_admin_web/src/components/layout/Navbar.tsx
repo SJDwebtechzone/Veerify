@@ -198,6 +198,12 @@ function NotificationBell({
         && d.branch_id) {
       return `/institutions/${d.branch_id}`;
     }
+    // Intra-Level event approval queue — fired at the super-admin
+    // bell when an institution submits an intra event. Clicking
+    // deep-links straight to the Event Approvals page.
+    if (d.kind === 'intra_event_pending' || d.screen === 'EventApprovals') {
+      return '/events/approvals';
+    }
     if (n.institution_id) return `/institutions/${n.institution_id}`;
     return null;
   };

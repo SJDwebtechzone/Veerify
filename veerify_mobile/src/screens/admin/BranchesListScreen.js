@@ -8,7 +8,7 @@
 //   GET    /api/branches            — list own branches
 //   DELETE /api/branches/:id        — remove a branch
 
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useState, useContext, useMemo, createContext } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity, ActivityIndicator,
   RefreshControl, StyleSheet, Alert, Linking,
@@ -20,19 +20,62 @@ import {
 } from 'lucide-react-native';
 
 import apiClient from '../../api/client';
+// Institution Home glass system — ambient wash + glass cards +
+// dark-blue primary. Reused verbatim so this screen belongs to the
+// same design language.
+import InstitutionScreenBackground, {
+  INSTITUTION_BG_BASE,
+} from '../../components/InstitutionScreenBackground';
+import { useTheme } from '../../theme/ThemeContext';
 
-const BRAND       = '#E63946';
-const BRAND_SOFT  = '#FFE4E6';
-const TEXT        = '#111827';
-const TEXT_MUTED  = '#6B7280';
-const TEXT_LIGHT  = '#9CA3AF';
+// Institution-Home tokens (mirror AdminDashboardScreen values so the
+// two screens paint identical surfaces).
+const GLASS_FILL_STRONG  = 'rgba(255,255,255,0.88)';
+const GLASS_BORDER_LIGHT = 'rgba(255,255,255,0.55)';
+const GLASS_HIGHLIGHT    = 'rgba(255,255,255,0.9)';
+const GLASS_SHADOW       = '#1E40AF';
+const BRAND_DARK_BLUE    = '#1E3A8A';
+const BRAND_ACCENT_SOFT  = 'rgba(30,58,138,0.10)';
+const HEADER_NAVY        = '#0F172A';
+
+// Kept for backward-compat with a few status-pill / error banners
+// that read them by name.
+const BRAND       = BRAND_DARK_BLUE;
+const BRAND_SOFT  = BRAND_ACCENT_SOFT;
+const TEXT        = HEADER_NAVY;
+const TEXT_MUTED  = '#64748B';
+const TEXT_LIGHT  = '#94A3B8';
 const SURFACE     = '#FFFFFF';
-const BG          = '#F4F4F8';
-const BORDER      = '#E5E7EB';
+const BG          = INSTITUTION_BG_BASE;
+const BORDER      = 'rgba(148,163,184,0.22)';
 const GREEN       = '#10B981';
 const AMBER       = '#F59E0B';
 
+// Local context so BranchCard can pick up dark-mode overrides.
+const BranchesCtx = createContext({ isDark: false, dark: {} });
+
+function buildDarkOverrides(pal) {
+  return StyleSheet.create({
+    screen:      { backgroundColor: pal.bg },
+    header:      { backgroundColor: pal.surface, borderBottomColor: pal.border },
+    iconBtn:     { backgroundColor: pal.border },
+    headerTitle: { color: pal.text },
+    headerSub:   { color: pal.textMuted },
+    card:        { backgroundColor: pal.surface, borderTopColor: pal.border, borderRightColor: pal.border, borderBottomColor: pal.border, borderLeftColor: pal.border },
+    cardTitle:   { color: pal.text },
+    cardCity:    { color: pal.textMuted },
+    metaText:    { color: pal.text },
+    emptyCard:   { backgroundColor: pal.surface, borderTopColor: pal.border, borderRightColor: pal.border, borderBottomColor: pal.border, borderLeftColor: pal.border },
+    emptyTitle:  { color: pal.text },
+    emptySub:    { color: pal.textMuted },
+  });
+}
+
 export default function BranchesListScreen({ navigation }) {
+  const { mode, palette: themePalette } = useTheme();
+  const isDark = mode === 'dark';
+  const dark   = useMemo(() => buildDarkOverrides(themePalette), [themePalette]);
+  const ctxValue = useMemo(() => ({ isDark, dark }), [isDark, dark]);
   const [branches, setBranches]     = useState([]);
   const [loading, setLoading]       = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -120,21 +163,24 @@ export default function BranchesListScreen({ navigation }) {
 
   if (loading) {
     return (
-      <View style={[styles.screen, { justifyContent: 'center', alignItems: 'center' }]}>
-        <ActivityIndicator color={BRAND} />
+      <View style={[styles.screen, isDark && dark.screen, { justifyContent: 'center', alignItems: 'center' }]}>
+        {!isDark ? <InstitutionScreenBackground layer /> : null}
+        <ActivityIndicator color={BRAND_DARK_BLUE} />
       </View>
     );
   }
 
   return (
-    <View style={styles.screen}>
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.iconBtn} hitSlop={8}>
-          <ArrowLeft size={20} color={TEXT} strokeWidth={2.4} />
+    <BranchesCtx.Provider value={ctxValue}>
+    <View style={[styles.screen, isDark && dark.screen]}>
+      {!isDark ? <InstitutionScreenBackground layer /> : null}
+      <View style={[styles.header, isDark && dark.header]}>
+        <TouchableOpacity onPress={() => navigation.goBack()} style={[styles.iconBtn, isDark && dark.iconBtn]} hitSlop={8}>
+          <ArrowLeft size={20} color={isDark ? '#F8FAFC' : HEADER_NAVY} strokeWidth={2.4} />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
-          <Text style={styles.headerTitle}>Branches</Text>
-          <Text style={styles.headerSub}>
+          <Text style={[styles.headerTitle, isDark && dark.headerTitle]}>Branches</Text>
+          <Text style={[styles.headerSub, isDark && dark.headerSub]}>
             {branches.length === 0
               ? 'Add your first branch'
               : `${branches.length} ${branches.length === 1 ? 'location' : 'locations'}`}
@@ -155,12 +201,12 @@ export default function BranchesListScreen({ navigation }) {
         }
         ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
         ListEmptyComponent={
-          <View style={styles.emptyCard}>
+          <View style={[styles.emptyCard, isDark && dark.emptyCard]}>
             <View style={styles.emptyIconWrap}>
-              <Building2 size={32} color={BRAND} strokeWidth={1.6} />
+              <Building2 size={32} color={BRAND_DARK_BLUE} strokeWidth={1.6} />
             </View>
-            <Text style={styles.emptyTitle}>No branches yet</Text>
-            <Text style={styles.emptySub}>
+            <Text style={[styles.emptyTitle, isDark && dark.emptyTitle]}>No branches yet</Text>
+            <Text style={[styles.emptySub, isDark && dark.emptySub]}>
               Add the physical locations of your academy so students nearby can
               find you in the app's Nearby Academies section.
             </Text>
@@ -210,10 +256,12 @@ export default function BranchesListScreen({ navigation }) {
         <Plus size={22} color="#fff" strokeWidth={2.8} />
       </TouchableOpacity>
     </View>
+    </BranchesCtx.Provider>
   );
 }
 
 function BranchCard({ branch, onEdit, onDelete, onMap, onOpen }) {
+  const { isDark, dark } = useContext(BranchesCtx);
   const hasCoords = branch.latitude != null && branch.longitude != null;
   // Two flavors of branch coexist on the list:
   //   sub_branch → its own login credentials, its own students
@@ -224,17 +272,17 @@ function BranchCard({ branch, onEdit, onDelete, onMap, onOpen }) {
   const CardWrap = onOpen ? TouchableOpacity : View;
   return (
     <CardWrap
-      style={styles.card}
+      style={[styles.card, isDark && dark.card]}
       onPress={onOpen || undefined}
       activeOpacity={0.9}
     >
       <View style={styles.cardHeader}>
         <View style={styles.cardIcon}>
-          <Building2 size={16} color={BRAND} strokeWidth={2.4} />
+          <Building2 size={16} color={BRAND_DARK_BLUE} strokeWidth={2.4} />
         </View>
         <View style={{ flex: 1 }}>
           <View style={styles.cardTitleRow}>
-            <Text style={styles.cardTitle} numberOfLines={1}>{branch.name}</Text>
+            <Text style={[styles.cardTitle, isDark && dark.cardTitle]} numberOfLines={1}>{branch.name}</Text>
             {branch.is_primary ? (
               <View style={styles.primaryBadge}>
                 <Star size={9} color="#fff" strokeWidth={2.6} />
@@ -247,7 +295,7 @@ function BranchCard({ branch, onEdit, onDelete, onMap, onOpen }) {
                 used for delete plumbing but the UI never surfaces
                 the sub-branch/satellite distinction anymore. */}
           </View>
-          <Text style={styles.cardCity} numberOfLines={1}>
+          <Text style={[styles.cardCity, isDark && dark.cardCity]} numberOfLines={1}>
             {branch.city || '—'}{branch.state ? `, ${branch.state}` : ''}
           </Text>
         </View>
@@ -271,20 +319,20 @@ function BranchCard({ branch, onEdit, onDelete, onMap, onOpen }) {
           activeOpacity={0.85}
         >
           <MapPin size={12} color={TEXT_MUTED} strokeWidth={2.2} />
-          <Text style={styles.metaText} numberOfLines={2}>{branch.address_line}</Text>
+          <Text style={[styles.metaText, isDark && dark.metaText]} numberOfLines={2}>{branch.address_line}</Text>
           {hasCoords ? <ChevronRight size={12} color={TEXT_LIGHT} strokeWidth={2.4} /> : null}
         </TouchableOpacity>
       ) : null}
       {branch.phone ? (
         <View style={styles.metaRow}>
           <Phone size={12} color={TEXT_MUTED} strokeWidth={2.2} />
-          <Text style={styles.metaText} numberOfLines={1}>{branch.phone}</Text>
+          <Text style={[styles.metaText, isDark && dark.metaText]} numberOfLines={1}>{branch.phone}</Text>
         </View>
       ) : null}
       {branch.email ? (
         <View style={styles.metaRow}>
           <Mail size={12} color={TEXT_MUTED} strokeWidth={2.2} />
-          <Text style={styles.metaText} numberOfLines={1}>{branch.email}</Text>
+          <Text style={[styles.metaText, isDark && dark.metaText]} numberOfLines={1}>{branch.email}</Text>
         </View>
       ) : null}
 
@@ -329,37 +377,52 @@ function BranchCard({ branch, onEdit, onDelete, onMap, onOpen }) {
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: BG },
+  screen: { flex: 1, backgroundColor: INSTITUTION_BG_BASE },
 
   header: {
-    backgroundColor: SURFACE, paddingTop: 48, paddingBottom: 14, paddingHorizontal: 16,
-    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: BORDER,
+    backgroundColor: '#FFFFFF', paddingTop: 48, paddingBottom: 14, paddingHorizontal: 16,
+    borderBottomWidth: 1, borderBottomColor: 'rgba(148,163,184,0.22)',
     flexDirection: 'row', alignItems: 'center', gap: 12,
   },
   iconBtn: {
-    width: 36, height: 36, borderRadius: 18, backgroundColor: BG,
+    width: 36, height: 36, borderRadius: 18, backgroundColor: '#EEF2F7',
     alignItems: 'center', justifyContent: 'center',
   },
-  headerTitle: { fontSize: 18, fontWeight: '800', color: TEXT, letterSpacing: -0.2 },
-  headerSub: { fontSize: 11, color: TEXT_MUTED, fontWeight: '600', marginTop: 1 },
+  headerTitle: { fontSize: 18, fontWeight: '800', color: HEADER_NAVY, letterSpacing: -0.2 },
+  headerSub: { fontSize: 11, color: '#64748B', fontWeight: '600', marginTop: 1 },
 
+  // Card — premium glass surface matching Institution Home.
   card: {
-    backgroundColor: SURFACE, borderRadius: 14, padding: 14,
-    borderWidth: 1, borderColor: BORDER,
+    backgroundColor: GLASS_FILL_STRONG,
+    borderRadius: 20,
+    padding: 14,
+    borderTopWidth: 1.5,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderLeftWidth: 1,
+    borderTopColor: GLASS_HIGHLIGHT,
+    borderRightColor: GLASS_BORDER_LIGHT,
+    borderBottomColor: GLASS_BORDER_LIGHT,
+    borderLeftColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.11,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 5,
   },
   cardHeader: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 8 },
   cardIcon: {
-    width: 36, height: 36, borderRadius: 18, backgroundColor: BRAND_SOFT,
+    width: 36, height: 36, borderRadius: 18, backgroundColor: BRAND_ACCENT_SOFT,
     alignItems: 'center', justifyContent: 'center',
   },
   cardTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  cardTitle: { fontSize: 14, fontWeight: '800', color: TEXT, flexShrink: 1 },
-  cardCity: { fontSize: 11, color: TEXT_MUTED, marginTop: 2 },
+  cardTitle: { fontSize: 14, fontWeight: '800', color: HEADER_NAVY, flexShrink: 1, letterSpacing: 0.1 },
+  cardCity: { fontSize: 11, color: '#64748B', marginTop: 2 },
 
   primaryBadge: {
     flexDirection: 'row', alignItems: 'center', gap: 3,
     paddingHorizontal: 6, paddingVertical: 2, borderRadius: 999,
-    backgroundColor: BRAND,
+    backgroundColor: BRAND_DARK_BLUE,
   },
   primaryBadgeText: { fontSize: 9, color: '#fff', fontWeight: '800', letterSpacing: 0.3 },
 
@@ -378,7 +441,7 @@ const styles = StyleSheet.create({
   statusText: { fontSize: 10, fontWeight: '800', letterSpacing: 0.3 },
 
   metaRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 6 },
-  metaText: { flex: 1, fontSize: 12, color: TEXT, fontWeight: '600' },
+  metaText: { flex: 1, fontSize: 12, color: HEADER_NAVY, fontWeight: '600' },
 
   warnRow: {
     marginTop: 10, padding: 10, borderRadius: 10,
@@ -387,57 +450,89 @@ const styles = StyleSheet.create({
   warnText: { fontSize: 11, color: '#92400E', fontWeight: '700', lineHeight: 16 },
 
   actionRow: { flexDirection: 'row', gap: 8, marginTop: 12 },
+  // Edit — outlined dark-blue pill matches the Institution Home
+  // secondary-action idiom (light halo + brand border + brand text).
   editBtn: {
     flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    gap: 5, paddingVertical: 9, borderRadius: 10,
-    backgroundColor: BRAND_SOFT, borderWidth: 1, borderColor: BRAND,
+    gap: 5, paddingVertical: 9, borderRadius: 12,
+    backgroundColor: BRAND_ACCENT_SOFT, borderWidth: 1.5, borderColor: BRAND_DARK_BLUE,
   },
-  editBtnText: { fontSize: 12, color: BRAND, fontWeight: '800' },
+  editBtnText: { fontSize: 12, color: BRAND_DARK_BLUE, fontWeight: '800' },
+  // Remove — kept red for destructive affordance.
   deleteBtn: {
     flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    gap: 5, paddingVertical: 9, borderRadius: 10, backgroundColor: BRAND,
+    gap: 5, paddingVertical: 9, borderRadius: 12, backgroundColor: '#B91C1C',
+    shadowColor: '#B91C1C',
+    shadowOpacity: 0.20,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
   },
   deleteBtnText: { fontSize: 12, color: '#fff', fontWeight: '800' },
 
-  // Small "Tap card to view dashboard →" strip rendered at the bottom
-  // of sub-branch cards. Purely a discoverability affordance — the
-  // whole card is already tappable.
+  // "Tap card to view dashboard →" hint at the bottom of sub-branch
+  // cards. Dark-blue soft to match the rest of the accent language.
   dashboardHint: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
     gap: 4,
     marginTop: 10,
     paddingVertical: 8,
     borderRadius: 10,
-    backgroundColor: BRAND_SOFT,
+    backgroundColor: BRAND_ACCENT_SOFT,
   },
   dashboardHintText: {
-    fontSize: 10.5, fontWeight: '800', color: BRAND, letterSpacing: 0.4,
+    fontSize: 10.5, fontWeight: '800', color: BRAND_DARK_BLUE, letterSpacing: 0.4,
     textTransform: 'uppercase',
   },
 
+  // Empty state — full glass card, dark-blue soft icon halo, dark-blue
+  // CTA with matching cobalt drop-shadow.
   emptyCard: {
-    backgroundColor: SURFACE, borderRadius: 16, padding: 24, alignItems: 'center',
-    borderWidth: 1, borderColor: BORDER,
+    backgroundColor: GLASS_FILL_STRONG,
+    borderRadius: 20,
+    padding: 24,
+    alignItems: 'center',
+    borderTopWidth: 1.5,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderLeftWidth: 1,
+    borderTopColor: GLASS_HIGHLIGHT,
+    borderRightColor: GLASS_BORDER_LIGHT,
+    borderBottomColor: GLASS_BORDER_LIGHT,
+    borderLeftColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.11,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 5,
   },
   emptyIconWrap: {
-    width: 64, height: 64, borderRadius: 32, backgroundColor: BRAND_SOFT,
+    width: 64, height: 64, borderRadius: 32, backgroundColor: BRAND_ACCENT_SOFT,
     alignItems: 'center', justifyContent: 'center', marginBottom: 14,
   },
-  emptyTitle: { fontSize: 16, fontWeight: '800', color: TEXT, marginBottom: 6 },
+  emptyTitle: { fontSize: 16, fontWeight: '800', color: HEADER_NAVY, marginBottom: 6 },
   emptySub: {
-    fontSize: 12, color: TEXT_MUTED, textAlign: 'center', lineHeight: 18, marginBottom: 16,
+    fontSize: 12, color: '#64748B', textAlign: 'center', lineHeight: 18, marginBottom: 16,
   },
   emptyCta: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
-    backgroundColor: BRAND, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 999,
+    backgroundColor: BRAND_DARK_BLUE, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 999,
+    shadowColor: BRAND_DARK_BLUE,
+    shadowOpacity: 0.25,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
   },
   emptyCtaText: { fontSize: 12, color: '#fff', fontWeight: '800' },
 
+  // FAB — dark-blue with cobalt glow shadow, matching Institution
+  // Home / other rebranded screens.
   fab: {
     position: 'absolute', right: 18, bottom: 22,
-    width: 54, height: 54, borderRadius: 27, backgroundColor: BRAND,
+    width: 54, height: 54, borderRadius: 27, backgroundColor: BRAND_DARK_BLUE,
     alignItems: 'center', justifyContent: 'center',
-    shadowColor: '#000', shadowOpacity: 0.2, shadowOffset: { width: 0, height: 4 },
-    shadowRadius: 8, elevation: 6,
+    shadowColor: BRAND_DARK_BLUE, shadowOpacity: 0.32,
+    shadowOffset: { width: 0, height: 6 },
+    shadowRadius: 14, elevation: 8,
   },
 });

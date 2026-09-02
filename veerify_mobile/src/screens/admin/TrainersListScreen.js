@@ -10,7 +10,7 @@
 //
 // Floating + button bottom-right opens CreateTrainer.
 
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useContext, createContext } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity, Alert, RefreshControl,
   ActivityIndicator, Image, StyleSheet, Linking, Modal, ScrollView,
@@ -31,6 +31,58 @@ import { confirm } from '../../components/ConfirmDialog';
 // api host to plain /uploads/... paths. See src/utils/assetUrl.js.
 import resolveAssetUrl from '../../utils/assetUrl';
 import Avatar from '../../components/Avatar';
+// Institution Home visual system — ambient light-blue wash + glass
+// cards + dark-blue primary. Reused verbatim so this screen belongs
+// to the same design language.
+import InstitutionScreenBackground, {
+  INSTITUTION_BG_BASE,
+} from '../../components/InstitutionScreenBackground';
+import { useTheme } from '../../theme/ThemeContext';
+
+// ── Institution-Home glass tokens (mirror AdminDashboardScreen) ──
+const GLASS_FILL         = 'rgba(255,255,255,0.72)';
+const GLASS_FILL_STRONG  = 'rgba(255,255,255,0.88)';
+const GLASS_BORDER_LIGHT = 'rgba(255,255,255,0.55)';
+const GLASS_HIGHLIGHT    = 'rgba(255,255,255,0.9)';
+const GLASS_SHADOW       = '#1E40AF';
+const BRAND_DARK_BLUE    = '#1E3A8A';
+const BRAND_ACCENT_SOFT  = 'rgba(30,58,138,0.10)';
+const HEADER_NAVY        = '#0F172A';
+
+// Local context so nested sub-components pick up dark-mode overrides
+// without prop-drilling.
+const TrainersCtx = createContext({ isDark: false, dark: {} });
+
+function buildDarkOverrides(pal) {
+  return StyleSheet.create({
+    screen:        { backgroundColor: pal.bg },
+    header:        { backgroundColor: pal.surface, borderBottomColor: pal.border },
+    headerTitle:   { color: pal.text },
+    headerSub:     { color: pal.textMuted },
+    card:          { backgroundColor: pal.surface, borderTopColor: pal.border, borderRightColor: pal.border, borderBottomColor: pal.border, borderLeftColor: pal.border },
+    name:          { color: pal.text },
+    contactBlock:  { backgroundColor: pal.border },
+    contactLabel:  { color: pal.textMuted },
+    contactValue:  { color: pal.text },
+    expChip:       { backgroundColor: pal.border },
+    expChipText:   { color: pal.textMuted },
+    modalScreen:   { backgroundColor: pal.bg },
+    modalHeader:   { backgroundColor: pal.surface, borderBottomColor: pal.border },
+    modalHeaderTitle: { color: pal.text },
+    modalCloseBtn: { backgroundColor: pal.border },
+    modalName:     { color: pal.text },
+    modalSubtitle: { color: pal.textMuted },
+    detailSectionTitle: { color: pal.textMuted },
+    detailCard:    { backgroundColor: pal.surface, borderTopColor: pal.border, borderRightColor: pal.border, borderBottomColor: pal.border, borderLeftColor: pal.border },
+    detailRow:     { borderBottomColor: pal.border },
+    detailLabel:   { color: pal.textMuted },
+    detailValue:   { color: pal.text },
+    modalActions:  { backgroundColor: pal.surface, borderTopColor: pal.border },
+    emptyCard:     { backgroundColor: pal.surface, borderTopColor: pal.border, borderRightColor: pal.border, borderBottomColor: pal.border, borderLeftColor: pal.border },
+    emptyTitle:    { color: pal.text },
+    emptySub:      { color: pal.textMuted },
+  });
+}
 
 // MoreVertical not in older lucide versions; MoreHorizontal works the same.
 const MoreVertical = MoreHorizontal;
@@ -55,6 +107,12 @@ function beltForLabel(label) {
 }
 
 export default function TrainersListScreen({ navigation }) {
+  // Dark-mode adaptation (light: ambient wash + white glass; dark:
+  // theme surface + dark text). Same pattern used across the rebrand.
+  const { mode, palette: themePalette } = useTheme();
+  const isDark = mode === 'dark';
+  const dark   = useMemo(() => buildDarkOverrides(themePalette), [themePalette]);
+  const ctxValue = useMemo(() => ({ isDark, dark }), [isDark, dark]);
   const [trainers, setTrainers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -186,19 +244,25 @@ export default function TrainersListScreen({ navigation }) {
 
   if (loading) {
     return (
-      <View style={[styles.screen, styles.center]}>
-        <ActivityIndicator size="large" color={palette.purple.vivid} />
+      <View style={[styles.screen, isDark && dark.screen, styles.center]}>
+        {!isDark ? <InstitutionScreenBackground layer /> : null}
+        <ActivityIndicator size="large" color={BRAND_DARK_BLUE} />
       </View>
     );
   }
 
   return (
-    <View style={styles.screen}>
+    <TrainersCtx.Provider value={ctxValue}>
+    <View style={[styles.screen, isDark && dark.screen]}>
+      {/* Ambient Institution wash — light-blue vertical gradient +
+          two low-opacity glow blobs. Painted behind everything with
+          pointerEvents="none". Skipped in dark mode. */}
+      {!isDark ? <InstitutionScreenBackground layer /> : null}
       {/* Header */}
-      <View style={styles.header}>
+      <View style={[styles.header, isDark && dark.header]}>
         <View style={{ flex: 1 }}>
-          <Text style={styles.headerTitle}>My Trainers</Text>
-          <Text style={styles.headerSub}>
+          <Text style={[styles.headerTitle, isDark && dark.headerTitle]}>My Trainers</Text>
+          <Text style={[styles.headerSub, isDark && dark.headerSub]}>
             {trainerUsage && !trainerUsage.unlimited
               ? `${trainerUsage.current}/${trainerUsage.limit} used` +
                 (trainerUsage.plan_name ? ` · ${trainerUsage.plan_name} plan` : '')
@@ -220,14 +284,14 @@ export default function TrainersListScreen({ navigation }) {
             onPress={() => setPlanModalOpen(true)}
             activeOpacity={0.85}
           >
-            <Users size={12} color={palette.purple.on} strokeWidth={2.4} />
+            <Users size={12} color={BRAND_DARK_BLUE} strokeWidth={2.4} />
             <Text style={styles.usagePillText}>
               {trainerUsage.current}/{trainerUsage.limit}
             </Text>
           </TouchableOpacity>
         ) : (
           <View style={styles.headerPill}>
-            <Users size={12} color={palette.purple.on} strokeWidth={2.4} />
+            <Users size={12} color={BRAND_DARK_BLUE} strokeWidth={2.4} />
             <Text style={styles.headerPillText}>{trainers.length}</Text>
           </View>
         )}
@@ -243,16 +307,16 @@ export default function TrainersListScreen({ navigation }) {
           <RefreshControl
             refreshing={refreshing}
             onRefresh={() => { setRefreshing(true); load(); }}
-            tintColor={palette.purple.vivid}
+            tintColor={BRAND_DARK_BLUE}
           />
         }
         ListEmptyComponent={
-          <View style={styles.emptyCard}>
+          <View style={[styles.emptyCard, isDark && dark.emptyCard]}>
             <View style={styles.emptyIcon}>
-              <GraduationCap size={32} color={palette.purple.vivid} strokeWidth={1.5} />
+              <GraduationCap size={32} color={BRAND_DARK_BLUE} strokeWidth={1.5} />
             </View>
-            <Text style={styles.emptyTitle}>No trainers yet</Text>
-            <Text style={styles.emptySub}>
+            <Text style={[styles.emptyTitle, isDark && dark.emptyTitle]}>No trainers yet</Text>
+            <Text style={[styles.emptySub, isDark && dark.emptySub]}>
               Enroll your first trainer to start assigning them to batches.
             </Text>
             <TouchableOpacity
@@ -327,18 +391,20 @@ export default function TrainersListScreen({ navigation }) {
         }}
       />
     </View>
+    </TrainersCtx.Provider>
   );
 }
 
 // ─── Card ──────────────────────────────────────────────────────────────
 function TrainerCard({ trainer, onCall, onMail, onEdit, onDelete, onView }) {
+  const { isDark, dark } = useContext(TrainersCtx);
   const belt = beltForLabel(trainer.belt_level);
   const photoUrl = resolveAssetUrl(trainer.photo_url);
   const initials = (trainer.name || '?')
     .split(' ').map((w) => w[0]).filter(Boolean).slice(0, 2).join('').toUpperCase();
 
   return (
-    <View style={styles.card}>
+    <View style={[styles.card, isDark && dark.card]}>
       {/* Top row: avatar + name + kebab */}
       <View style={styles.cardTop}>
         <Avatar
@@ -354,10 +420,10 @@ function TrainerCard({ trainer, onCall, onMail, onEdit, onDelete, onView }) {
               that Edit/View/Delete have moved into their own row above
               the contact list. Both wrap to multiple lines so long
               names and multi-skill specialisations stay readable. */}
-          <Text style={styles.name}>{trainer.name}</Text>
+          <Text style={[styles.name, isDark && dark.name]}>{trainer.name}</Text>
           {trainer.specialization ? (
             <View style={styles.specRow}>
-              <Briefcase size={11} color={palette.purple.vivid} strokeWidth={2.4} />
+              <Briefcase size={11} color={BRAND_DARK_BLUE} strokeWidth={2.4} />
               <Text style={styles.specText}>
                 {trainer.specialization}
               </Text>
@@ -378,8 +444,8 @@ function TrainerCard({ trainer, onCall, onMail, onEdit, onDelete, onView }) {
             </View>
           ) : null}
           {trainer.experience_years != null ? (
-            <View style={styles.expChip}>
-              <Text style={styles.expChipText}>
+            <View style={[styles.expChip, isDark && dark.expChip]}>
+              <Text style={[styles.expChipText, isDark && dark.expChipText]}>
                 {trainer.experience_years} yr{trainer.experience_years === 1 ? '' : 's'} experience
               </Text>
             </View>
@@ -419,7 +485,7 @@ function TrainerCard({ trainer, onCall, onMail, onEdit, onDelete, onView }) {
       </View>
 
       {/* Contact rows - tappable */}
-      <View style={styles.contactBlock}>
+      <View style={[styles.contactBlock, isDark && dark.contactBlock]}>
         {trainer.phone ? (
           <TouchableOpacity
             style={styles.contactRow}
@@ -430,8 +496,8 @@ function TrainerCard({ trainer, onCall, onMail, onEdit, onDelete, onView }) {
               <Phone size={14} color="#fff" strokeWidth={2.4} />
             </View>
             <View style={{ flex: 1 }}>
-              <Text style={styles.contactLabel}>Call</Text>
-              <Text style={styles.contactValue} numberOfLines={1}>{trainer.phone}</Text>
+              <Text style={[styles.contactLabel, isDark && dark.contactLabel]}>Call</Text>
+              <Text style={[styles.contactValue, isDark && dark.contactValue]} numberOfLines={1}>{trainer.phone}</Text>
             </View>
             <ChevronRight size={14} color={palette.textLight} strokeWidth={2.2} />
           </TouchableOpacity>
@@ -447,8 +513,8 @@ function TrainerCard({ trainer, onCall, onMail, onEdit, onDelete, onView }) {
               <Mail size={14} color="#fff" strokeWidth={2.4} />
             </View>
             <View style={{ flex: 1 }}>
-              <Text style={styles.contactLabel}>Email</Text>
-              <Text style={styles.contactValue} numberOfLines={1}>{trainer.email}</Text>
+              <Text style={[styles.contactLabel, isDark && dark.contactLabel]}>Email</Text>
+              <Text style={[styles.contactValue, isDark && dark.contactValue]} numberOfLines={1}>{trainer.email}</Text>
             </View>
             <ChevronRight size={14} color={palette.textLight} strokeWidth={2.2} />
           </TouchableOpacity>
@@ -460,6 +526,7 @@ function TrainerCard({ trainer, onCall, onMail, onEdit, onDelete, onView }) {
 
 // ─── TrainerDetailModal — full-screen profile sheet ────────────────────
 function TrainerDetailModal({ trainer, onClose, onCall, onMail, onEdit }) {
+  const { isDark, dark } = useContext(TrainersCtx);
   if (!trainer) return null;
   const belt = beltForLabel(trainer.belt_level);
   const photoUrl = resolveAssetUrl(trainer.photo_url);
@@ -481,12 +548,14 @@ function TrainerDetailModal({ trainer, onClose, onCall, onMail, onEdit }) {
       transparent={false}
       onRequestClose={onClose}
     >
-      <View style={styles.modalScreen}>
+      <View style={[styles.modalScreen, isDark && dark.modalScreen]}>
+        {/* Ambient wash behind everything in light mode. */}
+        {!isDark ? <InstitutionScreenBackground layer /> : null}
         {/* Header */}
-        <View style={styles.modalHeader}>
-          <Text style={styles.modalHeaderTitle}>Trainer Profile</Text>
-          <TouchableOpacity onPress={onClose} style={styles.modalCloseBtn} hitSlop={8}>
-            <X size={18} color={palette.text} strokeWidth={2.4} />
+        <View style={[styles.modalHeader, isDark && dark.modalHeader]}>
+          <Text style={[styles.modalHeaderTitle, isDark && dark.modalHeaderTitle]}>Trainer Profile</Text>
+          <TouchableOpacity onPress={onClose} style={[styles.modalCloseBtn, isDark && dark.modalCloseBtn]} hitSlop={8}>
+            <X size={18} color={isDark ? '#F8FAFC' : HEADER_NAVY} strokeWidth={2.4} />
           </TouchableOpacity>
         </View>
 
@@ -500,9 +569,9 @@ function TrainerDetailModal({ trainer, onClose, onCall, onMail, onEdit }) {
               tone="purple"
               style={{ borderWidth: 3, borderColor: belt.border, marginBottom: spacing.sm }}
             />
-            <Text style={styles.modalName}>{trainer.name}</Text>
+            <Text style={[styles.modalName, isDark && dark.modalName]}>{trainer.name}</Text>
             {trainer.specialization ? (
-              <Text style={styles.modalSubtitle}>{trainer.specialization}</Text>
+              <Text style={[styles.modalSubtitle, isDark && dark.modalSubtitle]}>{trainer.specialization}</Text>
             ) : null}
             {trainer.belt_level ? (
               <View style={[styles.modalBeltPill, { backgroundColor: belt.bg, borderColor: belt.border }]}>
@@ -570,7 +639,7 @@ function TrainerDetailModal({ trainer, onClose, onCall, onMail, onEdit }) {
         </ScrollView>
 
         {/* Sticky bottom actions */}
-        <View style={styles.modalActions}>
+        <View style={[styles.modalActions, isDark && dark.modalActions]}>
           {trainer.phone ? (
             <TouchableOpacity
               style={[styles.modalActionBtn, { backgroundColor: '#10B981' }]}
@@ -582,7 +651,7 @@ function TrainerDetailModal({ trainer, onClose, onCall, onMail, onEdit }) {
             </TouchableOpacity>
           ) : null}
           <TouchableOpacity
-            style={[styles.modalActionBtn, { backgroundColor: palette.purple.vivid }]}
+            style={[styles.modalActionBtn, { backgroundColor: BRAND_DARK_BLUE }]}
             onPress={() => onEdit(trainer)}
             activeOpacity={0.85}
           >
@@ -596,24 +665,30 @@ function TrainerDetailModal({ trainer, onClose, onCall, onMail, onEdit }) {
 }
 
 function DetailSection({ title, children }) {
+  const { isDark, dark } = useContext(TrainersCtx);
   return (
     <View style={styles.detailSection}>
-      <Text style={styles.detailSectionTitle}>{title}</Text>
-      <View style={styles.detailCard}>{children}</View>
+      <Text style={[styles.detailSectionTitle, isDark && dark.detailSectionTitle]}>{title}</Text>
+      <View style={[styles.detailCard, isDark && dark.detailCard]}>{children}</View>
     </View>
   );
 }
 
 function DetailRow({ icon: Icon, label, value, onPress, multiline }) {
+  const { isDark, dark } = useContext(TrainersCtx);
   const body = (
-    <View style={styles.detailRow}>
+    <View style={[styles.detailRow, isDark && dark.detailRow]}>
       <View style={styles.detailIconWrap}>
-        {Icon ? <Icon size={14} color={palette.purple.vivid} strokeWidth={2.2} /> : null}
+        {Icon ? <Icon size={14} color={BRAND_DARK_BLUE} strokeWidth={2.2} /> : null}
       </View>
       <View style={{ flex: 1 }}>
-        <Text style={styles.detailLabel}>{label}</Text>
+        <Text style={[styles.detailLabel, isDark && dark.detailLabel]}>{label}</Text>
         <Text
-          style={[styles.detailValue, onPress && { color: palette.purple.vivid }]}
+          style={[
+            styles.detailValue,
+            isDark && dark.detailValue,
+            onPress && { color: BRAND_DARK_BLUE },
+          ]}
           numberOfLines={multiline ? undefined : 1}
         >
           {value}
@@ -630,54 +705,67 @@ function DetailRow({ icon: Icon, label, value, onPress, multiline }) {
 }
 
 // ─── Styles ────────────────────────────────────────────────────────────
+// Rebuilt to mirror the Institution Home (AdminDashboardScreen)
+// design system: light-blue ambient wash + translucent white glass
+// cards with glossy top-edge highlight + cool cobalt drop-shadow +
+// dark-blue primary accent. All functionality (add/edit/view/delete,
+// contact rows, plan-usage pill, FAB, detail modal) preserved.
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: palette.bg },
+  screen: { flex: 1, backgroundColor: INSTITUTION_BG_BASE },
   center: { alignItems: 'center', justifyContent: 'center' },
 
-  // Header — refined for a cleaner, more modern look.
-  //   • Larger title, tighter subtitle
-  //   • Extra top-padding so it breathes below the status bar
-  //   • Hairline divider instead of a solid border for a lighter feel
+  // Header — clean white bar with a subtle bottom border so the
+  // status bar and title sit crisply above the ambient wash below.
   header: {
     flexDirection: 'row', alignItems: 'center', gap: spacing.md,
     paddingHorizontal: spacing.lg,
     paddingTop: spacing.xxl + 12,
     paddingBottom: spacing.lg,
-    backgroundColor: palette.surface,
-    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: palette.borderSoft,
+    backgroundColor: '#FFFFFF',
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(148,163,184,0.22)',
   },
-  headerTitle: { ...type.h1, color: palette.text, fontSize: 20, letterSpacing: -0.3 },
-  headerSub: { ...type.caption, color: palette.textMuted, marginTop: 2, fontWeight: '600' },
+  headerTitle: { ...type.h1, color: HEADER_NAVY, fontSize: 20, letterSpacing: -0.3, fontWeight: '800' },
+  headerSub: { ...type.caption, color: '#64748B', marginTop: 2, fontWeight: '600' },
   headerPill: {
     flexDirection: 'row', alignItems: 'center', gap: 4,
     paddingHorizontal: spacing.sm, paddingVertical: 4,
-    backgroundColor: palette.purple.soft,
+    backgroundColor: BRAND_ACCENT_SOFT,
     borderRadius: radius.pill,
   },
-  headerPillText: { ...type.micro, color: palette.purple.on, fontWeight: '800' },
+  headerPillText: { ...type.micro, color: BRAND_DARK_BLUE, fontWeight: '800' },
 
-  // Usage pill (replaces the bare count when a plan cap is in effect).
-  // Tappable; turns red when at the cap to draw the eye.
+  // Usage pill — same look as the header count pill but tappable.
+  // Flips to a soft red when the plan cap is hit.
   usagePill: {
     flexDirection: 'row', alignItems: 'center', gap: 4,
     paddingHorizontal: spacing.sm, paddingVertical: 4,
-    backgroundColor: palette.purple.soft,
+    backgroundColor: BRAND_ACCENT_SOFT,
     borderRadius: radius.pill,
   },
-  usagePillFull: { backgroundColor: '#FFE4E6' },
-  usagePillText: { ...type.micro, color: palette.purple.on, fontWeight: '800' },
+  usagePillFull: { backgroundColor: '#FEE2E2' },
+  usagePillText: { ...type.micro, color: BRAND_DARK_BLUE, fontWeight: '800' },
 
-  // Card — tightened for a cleaner card feel.
-  //   • Slightly rounder corners
-  //   • Fine border in addition to the shadow so cards read distinctly
-  //     against the bg without needing heavier drop-shadows
+  // Card — premium glass surface matching Institution Home cards.
+  // Translucent white fill, 1.5px glossy top-edge border + hairline
+  // sides, cool cobalt drop-shadow, generous corner radius.
   card: {
-    backgroundColor: palette.surface,
-    borderRadius: 16,
+    backgroundColor: GLASS_FILL_STRONG,
+    borderRadius: radius.xl,
     padding: spacing.lg,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: palette.borderSoft,
-    ...shadows.card,
+    borderTopWidth: 1.5,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderLeftWidth: 1,
+    borderTopColor: GLASS_HIGHLIGHT,
+    borderRightColor: GLASS_BORDER_LIGHT,
+    borderBottomColor: GLASS_BORDER_LIGHT,
+    borderLeftColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.11,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 5,
   },
   cardTop: {
     flexDirection: 'row', alignItems: 'center', gap: spacing.md,
@@ -695,9 +783,9 @@ const styles = StyleSheet.create({
   },
   avatarText: { fontSize: 18, fontWeight: '800' },
 
-  name: { ...type.bodyBold, color: palette.text, fontSize: 15 },
+  name: { ...type.bodyBold, color: HEADER_NAVY, fontSize: 15, letterSpacing: 0.1 },
   specRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 3 },
-  specText: { ...type.micro, color: palette.purple.vivid, fontWeight: '700', flex: 1 },
+  specText: { ...type.micro, color: BRAND_DARK_BLUE, fontWeight: '700', flex: 1 },
 
   kebab: {
     width: 32, height: 32, borderRadius: 16,
@@ -735,22 +823,22 @@ const styles = StyleSheet.create({
   },
   viewBtnText: { ...type.micro, color: '#fff', fontWeight: '800', letterSpacing: 0.4 },
 
-  // ── Full-screen trainer profile modal ──────────────────────────────
-  modalScreen: { flex: 1, backgroundColor: palette.bg },
+  // ── Full-screen trainer profile modal — glass system ──────────────
+  modalScreen: { flex: 1, backgroundColor: INSTITUTION_BG_BASE },
   modalHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: spacing.lg,
     paddingTop: 48,
     paddingBottom: spacing.md,
-    backgroundColor: palette.surface,
+    backgroundColor: '#FFFFFF',
     borderBottomWidth: 1,
-    borderBottomColor: palette.divider || '#E5E7EB',
+    borderBottomColor: 'rgba(148,163,184,0.22)',
   },
-  modalHeaderTitle: { ...type.h3, flex: 1, color: palette.text, fontWeight: '800' },
+  modalHeaderTitle: { ...type.h3, flex: 1, color: HEADER_NAVY, fontWeight: '800', letterSpacing: 0.2 },
   modalCloseBtn: {
     width: 32, height: 32, borderRadius: 16,
-    backgroundColor: palette.bg,
+    backgroundColor: '#EEF2F7',
     alignItems: 'center', justifyContent: 'center',
   },
   modalHero: {
@@ -771,8 +859,8 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   modalAvatarText: { fontSize: 32, fontWeight: '800' },
-  modalName: { ...type.h2, color: palette.text, fontWeight: '800' },
-  modalSubtitle: { ...type.body, color: palette.textMuted, marginTop: 4 },
+  modalName: { ...type.h2, color: HEADER_NAVY, fontWeight: '800', letterSpacing: 0.2 },
+  modalSubtitle: { ...type.body, color: '#64748B', marginTop: 4 },
   modalBeltPill: {
     flexDirection: 'row', alignItems: 'center', gap: 4,
     paddingHorizontal: 10, paddingVertical: 5,
@@ -785,7 +873,7 @@ const styles = StyleSheet.create({
   detailSection: { marginBottom: spacing.lg },
   detailSectionTitle: {
     ...type.micro,
-    color: palette.textMuted,
+    color: '#64748B',
     fontWeight: '800',
     letterSpacing: 0.6,
     textTransform: 'uppercase',
@@ -793,35 +881,47 @@ const styles = StyleSheet.create({
     marginLeft: spacing.xs,
   },
   detailCard: {
-    backgroundColor: palette.surface,
-    borderRadius: radius.lg,
+    backgroundColor: GLASS_FILL_STRONG,
+    borderRadius: radius.xl,
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.sm,
-    ...shadows.card,
+    borderTopWidth: 1.5,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderLeftWidth: 1,
+    borderTopColor: GLASS_HIGHLIGHT,
+    borderRightColor: GLASS_BORDER_LIGHT,
+    borderBottomColor: GLASS_BORDER_LIGHT,
+    borderLeftColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 4,
   },
   detailRow: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingVertical: spacing.md,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: palette.divider || '#E5E7EB',
+    borderBottomColor: 'rgba(148,163,184,0.22)',
     gap: spacing.md,
   },
   detailIconWrap: {
     width: 28, height: 28, borderRadius: 14,
-    backgroundColor: palette.purple.soft,
+    backgroundColor: BRAND_ACCENT_SOFT,
     alignItems: 'center', justifyContent: 'center',
   },
-  detailLabel: { ...type.micro, color: palette.textMuted, fontWeight: '700' },
-  detailValue: { ...type.body, color: palette.text, fontWeight: '600', marginTop: 1 },
+  detailLabel: { ...type.micro, color: '#64748B', fontWeight: '700' },
+  detailValue: { ...type.body, color: HEADER_NAVY, fontWeight: '600', marginTop: 1 },
 
   modalActions: {
     flexDirection: 'row',
     gap: spacing.sm,
     padding: spacing.lg,
-    backgroundColor: palette.surface,
+    backgroundColor: '#FFFFFF',
     borderTopWidth: 1,
-    borderTopColor: palette.divider || '#E5E7EB',
+    borderTopColor: 'rgba(148,163,184,0.22)',
   },
   modalActionBtn: {
     flex: 1,
@@ -848,10 +948,11 @@ const styles = StyleSheet.create({
   beltChipText: { ...type.micro, fontWeight: '800', maxWidth: 140 },
   expChip: {
     paddingHorizontal: spacing.sm, paddingVertical: 4,
-    backgroundColor: palette.bg,
+    backgroundColor: 'rgba(241,246,251,0.9)',
     borderRadius: radius.pill,
+    borderWidth: 1, borderColor: 'rgba(148,163,184,0.22)',
   },
-  expChipText: { ...type.micro, color: palette.textMuted, fontWeight: '700' },
+  expChipText: { ...type.micro, color: '#64748B', fontWeight: '700' },
 
   // ── Action row (Edit / View / Delete) — sits just above the contact
   //    block so the header row can give name + specialisation full width.
@@ -891,12 +992,16 @@ const styles = StyleSheet.create({
     borderColor:    '#FCA5A5',
   },
 
-  // Contact rows
+  // Contact rows — inner tinted block matches the batch-row idiom
+  // from Institution Home: a subtly tinted panel inside the glass
+  // card so the two contacts read as a grouped unit.
   contactBlock: {
     marginTop: spacing.md,
-    backgroundColor: palette.bg,
+    backgroundColor: 'rgba(241,246,251,0.9)',
     borderRadius: radius.md,
     overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(148,163,184,0.22)',
   },
   contactRow: {
     flexDirection: 'row', alignItems: 'center', gap: spacing.sm + 2,
@@ -905,53 +1010,75 @@ const styles = StyleSheet.create({
   },
   contactRowBorder: {
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: palette.borderSoft,
+    borderTopColor: 'rgba(148,163,184,0.22)',
   },
   contactIcon: {
     width: 30, height: 30, borderRadius: 8,
     alignItems: 'center', justifyContent: 'center',
   },
-  contactIconCall: { backgroundColor: palette.green.vivid },
-  contactIconMail: { backgroundColor: palette.blue.vivid },
-  contactLabel: { ...type.micro, color: palette.textMuted, fontWeight: '700', letterSpacing: 0.4 },
-  contactValue: { ...type.caption, color: palette.text, fontWeight: '700', marginTop: 1 },
+  contactIconCall: { backgroundColor: '#10B981' },
+  contactIconMail: { backgroundColor: BRAND_DARK_BLUE },
+  contactLabel: { ...type.micro, color: '#64748B', fontWeight: '700', letterSpacing: 0.4 },
+  contactValue: { ...type.caption, color: HEADER_NAVY, fontWeight: '700', marginTop: 1 },
 
-  // Empty
+  // Empty — glass card matching the rest of the system.
   emptyCard: {
-    backgroundColor: palette.surface,
-    borderRadius: radius.lg,
+    backgroundColor: GLASS_FILL_STRONG,
+    borderRadius: radius.xl,
     padding: spacing.xl,
     alignItems: 'center',
     gap: spacing.sm,
     marginTop: spacing.xl,
-    ...shadows.card,
+    borderTopWidth: 1.5,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderLeftWidth: 1,
+    borderTopColor: GLASS_HIGHLIGHT,
+    borderRightColor: GLASS_BORDER_LIGHT,
+    borderBottomColor: GLASS_BORDER_LIGHT,
+    borderLeftColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.11,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 5,
   },
   emptyIcon: {
     width: 64, height: 64, borderRadius: 32,
-    backgroundColor: palette.purple.soft,
+    backgroundColor: BRAND_ACCENT_SOFT,
     alignItems: 'center', justifyContent: 'center',
   },
-  emptyTitle: { ...type.h2, color: palette.text, marginTop: spacing.sm },
-  emptySub: { ...type.caption, color: palette.textMuted, textAlign: 'center' },
+  emptyTitle: { ...type.h2, color: HEADER_NAVY, marginTop: spacing.sm },
+  emptySub: { ...type.caption, color: '#64748B', textAlign: 'center' },
   emptyCta: {
     flexDirection: 'row', alignItems: 'center', gap: 4,
     paddingHorizontal: spacing.xl, paddingVertical: 10,
-    backgroundColor: palette.purple.vivid,
+    backgroundColor: BRAND_DARK_BLUE,
     borderRadius: radius.md,
     marginTop: spacing.sm,
+    shadowColor: BRAND_DARK_BLUE,
+    shadowOpacity: 0.25,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
   },
   emptyCtaText: { ...type.bodyBold, color: '#fff', fontWeight: '800' },
 
-  // Floating action button
+  // Floating action button — dark-blue brand primary with a cobalt
+  // glow shadow so it lifts off the ambient wash.
   fab: {
     position: 'absolute',
     right: spacing.lg, bottom: spacing.xl + 4,
     width: 56, height: 56, borderRadius: 28,
-    backgroundColor: palette.purple.vivid,
+    backgroundColor: BRAND_DARK_BLUE,
     alignItems: 'center', justifyContent: 'center',
-    ...shadows.raised,
+    shadowColor: BRAND_DARK_BLUE,
+    shadowOpacity: 0.32,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 8,
   },
-  // Plan-cap reached → FAB turns brand red and swaps the + for a Crown
+  // Plan-cap reached → FAB turns brand red + swaps the + for a Crown
   // so the constraint reads at a glance from anywhere on the screen.
-  fabCapped: { backgroundColor: '#E63946' },
+  fabCapped: { backgroundColor: '#E63946', shadowColor: '#E63946' },
 });

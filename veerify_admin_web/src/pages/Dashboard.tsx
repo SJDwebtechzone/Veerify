@@ -36,10 +36,25 @@ import { useNotifications } from '../lib/notifications';
 import { useAuth } from '../lib/auth';
 import {
   revenueData,
-  growthData,
   enrollmentData,
   trainerUtilization,
 } from '../data/mockData';
+
+// Zero-filled 12-month scaffold — used as the chart's initial data
+// while /onboarding/growth is in flight. Keeps the X axis populated
+// (Jan → Dec of the trailing year) with actual month labels ending on
+// the current month, so the chart never flashes an empty canvas.
+// Real numbers replace this the moment the API returns.
+const MONTH_LABELS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function buildEmptyGrowth() {
+  const now = new Date();
+  const out: Array<{ month: string; institutions: number; students: number }> = [];
+  for (let i = 11; i >= 0; i -= 1) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    out.push({ month: MONTH_LABELS[d.getMonth()], institutions: 0, students: 0 });
+  }
+  return out;
+}
 import { formatCurrency, formatNumber, formatDate } from '../lib/utils';
 
 // ─── CSV export helpers ────────────────────────────────────────────
@@ -241,6 +256,38 @@ export function Dashboard() {
   const { user } = useAuth();
   const ownerFirstName = (user?.name || '').trim().split(/\s+/)[0] || 'Admin';
 
+  // Live 12-month growth series for the "Institution & Student Growth"
+  // chart. Computed from the actual institution + student created_at
+  // dates on the backend (/onboarding/growth). Initial state is a
+  // zero-filled 12-month scaffold — no fake sample values are shown
+  // while the network is in flight. The chart legend + X axis stay
+  // populated so the layout doesn't jump when data lands.
+  const [growthData, setGrowthData] = useState<
+    Array<{ month: string; institutions: number; students: number }>
+  >(buildEmptyGrowth);
+  useEffect(() => {
+    let cancelled = false;
+    apiClient
+      .get('/onboarding/growth')
+      .then((res) => {
+        if (cancelled) return;
+        const months = Array.isArray(res.data?.months) ? res.data.months : [];
+        if (months.length === 0) return;
+        setGrowthData(
+          months.map((m: { month: string; institutions: number; students: number }) => ({
+            month:        String(m.month || ''),
+            institutions: Number(m.institutions) || 0,
+            students:     Number(m.students) || 0,
+          })),
+        );
+      })
+      .catch(() => {
+        // Silent — the mock fallback stays on screen. Ops can grep
+        // network logs for /onboarding/growth if the chart looks off.
+      });
+    return () => { cancelled = true; };
+  }, []);
+
   // ── Export dashboard snapshot ──
   //
   // Pulls a fresh copy of every table shown on the page and stitches
@@ -399,7 +446,10 @@ export function Dashboard() {
 
       {/* Charts row 2 */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <ChartCard title="Institution & Student Growth" subtitle="Cumulative over the past 12 months">
+        <ChartCard
+          title="Institution & Student Growth"
+          subtitle="New sign-ups per month, last 12 months"
+        >
           <div className="h-[260px]">
             <ResponsiveContainer>
               <BarChart data={growthData} margin={{ top: 5, right: 5, left: -10, bottom: 0 }}>

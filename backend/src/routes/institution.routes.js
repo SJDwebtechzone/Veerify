@@ -29,6 +29,11 @@ router.get('/me/events',           verifyToken, institutionController.getMyEvent
 router.get('/me/events/all',       verifyToken, requireRole('admin'), institutionController.listMyInstitutionEvents);
 // /me/events (POST): admin creates an event for their own institution.
 router.post('/me/events',          verifyToken, requireRole('admin'), requireActiveSubscription, institutionController.createInstitutionEvent);
+// PUT /me/events/:eventId — institution admin edits their own event
+// while it's still awaiting super-admin approval. Only intra events
+// with approval_status='pending' are editable; the endpoint 403s in
+// every other case (approved, rejected, wrong owner, or inter type).
+router.put('/me/events/:eventId',  verifyToken, requireRole('admin'), institutionController.updateInstitutionEvent);
 // /events/:eventId/pay — student / trainer taps Pay Now; server mints a
 // Razorpay Payment Link and returns short_url for the app to open. Sits
 // as a literal /events/... path so it doesn't collide with /:id/events.

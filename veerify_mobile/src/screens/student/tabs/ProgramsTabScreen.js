@@ -56,11 +56,13 @@ export default function ProgramsTabScreen({ navigation }) {
   const [activeCategory, setActiveCategory] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  // Academies the student has enrolled in (or paid for). Each entry is
-  // { id, name, logo_url, city, programs: [] } — the programs array is
-  // hydrated with the FULL course catalogue offered by that academy so
-  // the student sees every course, not just the ones they enrolled in.
-  const [enrolledAcademies, setEnrolledAcademies] = useState([]);
+  // Every course the student is currently enrolled in, DEDUPED by
+  // course id (a student can hold multiple enrolments in the same
+  // course via different batches — the Courses tab should still
+  // show that course as one card). Each entry mirrors the shape of
+  // a /institutions/:id/programs row so the shared GridProgramCard
+  // renders it verbatim.
+  const [enrolledCourses, setEnrolledCourses] = useState([]);
 
   const isGuest = !user;
 
@@ -79,51 +81,50 @@ export default function ProgramsTabScreen({ navigation }) {
         setPrograms([]);
       }
 
-      // ── Enrolled academies section ───────────────────────────────
-      // Guests don't have enrollments — skip the fetch and render only
-      // the browse-by-academy path below. For logged-in students, pull
-      // /enrollments/my, collapse to unique institutions, then fetch
-      // each academy's full course catalogue so we can list ALL their
-      // courses under the academy header (not just the enrolled ones).
+      // ── Enrolled courses section ───────────────────────────────
+      // Flat list of every course the student is enrolled in across
+      // ANY institution — deduped by course_id so multiple batches
+      // in the same course still show up as one card. Guests have
+      // no enrolments so we skip the fetch.
       if (!isGuest) {
         try {
           const enrRes = await apiClient.get('/enrollments/my');
           const enrollments = enrRes.data?.enrollments || [];
-          // Collapse to unique academies. Prefer the enrolment's
-          // root_institution_id when present (sub-branch enrolments
-          // still map to the parent academy on the student's Courses
-          // screen); fall back to institution_id.
-          const byId = new Map();
+          const byCourseId = new Map();
           for (const e of enrollments) {
-            const id = e.root_institution_id || e.institution_id;
-            if (!id || byId.has(id)) continue;
-            byId.set(id, {
-              id,
-              name:     e.institution_name || 'Academy',
-              logo_url: e.institution_logo_url || null,
-              city:     e.institution_city || null,
+            const cid = e.course_id;
+            if (!cid || byCourseId.has(cid)) continue;
+            byCourseId.set(cid, {
+              // Shape matches /institutions/:id/programs so the
+              // shared GridProgramCard renders it without a fork.
+              id:                     cid,
+              title:                  e.course_name || 'Course',
+              image_url:              e.course_image_url || null,
+              price:                  e.course_price || 0,
+              trainer_name:           e.trainer_name || null,
+              // Institution attribution for the sub-line beneath
+              // the card title so the student sees WHICH academy
+              // each enrolled course belongs to.
+              institution_id:         e.institution_id,
+              institution_name:       e.institution_name || null,
+              institution_logo_url:   e.institution_logo_url || null,
+              // The enrolment row's own id — needed to open the
+              // shared EnrolledCourseScreen (used by Home → My
+              // Courses) which is enrolment-scoped, not course-
+              // scoped. Duplicate enrolments in the same course
+              // resolve to the first row encountered so the tap
+              // always navigates somewhere valid.
+              enrollment_id:          e.id,
             });
           }
-          const uniques = Array.from(byId.values());
-          // Hydrate each academy with its full course list — one call
-          // per academy, run in parallel. Silent .catch keeps a single
-          // 404 from tanking the whole section.
-          const hydrated = await Promise.all(uniques.map(async (a) => {
-            try {
-              const r = await apiClient.get(`/institutions/${a.id}/programs?limit=50`);
-              return { ...a, programs: r.data?.programs || [] };
-            } catch {
-              return { ...a, programs: [] };
-            }
-          }));
-          setEnrolledAcademies(hydrated);
+          setEnrolledCourses(Array.from(byCourseId.values()));
         } catch (err) {
           // eslint-disable-next-line no-console
-          console.log('[Programs] enrolled-academies fetch failed:', err?.message);
-          setEnrolledAcademies([]);
+          console.log('[Programs] enrolled-courses fetch failed:', err?.message);
+          setEnrolledCourses([]);
         }
       } else {
-        setEnrolledAcademies([]);
+        setEnrolledCourses([]);
       }
     } catch (err) {
       console.log('[Programs] load error:', err?.message);
@@ -155,15 +156,17 @@ export default function ProgramsTabScreen({ navigation }) {
     return arr;
   }, [programs, activeCategory, search]);
 
-  const featured = visible.filter((p) => p.is_featured);
-  const allRest  = visible.filter((p) => !p.is_featured);
+  // Featured section is no longer rendered on the new two-section
+  // layout — the enrolled/other split subsumes it. Retained the
+  // `visible` memo above only because a couple of unrelated
+  // downstream consumers still reference it in this file.
+  // eslint-disable-next-line no-unused-vars
+  const _visibleUnused = visible;
 
-  // Apply the same category + search filter to each enrolled-academy
-  // section so the student's chip / query choice narrows every row on
-  // the screen consistently. Academies whose section ends up empty are
-  // still shown (with a soft "No courses match" note) so the student
-  // can see the academy is still there when they clear the filter.
-  const filterForAcademy = (arr) => {
+  // Reusable filter — the search box + category chip drive both the
+  // Enrolled Courses AND the More-at-institution sections so the
+  // student's query narrows the whole screen consistently.
+  const applyFilter = (arr) => {
     let out = arr || [];
     if (activeCategory) {
       out = out.filter((p) =>
@@ -181,13 +184,23 @@ export default function ProgramsTabScreen({ navigation }) {
     return out;
   };
 
-  // Institutions the student has already picked (selectedInstitution)
-  // shouldn't be duplicated in both "My Academies" AND "Featured/All
-  // courses" — hide the browse section when the currently-selected
-  // academy is one they're already enrolled in.
-  const selectedIsEnrolled = enrolledAcademies.some(
-    (a) => a.id === selectedInstitution?.id,
+  // Enrolled course ids — used to filter the "other courses" section
+  // so nothing shows up twice on the same screen.
+  const enrolledIdSet = useMemo(
+    () => new Set(enrolledCourses.map((c) => Number(c.id))),
+    [enrolledCourses],
   );
+  const visibleEnrolled = useMemo(
+    () => applyFilter(enrolledCourses),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  [enrolledCourses, activeCategory, search]);
+  // Programs at the currently-selected academy EXCLUDING every
+  // course the student is already enrolled in. This is the "Other
+  // courses offered by the student's own institution" bucket.
+  const otherAtInstitution = useMemo(
+    () => applyFilter(programs).filter((p) => !enrolledIdSet.has(Number(p.id))),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  [programs, enrolledIdSet, activeCategory, search]);
 
   const handleEnroll = (program) => {
     if (isGuest) {
@@ -214,8 +227,12 @@ export default function ProgramsTabScreen({ navigation }) {
     });
   };
 
-  // ─── No institution chosen yet ───
-  if (!instLoading && !selectedInstitution) {
+  // ─── No institution chosen yet AND no enrolments to show ───
+  // Students who ARE enrolled somewhere should always see their
+  // enrolled courses on this tab, even before they pick a specific
+  // academy to browse. Guests and never-enrolled users still land
+  // on the "Pick your academy" nudge.
+  if (!instLoading && !selectedInstitution && enrolledCourses.length === 0) {
     return (
       <View style={[styles.screen, styles.center, { padding: spacing.xxl }]}>
         <View style={styles.emptyIconWrap}>
@@ -258,7 +275,7 @@ export default function ProgramsTabScreen({ navigation }) {
           style={styles.instSelector}
         >
           <Text style={styles.instText} numberOfLines={1}>
-            {selectedInstitution?.name}
+            {selectedInstitution?.name || 'My Courses'}
           </Text>
           <ChevronDown size={20} color={palette.purple.vivid} strokeWidth={2.4} />
         </TouchableOpacity>
@@ -324,93 +341,112 @@ export default function ProgramsTabScreen({ navigation }) {
           </View>
         )}
 
-        {/* ── My Academies ────────────────────────────────────────
-            One section per academy the student has enrolled in. Each
-            section shows the academy name + logo and every course
-            that academy offers (not just the enrolled ones), so the
-            student can discover what else is on the menu without
-            leaving their Courses tab. */}
-        {enrolledAcademies.length > 0 && (
+        {/* ── Section 1 · My Enrolled Courses ─────────────────────
+            Flat list of every course the student is currently
+            enrolled in across ANY institution, deduped by course id.
+            Shows a per-card institution attribution line so the
+            student sees WHICH academy each enrolled course belongs
+            to. Silent for guests (no enrolments). */}
+        {enrolledCourses.length > 0 ? (
           <View style={{ marginTop: spacing.xl }}>
             <View style={styles.sectionHeader}>
-              <Text style={styles.sectionTitle}>My Academies</Text>
+              <Text style={styles.sectionTitle}>My Enrolled Courses</Text>
               <Text style={styles.countText}>
-                {enrolledAcademies.length} enrolled
+                {enrolledCourses.length} course{enrolledCourses.length === 1 ? '' : 's'}
               </Text>
             </View>
-
-            {enrolledAcademies.map((academy) => {
-              const filtered = filterForAcademy(academy.programs);
-              return (
-                <EnrolledAcademySection
-                  key={`enr-${academy.id}`}
-                  academy={academy}
-                  filtered={filtered}
-                  hasFilter={!!(search || activeCategory)}
-                  onOpenCourse={(cid) => navigation.navigate('CourseDetail', { courseId: cid })}
-                  onEnroll={handleEnroll}
-                />
-              );
-            })}
-          </View>
-        )}
-
-        {/* Featured */}
-        {featured.length > 0 && !selectedIsEnrolled && (
-          <View style={{ marginTop: spacing.xl }}>
-            <View style={styles.sectionHeader}>
-              <Text style={styles.sectionTitle}>Featured</Text>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                <Sparkles size={14} color={palette.purple.vivid} strokeWidth={2.4} />
-                <Text style={styles.featuredHint}>Editor's pick</Text>
+            {visibleEnrolled.length === 0 ? (
+              <View style={styles.emptyInlineTight}>
+                <GraduationCap size={18} color={palette.textLight} strokeWidth={2} />
+                <Text style={styles.emptyInlineText}>
+                  No enrolled courses match your filter. Clear the search to see them all.
+                </Text>
               </View>
-            </View>
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={{ paddingHorizontal: spacing.xl, gap: spacing.md }}
-            >
-              {featured.map((p, i) => (
-                <FeaturedProgramCard
-                  key={p.id}
-                  program={p}
-                  accent={cycleAccent(i)}
-                  onPress={() => navigation.navigate('CourseDetail', { courseId: p.id })}
-                  onEnroll={() => handleEnroll(p)}
-                />
-              ))}
-            </ScrollView>
+            ) : (
+              <View style={styles.grid}>
+                {visibleEnrolled.map((p, i) => (
+                  <EnrolledCourseCard
+                    key={`enr-${p.id}`}
+                    program={p}
+                    accent={cycleAccent(i)}
+                    // Route to the same EnrolledCourseScreen used by
+                    // Home → My Courses so the UX and functionality
+                    // stay identical across both entry points. The
+                    // enrolment id (not the course id) is what the
+                    // shared screen expects. Falls back to
+                    // CourseDetail if the row somehow lacked an
+                    // enrolment id — defensive, shouldn't happen.
+                    onPress={() => {
+                      if (p.enrollment_id) {
+                        navigation.navigate('EnrolledCourse', { enrollmentId: p.enrollment_id });
+                      } else {
+                        navigation.navigate('CourseDetail', { courseId: p.id });
+                      }
+                    }}
+                  />
+                ))}
+              </View>
+            )}
           </View>
-        )}
+        ) : null}
 
-        {/* All courses — hidden when the currently-selected academy is
-            already listed above under "My Academies" (avoids showing
-            the same programs twice on a single screen). */}
-        {!selectedIsEnrolled && (
+        {/* Visual divider between the two sections so the student
+            can immediately tell "enrolled" apart from "explore more".
+            Silent when there's no enrolled section rendered above. */}
+        {enrolledCourses.length > 0 ? <View style={styles.sectionDivider} /> : null}
+
+        {/* ── Section 2 · Other Courses at [Own Institution] ──────
+            Programs offered by the student's OWN academy that they
+            aren't already enrolled in. Titled with the academy name
+            so it's clear where these are coming from. When the
+            student hasn't picked an academy yet we render a small
+            "pick an academy to explore more" nudge INSTEAD of the
+            regular grid, so the enrolled-courses section still
+            reads as a complete answer above. */}
         <View style={{ marginTop: spacing.xl }}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>
-              {enrolledAcademies.length > 0
-                ? `Browse ${selectedInstitution?.name || 'other academies'}`
-                : (activeCategory ? `${activeCategory.name} courses` : 'All courses')}
+              {selectedInstitution
+                ? (enrolledCourses.length > 0
+                    ? `More at ${selectedInstitution.name}`
+                    : (activeCategory ? `${activeCategory.name} courses` : 'Available courses'))
+                : 'Explore other courses'}
             </Text>
-            <Text style={styles.countText}>{visible.length} result{visible.length === 1 ? '' : 's'}</Text>
+            {selectedInstitution ? (
+              <Text style={styles.countText}>
+                {otherAtInstitution.length} course{otherAtInstitution.length === 1 ? '' : 's'}
+              </Text>
+            ) : null}
           </View>
 
-          {allRest.length === 0 && featured.length === 0 ? (
+          {!selectedInstitution ? (
+            <TouchableOpacity
+              onPress={() => navigation.navigate('SelectInstitution')}
+              activeOpacity={0.85}
+              style={styles.emptyInline}
+            >
+              <Building2 size={22} color={palette.purple.vivid} strokeWidth={2} />
+              <Text style={styles.emptyInlineText}>
+                Pick an academy to browse the rest of their courses.
+              </Text>
+              <ChevronRight size={16} color={palette.textMuted} strokeWidth={2.4} />
+            </TouchableOpacity>
+          ) : otherAtInstitution.length === 0 ? (
             <View style={styles.emptyInline}>
               <GraduationCap size={22} color={palette.textLight} strokeWidth={2} />
               <Text style={styles.emptyInlineText}>
                 {search || activeCategory
-                  ? 'No programs match your filters. Try clearing them.'
-                  : 'No programs published yet. Check back soon.'}
+                  ? 'No other courses match your filters. Try clearing them.'
+                  : (enrolledCourses.length > 0
+                      ? "You're enrolled in every course this academy currently offers."
+                      : 'No courses published yet. Check back soon.')}
               </Text>
             </View>
           ) : (
             <View style={styles.grid}>
-              {allRest.map((p, i) => (
+              {otherAtInstitution.map((p, i) => (
                 <GridProgramCard
-                  key={p.id}
+                  key={`other-${p.id}`}
                   program={p}
                   accent={cycleAccent(i)}
                   onPress={() => navigation.navigate('CourseDetail', { courseId: p.id })}
@@ -420,7 +456,6 @@ export default function ProgramsTabScreen({ navigation }) {
             </View>
           )}
         </View>
-        )}
       </ScrollView>
     </View>
   );
@@ -596,6 +631,64 @@ function GridProgramCard({ program, accent, onPress, onEnroll }) {
             <Text style={[styles.gridEnrollText, { color: accent.on }]}>Enroll</Text>
           </TouchableOpacity>
         </View>
+      </View>
+    </TouchableOpacity>
+  );
+}
+
+// EnrolledCourseCard — dedicated card for the "My Enrolled Courses"
+// grid. Same visual footprint as GridProgramCard so both grids
+// tile cleanly, but purposely trades the Price + Enroll pair
+// (irrelevant once you're already enrolled) for:
+//   • an "Enrolled" pill, and
+//   • the organising institution line right inside the card, so
+//     the student sees "at {academy}" without a floating caption
+//     underneath the card breaking the grid rhythm.
+function EnrolledCourseCard({ program, accent, onPress }) {
+  const coverUri = program.image_url || program.thumbnail_url;
+  return (
+    <TouchableOpacity onPress={onPress} activeOpacity={0.9} style={styles.gridCard}>
+      <View style={[styles.gridImage, { backgroundColor: accent.soft }]}>
+        <CourseImage
+          uri={coverUri}
+          width="100%"
+          height="100%"
+          radius={0}
+          fit="contain"
+          icon="course"
+          style={StyleSheet.absoluteFill}
+        />
+        {/* Enrolled ribbon sits top-left so it doesn't collide with
+            the play button in the bottom-right. */}
+        <View style={styles.enrolledRibbon}>
+          <Text style={styles.enrolledRibbonText}>Enrolled</Text>
+        </View>
+        <TouchableOpacity
+          onPress={(e) => { e.stopPropagation?.(); onPress(); }}
+          style={styles.previewBtn}
+        >
+          <PlayCircle size={14} color="#fff" strokeWidth={2.4} />
+        </TouchableOpacity>
+      </View>
+      <View style={{ padding: spacing.sm, gap: 2 }}>
+        <Text style={styles.gridTitle} numberOfLines={2}>{program.title || program.name}</Text>
+        {program.trainer_name ? (
+          <Text style={styles.gridTrainer} numberOfLines={1}>
+            {program.trainer_name}
+          </Text>
+        ) : null}
+        {program.institution_name ? (
+          <View style={styles.enrolledInstRow}>
+            <Building2 size={10} color={palette.purple.on} strokeWidth={2.4} />
+            <Text style={styles.enrolledInstText} numberOfLines={1}>
+              {program.institution_name}
+            </Text>
+          </View>
+        ) : null}
+        {/* Continue button intentionally removed — the whole card is
+            already tappable via the outer TouchableOpacity, so a
+            dedicated CTA was redundant. Tap anywhere on the card to
+            open the course detail. */}
       </View>
     </TouchableOpacity>
   );
@@ -794,6 +887,50 @@ const styles = StyleSheet.create({
     borderRadius: radius.md,
     borderWidth: 1, borderColor: palette.borderSoft,
     marginBottom: spacing.sm,
+  },
+
+  // Per-card institution attribution under enrolled courses.
+  enrolledAt: {
+    ...type.caption, color: palette.purple.on, fontWeight: '700',
+    marginTop: 6, marginLeft: 4,
+  },
+  // Enrolled ribbon in the top-left of the card image.
+  enrolledRibbon: {
+    position: 'absolute',
+    top: spacing.sm, left: spacing.sm,
+    backgroundColor: palette.green.vivid,
+    paddingHorizontal: 8, paddingVertical: 3,
+    borderRadius: radius.pill,
+  },
+  enrolledRibbonText: {
+    fontSize: 10, fontWeight: '800', color: '#fff',
+    letterSpacing: 0.4, textTransform: 'uppercase',
+  },
+  // Institution attribution row inside the enrolled card.
+  enrolledInstRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    marginTop: 2,
+  },
+  enrolledInstText: {
+    ...type.caption, fontSize: 11, fontWeight: '700',
+    color: palette.purple.on, flex: 1,
+  },
+  // Continue CTA replaces Price + Enroll on enrolled cards.
+  continueBtn: {
+    flex: 1,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 4,
+    paddingHorizontal: spacing.sm, paddingVertical: 6,
+    borderRadius: radius.pill,
+  },
+  continueBtnText: {
+    fontSize: 11, fontWeight: '800', color: '#fff', letterSpacing: 0.3,
+  },
+  // Divider between "My Enrolled Courses" and "More at [Institution]".
+  sectionDivider: {
+    height: 1, marginTop: spacing.xl,
+    backgroundColor: palette.borderSoft,
+    marginHorizontal: spacing.xl,
   },
 
   // ── Enrolled academy section (per academy under "My Academies") ──

@@ -238,26 +238,36 @@ useEffect(() => {
   const logout = async () => {
     // eslint-disable-next-line no-console
     console.log('[Auth] logout invoked');
-    // Revoke the FCM token FIRST while the JWT is still valid, so
-    // the ex-user's device stops receiving pushes for this account.
-    // Fire-and-forget on failure so a network hiccup can't strand
-    // the caller in a half-logged-out state.
-    try { await fcmRevoke(); }
-    catch (err) { console.warn('[Auth] fcm revoke threw:', err?.message); }
-    // Tear down auth state first so the navigator switches roots
-    // immediately, before we touch keychain. If the keychain delete
-    // throws, the user is already logged out as far as the app is
-    // concerned and they won't end up stuck in a half-authenticated
-    // state.
+    // STEP 1 — tear down auth state SYNCHRONOUSLY first. This is the
+    // change that fixes "Sign out button does nothing": we no longer
+    // await fcmRevoke (which can hang up to axios's 10-second timeout
+    // when the device is offline) before switching navigator roots.
+    // The moment setUser(null) commits, AppNavigator re-renders and
+    // drops the student stack, so the user visually returns to the
+    // Welcome screen within a single frame.
     setUser(null);
     setOnboardingStatus(null);
     setInstitution(null);
+
+    // STEP 2 — flush the token from the OS keychain so the next
+    // launch doesn't auto-resume this session. Awaited (short op) so
+    // any race with an immediate re-login can't read a stale token.
     try {
       await deleteToken();
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn('[Auth] deleteToken failed (continuing anyway):', err?.message);
     }
+
+    // STEP 3 — best-effort FCM token revocation. Fire-and-forget so
+    // the sign-out never blocks on network. The backend endpoint is
+    // idempotent, so a missed revoke on this device just means the
+    // ex-user's next login will re-register a fresh token.
+    Promise.resolve()
+      .then(() => fcmRevoke())
+      .catch((err) => console.warn('[Auth] fcm revoke threw:', err?.message));
+
+    return { success: true };
   };
 
   const refreshOnboardingStatus = async () => {

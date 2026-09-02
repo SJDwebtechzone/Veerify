@@ -928,25 +928,51 @@ function cycleAccent(i) { return ACCENTS[i % ACCENTS.length]; }
 
 // ─────────────────────────────────────────────────────────────────────
 // AcademyDetailsCard — renders under the branding banner whenever an
-// academy is selected. Same info the old InstitutionDetail screen led
-// with: logo, name, city, description, phone, email, rating pill.
+// academy is selected.
+//
+// Branch-aware:
+//   • For a MAIN institution — logo, name, city, description, contact.
+//   • For a BRANCH — top block shows the PARENT institution's logo +
+//     name (the branding row); below that, an "A Branch of <parent>"
+//     chip + the branch's own name, address, and contact block. This
+//     keeps the parent's brand identity on top while making it clear
+//     the guest is looking at a specific branch. Falls back to the
+//     row's own fields whenever the parent info isn't present.
 // ─────────────────────────────────────────────────────────────────────
 function AcademyDetailsCard({ institution }) {
   if (!institution) return null;
-  const logo = institution.logo_url ? resolveAssetUrl(institution.logo_url) : null;
+
+  const isBranch = !!institution.is_branch || !!institution.parent_institution_id;
+  const parent   = institution.parent || null;
+  // Branding source: parent's logo + name when this is a branch,
+  // otherwise the row's own. Both fall back to the local row so an
+  // older backend that doesn't populate `parent` still renders.
+  const brandName = isBranch
+    ? (institution.parent_institution_name || parent?.name || institution.name)
+    : institution.name;
+  const brandLogoRaw = isBranch
+    ? (parent?.logo_url || institution.logo_url)
+    : institution.logo_url;
+  const brandLogo = brandLogoRaw ? resolveAssetUrl(brandLogoRaw) : null;
+  const brandDescription = isBranch
+    ? (parent?.description || institution.description)
+    : institution.description;
+
   const rating = institution.rating || institution.avg_rating;
+
   return (
     <View style={styles.acadCard}>
+      {/* Branding block — parent identity for a branch, self for a main. */}
       <View style={styles.acadHead}>
-        {logo ? (
-          <Image source={{ uri: logo }} style={styles.acadLogo} />
+        {brandLogo ? (
+          <Image source={{ uri: brandLogo }} style={styles.acadLogo} />
         ) : (
           <View style={[styles.acadLogo, styles.acadLogoPlaceholder]}>
             <Building2 size={24} color={palette.purple.vivid} strokeWidth={2.2} />
           </View>
         )}
         <View style={{ flex: 1, minWidth: 0 }}>
-          <Text style={styles.acadName} numberOfLines={2}>{institution.name}</Text>
+          <Text style={styles.acadName} numberOfLines={2}>{brandName}</Text>
           <View style={styles.acadMetaRow}>
             {institution.city ? (
               <View style={styles.acadMetaItem}>
@@ -964,9 +990,30 @@ function AcademyDetailsCard({ institution }) {
         </View>
       </View>
 
-      {institution.description ? (
+      {/* Branch identity block — only for branches. Shows the branch
+          name on its own line + an "A Branch of <parent>" chip so the
+          guest can see they've drilled into a specific branch. */}
+      {isBranch ? (
+        <View style={styles.branchBlock}>
+          <Text style={styles.branchChip}>
+            A Branch of {institution.parent_institution_name || parent?.name || 'this academy'}
+          </Text>
+          <Text style={styles.branchName} numberOfLines={2}>{institution.name}</Text>
+          {institution.address ? (
+            <View style={styles.branchAddrRow}>
+              <MapPin size={12} color={palette.textMuted} strokeWidth={2.2} />
+              <Text style={styles.branchAddrText} numberOfLines={3}>
+                {institution.address}
+                {institution.pincode ? ` — ${institution.pincode}` : ''}
+              </Text>
+            </View>
+          ) : null}
+        </View>
+      ) : null}
+
+      {brandDescription ? (
         <Text style={styles.acadDesc} numberOfLines={4}>
-          {institution.description}
+          {brandDescription}
         </Text>
       ) : null}
 
@@ -1354,6 +1401,45 @@ const styles = StyleSheet.create({
   },
   acadContact: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   acadContactText: { ...type.caption, color: palette.textMuted, maxWidth: 180 },
+
+  // ── Branch identity block ──────────────────────────────────────
+  // Rendered under the parent-branding header on a branch details
+  // view: chip ("A Branch of X"), branch name, branch address.
+  branchBlock: {
+    marginTop: spacing.md,
+    paddingTop: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: palette.borderSoft,
+  },
+  branchChip: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#DBEAFE',
+    color: '#1E40AF',
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    borderRadius: 999,
+    overflow: 'hidden',
+  },
+  branchName: {
+    ...type.h2,
+    color: palette.text,
+    marginTop: 6,
+  },
+  branchAddrRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 6,
+    marginTop: 4,
+  },
+  branchAddrText: {
+    ...type.caption,
+    color: palette.textMuted,
+    flex: 1,
+    lineHeight: 18,
+  },
 
   // ── AcademyCourseCard ───────────────────────────────────────────
   acadCourseCard: {

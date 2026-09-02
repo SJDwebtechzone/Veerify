@@ -16,6 +16,9 @@ const ctrl = require('../controllers/beltPromotionRequest.controller');
 // requests.
 router.post('/',              verifyToken, requireRole('trainer'), requireActiveSubscription, ctrl.create);
 router.get ('/mine',          verifyToken, requireRole('trainer'), ctrl.listMine);
+// Student-facing companion — powers the "Promoted" badge on the
+// student's EnrolledCourse curriculum view. Read-only, student role.
+router.get ('/mine-as-student', verifyToken, requireRole('student'), ctrl.listMineAsStudent);
 router.get ('/institution',   verifyToken, requireRole('admin'),   ctrl.listInstitution);
 
 // Admin decisions. Both go through requireActiveSubscription so a

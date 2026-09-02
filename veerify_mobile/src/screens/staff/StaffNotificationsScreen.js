@@ -117,10 +117,52 @@ export default function StaffNotificationsScreen({ navigation }) {
     }
 
     if (!screen) return;
-    // Strip the reserved `screen` key — React Navigation v7 treats it
-    // as a nested-navigator hint and can mis-route silently when passed
-    // as params. Everything else in data is safe to forward.
-    const { screen: _drop, ...params } = data;
+
+    // Screen-specific param shaping. Some inbox notifications carry
+    // raw reference ids that need to be translated into the exact
+    // param names each destination screen expects. Doing this per-
+    // screen keeps the backend payload semantic ("student_id",
+    // "curriculum_item_id") without forcing every screen to know the
+    // notification schema.
+    let params;
+    if (screen === 'StaffStudentDetail') {
+      // Prefer the pre-shaped `params` block if the sender attached
+      // one (recheck notifications do). Fall back to reading the
+      // individual fields for older payloads.
+      const shaped = (data.params && typeof data.params === 'object') ? data.params : null;
+      const studentId = shaped?.studentId
+        ?? data.student_id
+        ?? data.studentId
+        ?? null;
+      if (!studentId) {
+        // Missing student id — graceful bail with a visible hint so
+        // the trainer doesn't feel like the tap silently no-op'd.
+        confirm({
+          title:       'Student not available',
+          message:     "We couldn't find that student. They may have been removed or reassigned.",
+          variant:     'warning',
+          confirmText: 'OK',
+          hideCancel:  true,
+        });
+        return;
+      }
+      params = {
+        studentId,
+        focusCurriculumItemId: shaped?.focusCurriculumItemId
+          ?? data.curriculum_item_id
+          ?? null,
+        promotionRequestId: shaped?.promotionRequestId
+          ?? data.promotion_request_id
+          ?? null,
+        source: shaped?.source ?? data.source ?? 'notification',
+      };
+    } else {
+      // Default forward — strip the reserved `screen` key so React
+      // Navigation v7 doesn't treat it as a nested-navigator hint.
+      const { screen: _drop, ...rest } = data;
+      params = rest;
+    }
+
     try { navigation.navigate(screen, params); } catch (err) {
       console.log('[notif] navigate failed:', screen, err?.message);
     }

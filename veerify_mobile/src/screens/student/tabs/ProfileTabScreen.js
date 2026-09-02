@@ -28,6 +28,7 @@ import { palette, spacing, radius, shadows, type } from '../../../theme';
 import { useBellScrollHandler } from '../../../components/bellScrollBus';
 import { confirm } from '../../../components/ConfirmDialog';
 import Avatar from '../../../components/Avatar';
+import ThemeToggle from '../../../components/ThemeToggle';
 
 export default function ProfileTabScreen({ navigation }) {
   const { user, logout } = useAuth();
@@ -167,15 +168,50 @@ function LoggedInView({ user, subscription, selectedInstitution, onLogout, navig
     .split(' ').map(w => w[0]).slice(0, 2).join('').toUpperCase();
   const placeholder = (n) => Alert.alert(n, "We'll wire this up next.");
 
+  // Perform-the-logout core. Kept in one place so the confirm dialog
+  // path AND the OS Alert fallback path both funnel through identical
+  // error handling. Surfaces any unexpected exception via Alert so the
+  // student never sees a silent no-op if something goes wrong deep in
+  // the auth teardown.
+  const performLogout = async () => {
+    try {
+      await onLogout();
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn('[Profile] logout threw:', err?.message);
+      Alert.alert(
+        'Sign out failed',
+        'We could not sign you out just now. Please check your connection and try again.',
+      );
+    }
+  };
+
   const handleSignOut = () => {
-    confirm({
-      title: 'Sign out?',
-      message: "You'll return to the welcome screen.",
-      variant: 'destructive',
-      confirmText: 'Sign out',
-      cancelText: 'Cancel',
-      onConfirm: () => onLogout(),
-    });
+    // Primary path — themed confirm dialog. If the ConfirmDialogHost
+    // isn't mounted (rare, but possible during hot-reload edge cases
+    // where App.tsx hasn't fully re-rendered), the imperative
+    // confirm() call is a no-op and the tap would feel dead. Guarding
+    // with a plain OS Alert fallback so the sign-out flow always
+    // reaches the user regardless.
+    try {
+      confirm({
+        title: 'Sign out?',
+        message: "You'll return to the welcome screen.",
+        variant: 'destructive',
+        confirmText: 'Sign out',
+        cancelText: 'Cancel',
+        onConfirm: performLogout,
+      });
+    } catch (_) {
+      Alert.alert(
+        'Sign out?',
+        "You'll return to the welcome screen.",
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Sign out', style: 'destructive', onPress: performLogout },
+        ],
+      );
+    }
   };
 
   const handleReferral = async () => {
@@ -301,6 +337,16 @@ function LoggedInView({ user, subscription, selectedInstitution, onLogout, navig
           label="Send Feedback"
           accent={palette.pink}
           onPress={() => navigation.navigate('SendFeedback')}
+        />
+      </View>
+
+      {/* Preferences — theme switch. Persisted via ThemeContext so
+          the choice survives app restarts and applies immediately
+          across the shared surfaces (bottom tab bar, toggle itself). */}
+      <View style={{ marginTop: spacing.lg }}>
+        <ThemeToggle
+          label="Dark Mode"
+          hint="Switch between light and dark theme."
         />
       </View>
 

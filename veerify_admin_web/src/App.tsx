@@ -15,6 +15,10 @@ import { Banners } from './pages/cms/Banners';
 import { Categories } from './pages/cms/Categories';
 import { Videos } from './pages/cms/Videos';
 import { Events } from './pages/cms/Events';
+// Super-admin review queue for Intra-Level (cross-institution)
+// events submitted from the mobile app. See
+// src/pages/events/EventApprovals.tsx.
+import { EventApprovals } from './pages/events/EventApprovals';
 import { InstitutionsPending } from './pages/institutions/InstitutionsPending';
 import { InstitutionDetail } from './pages/institutions/InstitutionDetail';
 import { InstitutionsList } from './pages/institutions/InstitutionsList';
@@ -82,6 +86,10 @@ export default function App() {
         <Route path="/mobile/categories" element={<Categories />} />
         <Route path="/mobile/videos" element={<Videos />} />
         <Route path="/mobile/events" element={<Events />} />
+
+        {/* Event Approvals — Intra-Level events awaiting super-admin
+            action before they fan out to every institution's feed. */}
+        <Route path="/events/approvals" element={<EventApprovals />} />
 
         {/* Payments */}
         <Route path="/payments" element={<InstitutionPayouts />} />

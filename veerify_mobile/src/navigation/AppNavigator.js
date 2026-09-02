@@ -35,6 +35,16 @@ import CreateBatchScreen from '../screens/admin/CreateBatchScreen';
 import CreateEventScreen from '../screens/admin/CreateEventScreen';
 import EventsListScreen from '../screens/admin/EventsListScreen';
 import EventDetailScreen from '../screens/EventDetailScreen';
+import InstitutionEventDetailScreen from '../screens/admin/InstitutionEventDetailScreen';
+// MODULE 2: Select students for event registration.
+import SelectStudentsForEventScreen from '../screens/admin/SelectStudentsForEventScreen';
+// MODULE 3 (placeholder): dynamic Registration Form screen — landing
+// target for the SelectStudents Continue button.
+import EventRegistrationFormScreen from '../screens/admin/EventRegistrationFormScreen';
+// MODULE 4: Organizer Registration Management screens.
+import EventRegistrationsListScreen  from '../screens/admin/EventRegistrationsListScreen';
+import EventRegistrationDetailScreen from '../screens/admin/EventRegistrationDetailScreen';
+import EventRegistrationsTableScreen from '../screens/admin/EventRegistrationsTableScreen';
 import PricingPlansScreen from '../screens/admin/PricingPlansScreen';
 import AdminBatchStudentsScreen from '../screens/admin/AdminBatchStudentsScreen';
 import TrainersListScreen from '../screens/admin/TrainersListScreen';
@@ -45,7 +55,15 @@ import PendingAnnouncementsScreen from '../screens/admin/PendingAnnouncementsScr
 import PendingAnnouncementDetailScreen from '../screens/PendingAnnouncementDetailScreen';
 import AdminTrainerLeavesScreen from '../screens/admin/AdminTrainerLeavesScreen';
 import AdminReferEarnScreen from '../screens/admin/AdminReferEarnScreen';
+// Recent Activity — full-screen feed opened from the dashboard
+// teaser's "See all" link. Uses the shared /admin/recent-activity
+// endpoint with the same branch scope as the dashboard.
+import RecentActivityScreen from '../screens/admin/RecentActivityScreen';
+// Monthly Revenue → Details drill-down. Same revenueScope as the
+// dashboard chart, so totals never disagree between the two surfaces.
+import RevenueDetailsScreen from '../screens/admin/RevenueDetailsScreen';
 import AdminCertificatesScreen from '../screens/admin/AdminCertificatesScreen';
+import AdminDispatchedCertificatesScreen from '../screens/admin/AdminDispatchedCertificatesScreen';
 import CertificateTemplatesScreen from '../screens/admin/CertificateTemplatesScreen';
 import CertificateTemplateEditorScreen from '../screens/admin/CertificateTemplateEditorScreen';
 import AdminSalaryScreen from '../screens/admin/AdminSalaryScreen';
@@ -249,7 +267,17 @@ export default function AppNavigator() {
             status change is ignored. */}
         <Stack.Navigator
           key={`admin-${onboardingStatus || 'unknown'}`}
-          screenOptions={{ headerShown: false }}
+          screenOptions={{
+            headerShown: false,
+            // Institution-admin design system: every screen in the
+            // admin stack sits on the same light-blue glass base as
+            // the Home/Dashboard. This kills the flash of white
+            // background between screen transitions and gives the
+            // whole Institution Login experience one unified feel.
+            // Individual screens can still paint the ambient SVG
+            // blobs on top via <InstitutionScreenBackground />.
+            contentStyle: { backgroundColor: '#F1F6FB' },
+          }}
           initialRouteName={initialRoute}
         >
           {/* Onboarding screens */}
@@ -366,6 +394,29 @@ export default function AppNavigator() {
               trainer / student. Renders its own header. */}
           <Stack.Screen name="EventDetail" component={EventDetailScreen}
             options={{ headerShown: false }} />
+          {/* InstitutionEventDetailScreen — view-only detail screen
+              for institution admins. Shows all event creation fields
+              in a clean, read-only layout. */}
+          <Stack.Screen name="InstitutionEventDetail" component={InstitutionEventDetailScreen}
+            options={{ headerShown: false }} />
+          {/* MODULE 2: Select-students flow launched from the
+              EventDetail "Register Students" button. Own header. */}
+          <Stack.Screen name="SelectStudentsForEvent" component={SelectStudentsForEventScreen}
+            options={{ headerShown: false }} />
+          {/* MODULE 3: landing screen for the Continue button in
+              SelectStudents. Owns its own header. */}
+          <Stack.Screen name="EventRegistrationForm" component={EventRegistrationFormScreen}
+            options={{ headerShown: false }} />
+          {/* MODULE 4: Organizer registration list + detail. */}
+          <Stack.Screen name="EventRegistrationsList" component={EventRegistrationsListScreen}
+            options={{ headerShown: false }} />
+          <Stack.Screen name="EventRegistrationDetail" component={EventRegistrationDetailScreen}
+            options={{ headerShown: false }} />
+          {/* Registered Students TABLE view — launched from
+              InstitutionEventDetail's "Registered Students" button.
+              Horizontally-scrollable table + CSV export. */}
+          <Stack.Screen name="EventRegistrationsTable" component={EventRegistrationsTableScreen}
+            options={{ headerShown: false }} />
           {/* PricingPlansScreen — reached from More tab. Renders its own header. */}
           <Stack.Screen name="PricingPlans" component={PricingPlansScreen}
             options={{ headerShown: false }} />
@@ -391,6 +442,14 @@ export default function AppNavigator() {
           {/* AdminReferEarnScreen renders its own header. */}
           <Stack.Screen name="AdminReferEarn" component={AdminReferEarnScreen}
             options={{ headerShown: false }} />
+          {/* Full Recent Activity feed — opened from the dashboard
+              teaser's "See all" link. Screen owns its own header. */}
+          <Stack.Screen name="RecentActivity" component={RecentActivityScreen}
+            options={{ headerShown: false }} />
+          {/* Monthly Revenue Details — opened from the dashboard chart's
+              "Details" link. Screen owns its own header. */}
+          <Stack.Screen name="RevenueDetails" component={RevenueDetailsScreen}
+            options={{ headerShown: false }} />
           {/* Admins reuse the same Notifications inbox as staff/parent —
               it scopes to the calling user via JWT, so it works for every role. */}
           <Stack.Screen name="StaffNotifications" component={StaffNotificationsScreen} />
@@ -413,6 +472,22 @@ export default function AppNavigator() {
           <Stack.Screen
             name="AdminCertificates"
             component={AdminCertificatesScreen}
+            options={{ headerShown: false }}
+          />
+          {/* Institution → Dispatched Certificates archive. Lists
+              every issued cert with a mini preview; tap opens the
+              exact artwork via CertificateDetail (student's viewer). */}
+          <Stack.Screen
+            name="AdminDispatchedCertificates"
+            component={AdminDispatchedCertificatesScreen}
+            options={{ headerShown: false }}
+          />
+          {/* Certificate viewer — reused verbatim from the student
+              side so the admin sees the exact artwork that was
+              dispatched (same template, placeholders, QR link). */}
+          <Stack.Screen
+            name="CertificateDetail"
+            component={CertificateDetailScreen}
             options={{ headerShown: false }}
           />
           {/* Certificate Templates CRUD + editor. Institution admin

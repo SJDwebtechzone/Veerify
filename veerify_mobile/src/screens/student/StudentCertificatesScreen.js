@@ -24,6 +24,22 @@ import {
 import apiClient from '../../api/client';
 import { palette, spacing, radius, shadows, type } from '../../theme';
 import resolveAssetUrl from '../../utils/assetUrl';
+// Display-only belt normalization. Legacy belt certificates were
+// stored with titles like "Black Belt"; the list shows just "Black".
+import { stripBeltSuffix } from '../../utils/beltDisplay';
+// Public verify URL builder — resolves to /certificates/verify/:token
+// (never the raw /api/... JSON endpoint).
+import buildPublicVerifyUrl from '../../utils/certificateVerify';
+
+// Best-effort display helper for a belt-typed certificate title.
+// Non-belt certs (tournament / completion / achievement) pass
+// through untouched.
+function displayCertTitle(cert) {
+  if (!cert) return '';
+  const raw = cert.title || '';
+  if (cert.kind === 'belt') return stripBeltSuffix(raw) || raw;
+  return raw;
+}
 
 function fmtDate(iso) {
   if (!iso) return '—';
@@ -57,11 +73,10 @@ export default function StudentCertificatesScreen({ navigation }) {
 
   const shareCert = async (cert) => {
     try {
-      const base = (apiClient?.defaults?.baseURL || '').replace(/\/api\/?$/, '');
-      const verifyUrl = cert.qr_token
-        ? `${base}/api/certificates/verify/${cert.qr_token}`
-        : null;
-      const courseName = cert.title || 'Certificate';
+      // Public HTML verifier — safe to share externally. Never link
+      // out to the raw /api/... JSON endpoint.
+      const verifyUrl = buildPublicVerifyUrl(cert);
+      const courseName = displayCertTitle(cert) || 'Certificate';
       const instName = cert.institution_name || 'Academy';
       let msg = `🎓 ${courseName}\nIssued by: ${instName}\nDate: ${fmtDate(cert.issue_date)}`;
       if (cert.certificate_no) msg += `\nCertificate No: ${cert.certificate_no}`;
@@ -162,7 +177,7 @@ export default function StudentCertificatesScreen({ navigation }) {
                     <ShieldCheck size={16} color={palette.green.on} strokeWidth={2.4} />
                   </View>
                   <View style={{ flex: 1, minWidth: 0 }}>
-                    <Text style={styles.courseName} numberOfLines={1}>{c.title}</Text>
+                    <Text style={styles.courseName} numberOfLines={1}>{displayCertTitle(c)}</Text>
                     <Text style={styles.subMeta} numberOfLines={1}>
                       {c.institution_name || ''}  ·  {fmtDate(c.issue_date)}
                     </Text>

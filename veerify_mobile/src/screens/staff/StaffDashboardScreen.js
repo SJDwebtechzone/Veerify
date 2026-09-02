@@ -202,7 +202,16 @@ export default function StaffDashboardScreen({ navigation }) {
           >
             <View style={styles.avatar}>
               {photoUrl ? (
-                <Image source={{ uri: photoUrl }} style={styles.avatarImg} />
+                // Explicit resizeMode='cover' so a future refactor of
+                // avatarImg (which uses 100% width/height) can't
+                // accidentally regress into stretch. The parent
+                // `avatar` already provides the circular clip via
+                // borderRadius + overflow:hidden.
+                <Image
+                  source={{ uri: photoUrl }}
+                  style={styles.avatarImg}
+                  resizeMode="cover"
+                />
               ) : (
                 <Text style={styles.avatarText}>{initials}</Text>
               )}
@@ -442,6 +451,20 @@ function EventRow({ event, onPress }) {
             {event.subtitle}
           </Text>
         ) : null}
+        {/* Organizer line — same broad predicate as the student
+            dashboard so trainers see which academy submitted the
+            cross-institution event even if only one of the name
+            fields comes through in the payload. */}
+        {(() => {
+          const org = event.organizing_institution_name || event.institution_name || null;
+          const isGlobalish = event.event_type === 'intra' || event.source === 'global';
+          if (!org || !isGlobalish) return null;
+          return (
+            <Text style={{ fontSize: 11, color: '#EF4444', marginTop: 2, fontWeight: '700' }} numberOfLines={1}>
+              Organized by {org}
+            </Text>
+          );
+        })()}
         {event.location ? (
           <Text style={{ fontSize: 11, color: '#9CA3AF', marginTop: 2 }} numberOfLines={1}>
             📍 {event.location}

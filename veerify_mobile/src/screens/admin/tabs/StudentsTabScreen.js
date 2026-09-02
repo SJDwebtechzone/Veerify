@@ -27,6 +27,10 @@ import { palette, spacing, radius, shadows, type } from '../../../theme';
 import FAB from '../../../components/FAB';
 import PlanLimitModal from '../../../components/PlanLimitModal';
 import { confirm } from '../../../components/ConfirmDialog';
+// Shared Institution-admin ambient background — light-blue wash
+// + soft blue glow blobs. Same visual atmosphere as the Home
+// screen so tabs read as one unified glassmorphism environment.
+import InstitutionScreenBackground from '../../../components/InstitutionScreenBackground';
 
 const TABS = ['All', 'Active', 'Inactive'];
 
@@ -234,6 +238,10 @@ export default function StudentsTabScreen({ navigation, route }) {
 
   return (
     <View style={styles.screen}>
+      {/* Shared ambient background — SVG wash + glow blobs painted
+          behind everything. pointerEvents="none" inside, so taps
+          continue to reach the header, search, list, and FAB. */}
+      <InstitutionScreenBackground layer />
       {/* ───── Header ───── */}
       <View style={styles.header}>
         <View style={{ flex: 1 }}>
@@ -449,7 +457,10 @@ function Avatar({ photoUrl, name, accent }) {
 
 // ─── Styles ──────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: palette.bg },
+  // Base fill matches the shared Institution ambient background
+  // so there's no flash of the old grey/white before the SVG layer
+  // paints on first frame.
+  screen: { flex: 1, backgroundColor: '#F1F6FB' },
 
   // Header
   header: {
@@ -461,24 +472,55 @@ const styles = StyleSheet.create({
   },
   title: { ...type.display, color: palette.text },
   subtitle: { ...type.caption, color: palette.textMuted, marginTop: 2 },
+  // Icon button — glass chip so it matches the Home identity card's
+  // premium blue-tinted glass language rather than reading as a
+  // solid white circle.
   iconButton: {
     width: 42, height: 42, borderRadius: 21,
-    backgroundColor: palette.surface,
+    backgroundColor: 'rgba(255,255,255,0.62)',
+    borderTopWidth: 1.5,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderLeftWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.95)',
+    borderRightColor: 'rgba(255,255,255,0.6)',
+    borderBottomColor: 'rgba(255,255,255,0.6)',
+    borderLeftColor: 'rgba(255,255,255,0.6)',
     alignItems: 'center', justifyContent: 'center',
-    ...shadows.card,
+    // Cool blue shadow — reads as glass caught in ambient light
+    // (matches the shadow language on Home's stat cards).
+    shadowColor: '#1E40AF',
+    shadowOpacity: 0.10,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
   },
 
-  // Search
+  // Search — frosted glass bar. The ambient blue background shows
+  // through faintly so the bar reads as a translucent panel rather
+  // than a solid white pill.
   searchWrap: {
     marginHorizontal: spacing.xl,
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
-    backgroundColor: palette.surface,
+    backgroundColor: 'rgba(255,255,255,0.6)',
+    borderTopWidth: 1.5,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderLeftWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.95)',
+    borderRightColor: 'rgba(255,255,255,0.6)',
+    borderBottomColor: 'rgba(255,255,255,0.6)',
+    borderLeftColor: 'rgba(255,255,255,0.6)',
     borderRadius: radius.lg,
     paddingHorizontal: spacing.lg,
     height: 48,
-    ...shadows.card,
+    shadowColor: '#1E40AF',
+    shadowOpacity: 0.10,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
   },
   searchInput: {
     flex: 1,
@@ -494,6 +536,9 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.lg,
     gap: spacing.sm,
   },
+  // Inactive tab — translucent glass pill so the ambient background
+  // shows through. Active tab keeps the brand red so the Students
+  // section's identity color still leads the eye.
   tab: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -501,15 +546,20 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.lg,
     height: 36,
     borderRadius: radius.pill,
-    backgroundColor: palette.surface,
+    backgroundColor: 'rgba(255,255,255,0.55)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.75)',
   },
-  tabFocused: { backgroundColor: palette.purple.vivid },
+  tabFocused: {
+    backgroundColor: palette.purple.vivid,
+    borderColor: palette.purple.vivid,
+  },
   tabText: { ...type.caption, color: palette.textMuted, fontWeight: '600' },
   tabTextFocused: { color: '#fff' },
   tabBadge: {
     minWidth: 22, height: 20, paddingHorizontal: 6,
     borderRadius: 10,
-    backgroundColor: palette.borderSoft,
+    backgroundColor: 'rgba(148,163,184,0.22)',
     alignItems: 'center', justifyContent: 'center',
   },
   tabBadgeFocused: { backgroundColor: 'rgba(255,255,255,0.25)' },
@@ -529,15 +579,33 @@ const styles = StyleSheet.create({
   emptyTitle: { ...type.h2, color: palette.text, marginTop: spacing.md },
   emptyBody: { ...type.body, color: palette.textMuted, textAlign: 'center' },
 
-  // Row
+  // Student row — premium glass card. Translucent white surface so
+  // the ambient light-blue background bleeds through and the card
+  // reads as genuine glass, not a flat white panel. Bright glossy
+  // top-edge highlight, cool-blue drop-shadow, softer sides.
   row: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.md,
-    backgroundColor: palette.surface,
-    borderRadius: radius.lg,
+    backgroundColor: 'rgba(255,255,255,0.6)',
+    borderTopWidth: 1.5,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderLeftWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.95)',
+    borderRightColor: 'rgba(255,255,255,0.6)',
+    borderBottomColor: 'rgba(255,255,255,0.6)',
+    borderLeftColor: 'rgba(255,255,255,0.6)',
+    borderRadius: radius.xl,
     padding: spacing.lg,
-    ...shadows.card,
+    // Cool-blue drop-shadow so the card feels lifted off the
+    // ambient blue background — same shadow language as the Home
+    // stat cards.
+    shadowColor: '#1E40AF',
+    shadowOpacity: 0.11,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 4,
   },
   avatar: {
     width: 50, height: 50, borderRadius: 25,

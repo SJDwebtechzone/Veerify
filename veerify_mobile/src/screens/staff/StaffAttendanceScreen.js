@@ -21,7 +21,7 @@
 // Status codes match the (newly widened) attendance.status CHECK constraint:
 // 'present' | 'absent' | 'late' | 'leave'.
 
-import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import React, { createContext, useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, TextInput, Alert,
   ActivityIndicator, StyleSheet, FlatList,
@@ -36,6 +36,45 @@ import { palette, spacing, radius, shadows, type } from '../../theme';
 import { confirm } from '../../components/ConfirmDialog';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import ExportAttendanceModal from '../../components/ExportAttendanceModal';
+// Institution Home visual system — ambient blue wash + glass
+// cards + navy accents. The Branch Attendance flow reuses this
+// screen with mode='branch', so restyling here brings both the
+// trainer and branch admin attendance surfaces onto the same
+// visual language as Institution Home.
+import InstitutionScreenBackground, {
+  INSTITUTION_BG_BASE,
+} from '../../components/InstitutionScreenBackground';
+import { useTheme } from '../../theme/ThemeContext';
+
+// ── Institution-Home glass tokens ─────────────────────────────
+const GLASS_FILL         = 'rgba(255,255,255,0.72)';
+const GLASS_FILL_STRONG  = 'rgba(255,255,255,0.88)';
+const GLASS_BORDER_LIGHT = 'rgba(255,255,255,0.55)';
+const GLASS_HIGHLIGHT    = 'rgba(255,255,255,0.9)';
+const GLASS_SHADOW       = '#1E40AF';
+const BRAND_DARK_BLUE    = '#1E3A8A';
+const BRAND_ACCENT_SOFT  = 'rgba(30,58,138,0.10)';
+const HEADER_NAVY        = '#0F172A';
+
+// Local context so nested sub-components pick up dark-mode
+// overrides without prop-drilling.
+const AttendanceCtx = createContext({ isDark: false, dark: {} });
+
+function buildDarkOverrides(pal) {
+  return StyleSheet.create({
+    screen:         { backgroundColor: pal.bg },
+    header:         { backgroundColor: pal.surface, borderBottomColor: pal.border },
+    headerTitle:    { color: pal.text },
+    headerSub:      { color: pal.textMuted },
+    iconBtn:        { backgroundColor: pal.border },
+    card:           { backgroundColor: pal.surface, borderColor: pal.border },
+    batchCard:      { backgroundColor: pal.surface, borderColor: pal.border },
+    studentCard:    { backgroundColor: pal.surface, borderColor: pal.border },
+    section:        { backgroundColor: pal.surface, borderColor: pal.border },
+    sectionTitle:   { color: pal.textMuted },
+    label:          { color: pal.textMuted },
+  });
+}
 
 // ── Status config ─────────────────────────────────────────────────────────
 // Single source of truth — order here drives both the live-counter strip and
@@ -480,18 +519,27 @@ export default function StaffAttendanceScreen({ navigation, route }) {
     return unsub;
   }, [navigation, dirty, submitted]);
 
+  // Dark-mode overrides pulled from the shared ThemeContext.
+  // Institution Home's ambient background is skipped in dark mode.
+  const { mode: themeMode, palette: themePalette } = useTheme();
+  const isDark = themeMode === 'dark';
+  const dark   = useMemo(() => (isDark ? buildDarkOverrides(themePalette) : {}), [isDark, themePalette]);
+
   // ── Render ──
   return (
-    <View style={styles.screen}>
+    <AttendanceCtx.Provider value={{ isDark, dark }}>
+    <View style={[styles.screen, isDark && dark.screen]}>
+      {/* Institution Home ambient wash — sits behind all content. */}
+      {!isDark ? <InstitutionScreenBackground layer /> : null}
       {/* Header */}
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.iconBtn}>
-          <ArrowLeft size={20} color={palette.text} strokeWidth={2.2} />
+      <View style={[styles.header, isDark && dark.header]}>
+        <TouchableOpacity onPress={() => navigation.goBack()} style={[styles.iconBtn, isDark && dark.iconBtn]}>
+          <ArrowLeft size={20} color={isDark ? themePalette.text : HEADER_NAVY} strokeWidth={2.2} />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
-          <Text style={styles.headerTitle}>{headerTitle}</Text>
+          <Text style={[styles.headerTitle, isDark && dark.headerTitle]}>{headerTitle}</Text>
           {selectedBatch ? (
-            <Text style={styles.headerSub} numberOfLines={1}>
+            <Text style={[styles.headerSub, isDark && dark.headerSub]} numberOfLines={1}>
               {selectedBatch.name}
               {selectedBatch.course_name ? ` · ${selectedBatch.course_name}` : ''}
             </Text>
@@ -738,6 +786,7 @@ export default function StaffAttendanceScreen({ navigation, route }) {
         </TouchableOpacity>
       </View>
     </View>
+    </AttendanceCtx.Provider>
   );
 }
 
@@ -889,9 +938,10 @@ function StudentRow({ student, status, onSet }) {
 
 // ─── Styles ───────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: palette.bg },
+  // Institution Home ambient page base — the wash SVG paints on top.
+  screen: { flex: 1, backgroundColor: INSTITUTION_BG_BASE },
 
-  // Header
+  // Header — glass slab with a navy title and soft blue lift shadow.
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -899,16 +949,22 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.lg,
     paddingTop: spacing.xxl + 4,
     paddingBottom: spacing.md,
-    backgroundColor: palette.surface,
-    ...shadows.card,
+    backgroundColor: GLASS_FILL_STRONG,
+    borderBottomWidth: 1, borderBottomColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
   },
   iconBtn: {
     width: 36, height: 36, borderRadius: 18,
     alignItems: 'center', justifyContent: 'center',
-    backgroundColor: palette.borderSoft,
+    backgroundColor: BRAND_ACCENT_SOFT,
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
   },
-  headerTitle: { ...type.h1, color: palette.text, fontSize: 18 },
-  headerSub: { ...type.caption, color: palette.textMuted, marginTop: 1 },
+  headerTitle: { ...type.h1, color: HEADER_NAVY, fontSize: 18, letterSpacing: 0.2 },
+  headerSub:   { ...type.caption, color: palette.textMuted, marginTop: 1, fontWeight: '600' },
   historyBtn: {
     flexDirection: 'row', alignItems: 'center', gap: 4,
     paddingHorizontal: spacing.sm, paddingVertical: 6,

@@ -14,10 +14,17 @@ interface SidebarProps {
 // Map a child route to a live counter from the notifications context. Keeping
 // this lookup table here (rather than baking it into nav.ts) keeps the nav
 // definition pure data and avoids a circular import.
-function badgeCountFor(to: string, counts: ReturnType<typeof useNotifications>['counts']): number {
+function badgeCountFor(
+  to: string,
+  counts: ReturnType<typeof useNotifications>['counts'],
+  intraPendingCount: number,
+): number {
   switch (to) {
     case '/institutions/pending':  return counts.pending_approval;
     case '/institutions/expired':  return counts.expired;
+    // Intra-Level event approval queue — sourced from the
+    // /intra-events/pending-count poll in NotificationsProvider.
+    case '/events/approvals':      return intraPendingCount;
     default: return 0;
   }
 }
@@ -74,7 +81,7 @@ export function Sidebar({ open, onClose }: SidebarProps) {
 
 function NavGroup({ section }: { section: NavSection }) {
   const location = useLocation();
-  const { counts } = useNotifications();
+  const { counts, intraPendingCount } = useNotifications();
   const isActive = section.children?.some((c) => location.pathname === c.to) ?? false;
   const [open, setOpen] = useState(isActive);
 
@@ -83,10 +90,15 @@ function NavGroup({ section }: { section: NavSection }) {
   // Aggregate badge count for the parent: sum of badged children. Lets the
   // user see "there's something pending under here" even when collapsed.
   const parentBadge = section.children
-    ? section.children.reduce((sum, c) => sum + badgeCountFor(c.to, counts), 0)
+    ? section.children.reduce((sum, c) => sum + badgeCountFor(c.to, counts, intraPendingCount), 0)
     : 0;
 
   if (!section.children) {
+    // Top-level leaf entries can also carry a badge (e.g. the
+    // "Event Approvals" queue). We compute the same way as the
+    // grouped children so a single Icon + label + trailing badge
+    // stays consistent across the sidebar.
+    const leafBadge = badgeCountFor(section.to!, counts, intraPendingCount);
     return (
       <NavLink
         to={section.to!}
@@ -100,7 +112,8 @@ function NavGroup({ section }: { section: NavSection }) {
         }
       >
         <Icon className="w-[18px] h-[18px]" />
-        <span>{section.label}</span>
+        <span className="flex-1">{section.label}</span>
+        {leafBadge > 0 && <CountBadge count={leafBadge} small />}
       </NavLink>
     );
   }
@@ -124,7 +137,7 @@ function NavGroup({ section }: { section: NavSection }) {
       {open && (
         <div className="mt-1 ml-5 pl-4 border-l border-slate-200 dark:border-slate-800 space-y-0.5 animate-fade-in">
           {section.children.map((child) => (
-            <ChildLink key={child.to} child={child} count={badgeCountFor(child.to, counts)} />
+            <ChildLink key={child.to} child={child} count={badgeCountFor(child.to, counts, intraPendingCount)} />
           ))}
         </div>
       )}

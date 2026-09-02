@@ -20,7 +20,7 @@
 // New columns live on the `trainers` table (migration 016). Photo and
 // certificate uploads land on /api/uploads.
 
-import React, { useEffect, useMemo, useState, useRef } from 'react';
+import React, { createContext, useEffect, useMemo, useState, useRef } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView, Image,
   Alert, ActivityIndicator, StyleSheet, KeyboardAvoidingView, Platform,
@@ -47,16 +47,57 @@ import PasswordInput from '../../components/PasswordInput';
 import { useAuth } from '../../context/AuthContext';
 import PlanLimitModal from '../../components/PlanLimitModal';
 import { confirm } from '../../components/ConfirmDialog';
+// Shared canonical-list dropdown — used by every admin form that
+// needs to render the master Skill / Belt / Category lists.
+import LookupDropdown from '../../components/LookupDropdown';
+// Institution Home visual system — ambient blue wash + glass
+// cards + navy accents. Reused verbatim so this screen belongs to
+// the same design language as the rest of the institution UI.
+import InstitutionScreenBackground, {
+  INSTITUTION_BG_BASE,
+} from '../../components/InstitutionScreenBackground';
+import { useTheme } from '../../theme/ThemeContext';
 
-// ─── Theme tokens (kept local to avoid coupling to ../theme) ───────────
+// ── Institution-Home glass tokens ─────────────────────────────
+const GLASS_FILL         = 'rgba(255,255,255,0.72)';
+const GLASS_FILL_STRONG  = 'rgba(255,255,255,0.88)';
+const GLASS_BORDER_LIGHT = 'rgba(255,255,255,0.55)';
+const GLASS_HIGHLIGHT    = 'rgba(255,255,255,0.9)';
+const GLASS_SHADOW       = '#1E40AF';
+const BRAND_DARK_BLUE    = '#1E3A8A';
+const BRAND_ACCENT_SOFT  = 'rgba(30,58,138,0.10)';
+const HEADER_NAVY        = '#0F172A';
+
+// ─── Theme tokens (repointed to the Institution Home palette) ─────────
+// SURFACE / BG / BORDER / TEXT names kept unchanged so no downstream
+// style reference needs a rename — every card, border and text
+// declaration inherits the new look automatically.
 const BRAND = '#E63946';
 const BRAND_SOFT = '#FFE4E6';
-const TEXT = '#111827';
+const TEXT = HEADER_NAVY;
 const TEXT_MUTED = '#6B7280';
 const TEXT_LIGHT = '#9CA3AF';
-const SURFACE = '#FFFFFF';
-const BG = '#F4F4F8';
-const BORDER = '#E5E7EB';
+const SURFACE = GLASS_FILL_STRONG;
+const BG = INSTITUTION_BG_BASE;
+const BORDER = GLASS_BORDER_LIGHT;
+
+// Local context so nested sub-components pick up dark-mode
+// overrides without prop-drilling.
+const CreateTrainerCtx = createContext({ isDark: false, dark: {} });
+
+function buildDarkOverrides(pal) {
+  return StyleSheet.create({
+    screen:      { backgroundColor: pal.bg },
+    header:      { backgroundColor: pal.surface, borderBottomColor: pal.border },
+    headerTitle: { color: pal.text },
+    headerSub:   { color: pal.textMuted },
+    iconBtn:     { backgroundColor: pal.border },
+    card:        { backgroundColor: pal.surface, borderColor: pal.border },
+    sectionTitle:{ color: pal.textMuted },
+    label:       { color: pal.textMuted },
+    value:       { color: pal.text },
+  });
+}
 
 const GENDERS = ['Male', 'Female', 'Other', 'Prefer not to say'];
 
@@ -64,14 +105,46 @@ const GOVT_PROOF_TYPES = [
   'Aadhaar', 'PAN', 'Driving License', 'Voter ID', 'Passport',
 ];
 
-// Dropdown options for the Skill / Specialization field. Single-select —
-// the trainer picks one discipline. Yoga + Tamil traditional arts are
-// included alongside the combat disciplines so wellness- and
-// tradition-focused trainers can register.
+// Offline fallback lists — these MUST stay byte-identical to the
+// canonical arrays in backend/src/config/enums.js (which in turn
+// mirror the Academy Setup #SKILL_OPTIONS and the Student Enrollment
+// #BELT_OPTIONS). We ship the full canonical set here so the form
+// works completely offline OR on a build where the backend hasn't
+// been restarted after /config/enums was added. On every online
+// launch the /config/enums response overrides these so a future
+// addition on the backend still lands automatically.
 const SKILL_SUGGESTIONS = [
-  'Karate', 'Silambam', 'Kalaripayattu', 'Adimurai',
-  'Taekwondo', 'Boxing', 'Muay Thai',
-  'BJJ', 'Judo', 'Kung Fu', 'MMA', 'Self Defense', 'Yoga',
+  'Karate',
+  'Taekwondo',
+  'Kung Fu',
+  'Judo',
+  'Boxing',
+  'Muay Thai',
+  'Brazilian Jiu-Jitsu (BJJ)',
+  'MMA',
+  'Yoga',
+  'Silambam',
+  'Kalaripayattu',
+  'Adimurai',
+  'Aikido',
+  'Krav Maga',
+  'Kickboxing',
+  'Self Defense',
+];
+const BELT_SUGGESTIONS = [
+  'White',
+  'Yellow',
+  'Orange',
+  'Green',
+  'Blue',
+  'Blue I',
+  'Blue II',
+  'Gray',
+  'Brown I',
+  'Brown II',
+  'Brown III',
+  'Black',
+  'Other',
 ];
 
 // Compute the age (in years) from an ISO YYYY-MM-DD birthday.
@@ -147,6 +220,42 @@ export default function CreateTrainerScreen({ navigation, route }) {
   // response body so the modal can show the real plan name + counts.
   const [planLimit, setPlanLimit] = useState(null);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
+
+  // Canonical enum lists (skills + belts) pulled from GET
+  // /config/enums so the Trainer form's dropdowns render the SAME
+  // options as the Academy Setup form (skills) and the Student
+  // Enrollment form (belts). No hardcoded lists live in this file
+  // beyond the offline fallbacks above. Any addition to the master
+  // lists on the backend / mobile constants shows up here on next
+  // form open.
+  const [canonicalSkills, setCanonicalSkills] = useState(SKILL_SUGGESTIONS);
+  const [canonicalBelts,  setCanonicalBelts]  = useState(BELT_SUGGESTIONS);
+  useEffect(() => {
+    let cancelled = false;
+    apiClient
+      .get('/config/enums')
+      .then((r) => {
+        if (cancelled) return;
+        const s = Array.isArray(r.data?.skills) ? r.data.skills.map(String) : [];
+        const b = Array.isArray(r.data?.belts)  ? r.data.belts.map(String)  : [];
+        if (s.length) setCanonicalSkills(s);
+        if (b.length) setCanonicalBelts(b);
+      })
+      .catch((err) => {
+        // Log so a stale-backend miss is visible next time. Falls
+        // back to the local SKILL_SUGGESTIONS / BELT_SUGGESTIONS —
+        // now byte-identical to the canonical arrays, so the
+        // dropdowns render the full list even if the endpoint 404s
+        // (e.g. backend hasn't been restarted after the /config/enums
+        // route was added).
+        // eslint-disable-next-line no-console
+        console.warn(
+          '[CreateTrainer] /config/enums fetch failed — using local fallback lists:',
+          err?.response?.status || err?.message,
+        );
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   // ── Skills (structured, multi-entry) ─────────────────────────────────
   // Every skill carries its own name, belt level, years of experience,
@@ -657,25 +766,37 @@ export default function CreateTrainerScreen({ navigation, route }) {
     .split(' ').map((w) => w[0]).filter(Boolean).slice(0, 2).join('').toUpperCase()
     || '?';
 
+  // Dark-mode overrides pulled from the shared ThemeContext.
+  // Institution Home's ambient background layer is skipped in dark
+  // mode; every card/border/text colour falls back to the palette.
+  const { mode, palette: themePalette } = useTheme();
+  const isDark = mode === 'dark';
+  const dark   = useMemo(() => (isDark ? buildDarkOverrides(themePalette) : {}), [isDark, themePalette]);
+
   return (
+    <CreateTrainerCtx.Provider value={{ isDark, dark }}>
     <KeyboardAvoidingView
-      style={styles.screen}
+      style={[styles.screen, isDark && dark.screen]}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
+      {/* Institution Home ambient wash — mounted behind all
+          content. Skipped in dark mode so the near-black surface
+          keeps its contrast. */}
+      {!isDark ? <InstitutionScreenBackground layer /> : null}
       {/* Header */}
-      <View style={styles.header}>
+      <View style={[styles.header, isDark && dark.header]}>
         <TouchableOpacity
           onPress={() => navigation.goBack()}
-          style={styles.iconBtn}
+          style={[styles.iconBtn, isDark && dark.iconBtn]}
           activeOpacity={0.7}
         >
-          <ArrowLeft size={20} color={TEXT} strokeWidth={2.2} />
+          <ArrowLeft size={20} color={isDark ? themePalette.text : TEXT} strokeWidth={2.2} />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
-          <Text style={styles.headerTitle}>
+          <Text style={[styles.headerTitle, isDark && dark.headerTitle]}>
             {isEditing ? 'Edit Trainer' : 'Enroll Staff'}
           </Text>
-          <Text style={styles.headerSub}>
+          <Text style={[styles.headerSub, isDark && dark.headerSub]}>
             {isEditing
               ? `Update ${editingTrainer?.name || 'trainer'}\'s profile`
               : `Adds a trainer to ${academyLoading ? '…' : (academyName || 'your academy')}`}
@@ -858,24 +979,31 @@ export default function CreateTrainerScreen({ navigation, route }) {
             </View>
 
             <Field label="Skill name" required>
-              <TextInput
-                style={styles.input}
-                placeholder="e.g. Karate"
-                placeholderTextColor={TEXT_LIGHT}
+              {/* Searchable dropdown backed by the canonical skills
+                  list (/config/enums) — same list that powers the
+                  Academy Setup form. Any legacy value not in that
+                  list is preserved and merged in below so existing
+                  saved trainers still show correctly. */}
+              <LookupDropdown
                 value={skill.name}
-                onChangeText={(v) => patchSkill(idx, { name: v })}
-                maxLength={80}
+                options={canonicalSkills}
+                onSelect={(v) => patchSkill(idx, { name: v })}
+                placeholder="Choose a skill"
+                emptyText="No skills available."
               />
             </Field>
 
             <View style={styles.row}>
               <Field label="Belt level" style={{ flex: 1, marginRight: 8 }}>
-                <TextInput
-                  style={styles.input}
-                  placeholder="e.g. Black Belt 3rd Dan"
-                  placeholderTextColor={TEXT_LIGHT}
+                {/* Searchable dropdown backed by the canonical belts
+                    list (/config/enums) — same list that powers the
+                    Student Enrollment form. */}
+                <LookupDropdown
                   value={skill.belt_level}
-                  onChangeText={(v) => patchSkill(idx, { belt_level: v })}
+                  options={canonicalBelts}
+                  onSelect={(v) => patchSkill(idx, { belt_level: v })}
+                  placeholder="Choose a belt"
+                  emptyText="No belts available."
                 />
               </Field>
               <Field label="Years" style={{ flex: 1, marginLeft: 8 }}>
@@ -1033,8 +1161,197 @@ export default function CreateTrainerScreen({ navigation, route }) {
         }}
       />
     </KeyboardAvoidingView>
+    </CreateTrainerCtx.Provider>
   );
 }
+
+// LookupDropdown lives in ../../components/LookupDropdown now — the
+// inline copy that used to sit here has moved to a shared component
+// so CreateCourseScreen (Category picker) and any future admin form
+// pick up the same styling / behaviour automatically.
+
+// eslint-disable-next-line no-unused-vars
+function _UNUSED_LookupDropdown_LEGACY({
+  value, options, onSelect, placeholder, emptyText,
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  // Merge canonical options + any legacy value that isn't in the
+  // canonical list. Preserves saved rows created before the enum
+  // list existed / was updated.
+  const merged = useMemo(() => {
+    const canonical = Array.isArray(options) ? options.map(String) : [];
+    const has = new Set(canonical);
+    const legacy = value && !has.has(String(value)) ? [String(value)] : [];
+    return [...canonical, ...legacy];
+  }, [options, value]);
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return merged;
+    return merged.filter((o) => o.toLowerCase().includes(q));
+  }, [merged, query]);
+  return (
+    <View>
+      <TouchableOpacity
+        style={[styles.input, { flexDirection: 'row', alignItems: 'center' }]}
+        onPress={() => setOpen((o) => !o)}
+        activeOpacity={0.85}
+        accessibilityRole="button"
+        accessibilityLabel={placeholder}
+      >
+        <Text
+          numberOfLines={1}
+          style={{
+            flex: 1,
+            color: value ? TEXT : TEXT_LIGHT,
+            fontSize: 14,
+          }}
+        >
+          {value || placeholder}
+        </Text>
+        <ChevronDown
+          size={16}
+          color={TEXT_MUTED}
+          strokeWidth={2}
+          style={{ transform: [{ rotate: open ? '180deg' : '0deg' }] }}
+        />
+      </TouchableOpacity>
+
+      {open ? (
+        <View style={dropdownStyles.panel}>
+          {/* Search input — always visible so long lists (canonical
+              skills has 16, canonical belts has 13) stay usable. */}
+          <TextInput
+            value={query}
+            onChangeText={setQuery}
+            placeholder="Search…"
+            placeholderTextColor={TEXT_LIGHT}
+            style={dropdownStyles.search}
+            autoCorrect={false}
+            autoCapitalize="none"
+          />
+          {filtered.length === 0 ? (
+            <View style={dropdownStyles.emptyRow}>
+              <Text style={dropdownStyles.emptyText}>
+                {emptyText || 'No matches.'}
+              </Text>
+            </View>
+          ) : (
+            // Nested ScrollView so the FULL list is reachable inside
+            // the dropdown's fixed max-height — a plain View + map
+            // just clipped anything past the first ~6 rows. Requires
+            // nestedScrollEnabled on Android for touches to pass
+            // through the outer form ScrollView.
+            <ScrollView
+              style={dropdownStyles.list}
+              nestedScrollEnabled
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator
+            >
+              {filtered.map((opt, idx) => {
+                const selected = opt === value;
+                return (
+                  <TouchableOpacity
+                    key={`${opt}-${idx}`}
+                    style={[
+                      dropdownStyles.row,
+                      idx > 0 && dropdownStyles.rowSep,
+                      selected && dropdownStyles.rowSelected,
+                    ]}
+                    onPress={() => {
+                      onSelect(opt);
+                      setQuery('');
+                      setOpen(false);
+                    }}
+                    activeOpacity={0.85}
+                  >
+                    <Text
+                      style={[
+                        dropdownStyles.rowText,
+                        selected && dropdownStyles.rowTextSelected,
+                      ]}
+                      numberOfLines={1}
+                    >
+                      {opt}
+                    </Text>
+                    {selected ? (
+                      <Check size={14} color={BRAND} strokeWidth={2.6} />
+                    ) : null}
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          )}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+const dropdownStyles = StyleSheet.create({
+  panel: {
+    marginTop: 6,
+    backgroundColor: SURFACE,
+    borderWidth: 1,
+    borderColor: BORDER,
+    borderRadius: 12,
+    paddingVertical: 6,
+    // Cap the height so the panel never pushes the rest of the form
+    // off screen; the list inside scrolls independently.
+    maxHeight: 240,
+    // overflow:'hidden' both clips the border radius on the inner
+    // ScrollView and prevents the "half-row peeking below the panel"
+    // symptom users saw before nested scrolling was enabled.
+    overflow: 'hidden',
+  },
+  list: {
+    // Leave room for the search field above (~44px) so the list is
+    // as tall as it can be inside the panel and rows never look
+    // cramped.
+    maxHeight: 190,
+  },
+  search: {
+    marginHorizontal: 8,
+    marginBottom: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: BG,
+    fontSize: 13,
+    color: TEXT,
+  },
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  rowSep: {
+    borderTopWidth: 1,
+    borderTopColor: BORDER,
+  },
+  rowSelected: {
+    backgroundColor: BRAND_SOFT,
+  },
+  rowText: {
+    flex: 1,
+    fontSize: 14,
+    color: TEXT,
+  },
+  rowTextSelected: {
+    color: BRAND,
+    fontWeight: '700',
+  },
+  emptyRow: {
+    paddingHorizontal: 12,
+    paddingVertical: 14,
+  },
+  emptyText: {
+    fontSize: 13,
+    color: TEXT_LIGHT,
+    fontStyle: 'italic',
+  },
+});
 
 // ─── Reusable bits ─────────────────────────────────────────────────────
 function SectionTitle({ icon: Icon, title }) {
@@ -1230,19 +1547,27 @@ function ChipRow({ options, value, onChange }) {
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: BG },
 
+  // Header — glass-tinted white slab with a navy title. Soft blue
+  // shadow so it lifts off the Institution Home ambient wash.
   header: {
     flexDirection: 'row', alignItems: 'center', gap: 10,
     paddingHorizontal: 16, paddingTop: 44, paddingBottom: 12,
-    backgroundColor: SURFACE,
-    borderBottomWidth: 1, borderBottomColor: BORDER,
+    backgroundColor: GLASS_FILL_STRONG,
+    borderBottomWidth: 1, borderBottomColor: GLASS_BORDER_LIGHT,
+    shadowColor: GLASS_SHADOW,
+    shadowOpacity: 0.10,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
   },
   iconBtn: {
     width: 36, height: 36, borderRadius: 18,
-    backgroundColor: BG,
+    backgroundColor: BRAND_ACCENT_SOFT,
     alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: GLASS_BORDER_LIGHT,
   },
-  headerTitle: { fontSize: 17, fontWeight: '800', color: TEXT },
-  headerSub: { fontSize: 11, color: TEXT_MUTED, marginTop: 2, fontWeight: '600' },
+  headerTitle: { fontSize: 17, fontWeight: '800', color: HEADER_NAVY, letterSpacing: 0.2 },
+  headerSub:   { fontSize: 11, color: TEXT_MUTED, marginTop: 2, fontWeight: '600' },
 
   body: { padding: 16, paddingBottom: 32 },
 

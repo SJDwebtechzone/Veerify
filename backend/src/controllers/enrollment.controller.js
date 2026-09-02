@@ -3276,3 +3276,365 @@ exports.deleteStudentByAdmin = async (req, res) => {
     client.release();
   }
 };
+
+// ─────────────────────────────────────────────────────────────────────
+// PATCH /api/enrollments/:id/course
+//
+// Institution admin switches this enrollment to a different course
+// offered by the same academy. Only enrollments.course_id changes —
+// attendance rows (keyed on batch_id + student_id), payments (keyed
+// on enrollment id via payment_reference), certificates, and belt
+// history all reference the enrollment/student ids, so they stay put.
+//
+// Body:  { course_id: number }
+// Guards:
+//   • Enrollment must belong to the caller's institution tree (or a
+//     sub-branch under the caller). Cross-academy transfers refused.
+//   • Target course must be under the SAME root institution AND
+//     `status='active'`. Prevents "transferred to a deleted /
+//     disabled course" bugs.
+//   • If the current enrollment has a batch, we DO NOT auto-detach —
+//     the admin is expected to run Transfer Batch next to pick a
+//     batch under the new course. We only WARN in the response if the
+//     student's current batch is now on a different course.
+// ─────────────────────────────────────────────────────────────────────
+exports.changeEnrollmentCourse = async (req, res) => {
+  try {
+    const enrollmentId = parseInt(req.params.id, 10);
+    const courseId     = parseInt(req.body?.course_id, 10);
+    if (!Number.isFinite(enrollmentId)) {
+      return res.status(400).json({ message: 'Bad enrollment id.' });
+    }
+    if (!Number.isFinite(courseId)) {
+      return res.status(400).json({ field: 'course_id', message: 'course_id is required.' });
+    }
+
+    // Resolve caller's institution tree root.
+    const meRes = await pool.query(
+      `SELECT u.institution_id,
+              COALESCE(i.parent_institution_id, i.id) AS root_id
+         FROM users u
+         LEFT JOIN institutions i ON i.id = u.institution_id
+        WHERE u.id = $1`,
+      [req.user.id],
+    );
+    const rootId = meRes.rows[0]?.root_id;
+    if (!rootId) return res.status(403).json({ message: 'No institution linked.' });
+
+    // Load the enrollment + verify it's in the caller's academy tree.
+    // Enrollments carry institution_id which is either the root or a
+    // sub-branch under it — accept either.
+    const enrollRes = await pool.query(
+      `SELECT e.id, e.student_id, e.course_id, e.batch_id, e.institution_id,
+              i.parent_institution_id
+         FROM enrollments e
+         JOIN institutions i ON i.id = e.institution_id
+        WHERE e.id = $1
+        LIMIT 1`,
+      [enrollmentId],
+    );
+    const enrollment = enrollRes.rows[0];
+    if (!enrollment) return res.status(404).json({ message: 'Enrollment not found.' });
+    const enrollRoot = enrollment.parent_institution_id || enrollment.institution_id;
+    if (enrollRoot !== rootId) {
+      return res.status(403).json({ message: 'Enrollment is not in your academy.' });
+    }
+
+    // Verify the target course belongs to the same root and is active.
+    const courseRes = await pool.query(
+      `SELECT c.id, c.name, c.institution_id, COALESCE(c.status, 'active') AS status
+         FROM courses c
+        WHERE c.id = $1
+        LIMIT 1`,
+      [courseId],
+    );
+    const course = courseRes.rows[0];
+    if (!course) return res.status(404).json({ message: 'Course not found.' });
+    if (course.institution_id !== rootId) {
+      return res.status(403).json({ message: 'Course is not in your academy.' });
+    }
+    if (course.status !== 'active') {
+      return res.status(400).json({ message: 'That course is not currently active.' });
+    }
+
+    if (enrollment.course_id === courseId) {
+      return res.status(200).json({
+        message: 'Student is already enrolled in this course.',
+        enrollment,
+        no_change: true,
+      });
+    }
+
+    // Capture the OLD course name BEFORE the update so the WhatsApp
+    // notification can include both previous and new course names.
+    let oldCourseName = null;
+    if (enrollment.course_id) {
+      const oldCourseRes = await pool.query(
+        `SELECT name FROM courses WHERE id = $1 LIMIT 1`,
+        [enrollment.course_id],
+      );
+      oldCourseName = oldCourseRes.rows[0]?.name || null;
+    }
+
+    // Warn (but don't refuse) when the current batch is no longer
+    // valid for the new course. The admin is expected to run Transfer
+    // Batch next to pick a batch under the new course. Surfaced as a
+    // `batch_mismatch: true` flag so the mobile can prompt.
+    let batchMismatch = false;
+    if (enrollment.batch_id) {
+      const bRes = await pool.query(
+        `SELECT course_id FROM batches WHERE id = $1`,
+        [enrollment.batch_id],
+      );
+      const bCourse = bRes.rows[0]?.course_id;
+      if (bCourse && bCourse !== courseId) batchMismatch = true;
+    }
+
+    const updated = await pool.query(
+      `UPDATE enrollments
+          SET course_id = $2,
+              updated_at = NOW()
+        WHERE id = $1
+        RETURNING id, student_id, course_id, batch_id, institution_id, payment_status`,
+      [enrollmentId, courseId],
+    );
+
+    // ── Async WhatsApp notification (fire-and-forget) ──────────────
+    // Runs AFTER the DB update has committed. A WhatsApp failure
+    // never rolls back the course change or affects the HTTP response.
+    (async () => {
+      try {
+        const { sendCourseTransferMessage } = require('../services/whatsapp.service');
+        // Fetch student details + institution name for the message.
+        const detailRes = await pool.query(
+          `SELECT u.name AS student_name, u.phone AS student_phone,
+                  COALESCE(ri.name, i.name) AS institution_name
+             FROM users u
+             LEFT JOIN institutions i  ON i.id = u.institution_id
+             LEFT JOIN institutions ri ON ri.id = i.parent_institution_id
+            WHERE u.id = $1
+            LIMIT 1`,
+          [enrollment.student_id],
+        );
+        const detail = detailRes.rows[0];
+        if (!detail || !detail.student_phone) {
+          console.log(
+            `[changeEnrollmentCourse] WhatsApp skipped → enrollment=${enrollmentId} reason=no-student-phone`,
+          );
+          return;
+        }
+        await sendCourseTransferMessage({
+          adminUserId:     req.user.id,
+          phone:           detail.student_phone,
+          studentName:     detail.student_name,
+          institutionName: detail.institution_name,
+          oldCourseName,
+          newCourseName:   course.name,
+        });
+      } catch (waErr) {
+        console.warn(
+          `[changeEnrollmentCourse] WhatsApp notification failed (non-blocking):`,
+          waErr?.message,
+        );
+      }
+    })();
+
+    return res.json({
+      message: 'Course changed successfully.',
+      enrollment: updated.rows[0],
+      new_course_name: course.name,
+      batch_mismatch:  batchMismatch,
+    });
+  } catch (err) {
+    // updated_at column may not exist on very old schemas — retry
+    // without it so a stale DB can't 500 the transfer.
+    if (err && err.code === '42703' && /updated_at/i.test(err.message || '')) {
+      try {
+        const enrollmentId = parseInt(req.params.id, 10);
+        const courseId     = parseInt(req.body?.course_id, 10);
+        const legacy = await pool.query(
+          `UPDATE enrollments SET course_id = $2 WHERE id = $1
+             RETURNING id, student_id, course_id, batch_id, institution_id, payment_status`,
+          [enrollmentId, courseId],
+        );
+        return res.json({
+          message: 'Course changed successfully.',
+          enrollment: legacy.rows[0],
+        });
+      } catch (_) { /* fall through */ }
+    }
+    console.error('changeEnrollmentCourse error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────
+// PATCH /api/enrollments/:id/batch
+//
+// Institution admin moves this enrollment to a different batch under
+// the same course + academy. Only enrollments.batch_id changes.
+// Attendance history stays on the OLD batch id (per-session rows are
+// keyed on (batch_id, student_id, date) — that's exactly the record
+// we want to preserve for historical reporting).
+//
+// Body:  { batch_id: number }
+// Guards:
+//   • Enrollment must belong to the caller's academy tree.
+//   • Target batch must exist AND be under the same academy tree.
+//   • Target batch must belong to the SAME course as the enrollment
+//     (the admin should Change Course first if they want a batch
+//     under a different course).
+//   • Target batch must NOT be the student's CURRENT batch.
+// ─────────────────────────────────────────────────────────────────────
+exports.transferEnrollmentBatch = async (req, res) => {
+  try {
+    const enrollmentId = parseInt(req.params.id, 10);
+    const batchId      = parseInt(req.body?.batch_id, 10);
+    if (!Number.isFinite(enrollmentId)) {
+      return res.status(400).json({ message: 'Bad enrollment id.' });
+    }
+    if (!Number.isFinite(batchId)) {
+      return res.status(400).json({ field: 'batch_id', message: 'batch_id is required.' });
+    }
+
+    const meRes = await pool.query(
+      `SELECT u.institution_id,
+              COALESCE(i.parent_institution_id, i.id) AS root_id
+         FROM users u
+         LEFT JOIN institutions i ON i.id = u.institution_id
+        WHERE u.id = $1`,
+      [req.user.id],
+    );
+    const rootId = meRes.rows[0]?.root_id;
+    if (!rootId) return res.status(403).json({ message: 'No institution linked.' });
+
+    const enrollRes = await pool.query(
+      `SELECT e.id, e.student_id, e.course_id, e.batch_id, e.institution_id,
+              i.parent_institution_id
+         FROM enrollments e
+         JOIN institutions i ON i.id = e.institution_id
+        WHERE e.id = $1
+        LIMIT 1`,
+      [enrollmentId],
+    );
+    const enrollment = enrollRes.rows[0];
+    if (!enrollment) return res.status(404).json({ message: 'Enrollment not found.' });
+    const enrollRoot = enrollment.parent_institution_id || enrollment.institution_id;
+    if (enrollRoot !== rootId) {
+      return res.status(403).json({ message: 'Enrollment is not in your academy.' });
+    }
+
+    if (enrollment.batch_id === batchId) {
+      return res.status(400).json({ message: 'Student is already in this batch.' });
+    }
+
+    // Capture the OLD batch name BEFORE the update so the WhatsApp
+    // notification can include both previous and new batch names.
+    let oldBatchName = null;
+    if (enrollment.batch_id) {
+      const oldBatchRes = await pool.query(
+        `SELECT name FROM batches WHERE id = $1 LIMIT 1`,
+        [enrollment.batch_id],
+      );
+      oldBatchName = oldBatchRes.rows[0]?.name || null;
+    }
+
+    // Target batch — must be same academy tree AND same course as the
+    // enrollment. batches.institution_id is the branch id when the
+    // batch runs at a sub-branch, so we join to institutions to walk
+    // to the tree root.
+    const batchRes = await pool.query(
+      `SELECT b.id, b.name, b.course_id, b.institution_id,
+              COALESCE(bi.parent_institution_id, bi.id) AS root_id
+         FROM batches b
+         JOIN institutions bi ON bi.id = b.institution_id
+        WHERE b.id = $1
+        LIMIT 1`,
+      [batchId],
+    );
+    const batch = batchRes.rows[0];
+    if (!batch) return res.status(404).json({ message: 'Batch not found.' });
+    if (batch.root_id !== rootId) {
+      return res.status(403).json({ message: 'Batch is not in your academy.' });
+    }
+    if (batch.course_id !== enrollment.course_id) {
+      return res.status(400).json({
+        message: 'That batch runs a different course. Change the course first if you want to move.',
+      });
+    }
+
+    const updated = await pool.query(
+      `UPDATE enrollments
+          SET batch_id = $2,
+              updated_at = NOW()
+        WHERE id = $1
+        RETURNING id, student_id, course_id, batch_id, institution_id, payment_status`,
+      [enrollmentId, batchId],
+    );
+
+    // ── Async WhatsApp notification (fire-and-forget) ──────────────
+    // Runs AFTER the DB update has committed. A WhatsApp failure
+    // never rolls back the batch transfer or affects the HTTP response.
+    (async () => {
+      try {
+        const { sendBatchTransferMessage } = require('../services/whatsapp.service');
+        // Fetch student details + institution name for the message.
+        const detailRes = await pool.query(
+          `SELECT u.name AS student_name, u.phone AS student_phone,
+                  COALESCE(ri.name, i.name) AS institution_name
+             FROM users u
+             LEFT JOIN institutions i  ON i.id = u.institution_id
+             LEFT JOIN institutions ri ON ri.id = i.parent_institution_id
+            WHERE u.id = $1
+            LIMIT 1`,
+          [enrollment.student_id],
+        );
+        const detail = detailRes.rows[0];
+        if (!detail || !detail.student_phone) {
+          console.log(
+            `[transferEnrollmentBatch] WhatsApp skipped → enrollment=${enrollmentId} reason=no-student-phone`,
+          );
+          return;
+        }
+        await sendBatchTransferMessage({
+          adminUserId:     req.user.id,
+          phone:           detail.student_phone,
+          studentName:     detail.student_name,
+          institutionName: detail.institution_name,
+          oldBatchName,
+          newBatchName:    batch.name,
+        });
+      } catch (waErr) {
+        console.warn(
+          `[transferEnrollmentBatch] WhatsApp notification failed (non-blocking):`,
+          waErr?.message,
+        );
+      }
+    })();
+
+    return res.json({
+      message: 'Batch transferred successfully.',
+      enrollment: updated.rows[0],
+      new_batch_name: batch.name,
+    });
+  } catch (err) {
+    if (err && err.code === '42703' && /updated_at/i.test(err.message || '')) {
+      try {
+        const enrollmentId = parseInt(req.params.id, 10);
+        const batchId      = parseInt(req.body?.batch_id, 10);
+        const legacy = await pool.query(
+          `UPDATE enrollments SET batch_id = $2 WHERE id = $1
+             RETURNING id, student_id, course_id, batch_id, institution_id, payment_status`,
+          [enrollmentId, batchId],
+        );
+        return res.json({
+          message: 'Batch transferred successfully.',
+          enrollment: legacy.rows[0],
+        });
+      } catch (_) { /* fall through */ }
+    }
+    console.error('transferEnrollmentBatch error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+

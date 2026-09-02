@@ -79,10 +79,24 @@ export default function Avatar({
   const resolved = uri ? resolveAssetUrl(uri) : null;
   const showImage = !!resolved && !failed && !icon;
 
+  // The container is a strict square; borderRadius: size/2 makes it a
+  // perfect circle. overflow: 'hidden' on the container is what
+  // actually clips the image — we deliberately do NOT set
+  // borderRadius on the Image itself. On Android in particular,
+  // borderRadius on <Image> combined with overflow:hidden on the
+  // parent has historically caused the image to shift a few pixels
+  // (Fresco's clip path applied twice) which shows up as a face
+  // sliding partially off the edge of the circle. Clipping via the
+  // parent only keeps rendering pixel-perfect on both platforms.
   const dim = {
     width:  size,
     height: size,
     borderRadius: size / 2,
+  };
+  const imgFill = {
+    width:  '100%',
+    height: '100%',
+    alignSelf: 'center',
   };
 
   if (showImage) {
@@ -90,7 +104,17 @@ export default function Avatar({
       <View style={[styles.wrap, dim, style]}>
         <Image
           source={{ uri: resolved }}
-          style={[dim, imageStyle]}
+          // `resizeMode='cover'` fills the circle without distorting
+          // the source. The image is centered inside the square
+          // container by cover's default centering behaviour, so the
+          // subject stays roughly in the middle of the circle.
+          //
+          // Note: `cover` on an off-center portrait will still crop
+          // the edges — the definitive fix for face-off-frame photos
+          // is an upload-time cropper. Callers can pass `imageStyle`
+          // with a `transform: [{ translateY: -N }]` to nudge the
+          // crop upward for a specific rendering surface if needed.
+          style={[imgFill, imageStyle]}
           resizeMode={fit}
           onError={() => setFailed(true)}
         />

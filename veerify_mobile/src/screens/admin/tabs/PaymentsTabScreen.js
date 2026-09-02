@@ -30,6 +30,9 @@ import {
 
 import { palette, spacing, radius, shadows, type } from '../../../theme';
 import FAB from '../../../components/FAB';
+// Shared Institution-admin ambient background — same light-blue
+// wash + soft glow blobs as the Home screen.
+import InstitutionScreenBackground from '../../../components/InstitutionScreenBackground';
 import apiClient from '../../../api/client';
 import { useBellScrollHandler } from '../../../components/bellScrollBus';
 
@@ -352,6 +355,8 @@ export default function PaymentsTabScreen({ route, navigation }) {
 
   return (
     <View style={styles.screen}>
+      {/* Shared ambient background — painted behind all content. */}
+      <InstitutionScreenBackground layer />
       <ScrollView
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{ paddingBottom: 140 }}
@@ -868,7 +873,8 @@ function MetaCell({ icon: Icon, label, value }) {
 
 // ─── Styles ──────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: palette.bg },
+  // Base fill matches the shared Institution ambient background.
+  screen: { flex: 1, backgroundColor: '#F1F6FB' },
 
   // Header
   header: {
@@ -881,11 +887,24 @@ const styles = StyleSheet.create({
   },
   title: { ...type.display, color: palette.text },
   subtitle: { ...type.caption, color: palette.textMuted, marginTop: 2 },
+  // Icon button — glass chip matching Home / Students.
   iconButton: {
     width: 42, height: 42, borderRadius: 21,
-    backgroundColor: palette.surface,
+    backgroundColor: 'rgba(255,255,255,0.62)',
+    borderTopWidth: 1.5,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderLeftWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.95)',
+    borderRightColor: 'rgba(255,255,255,0.6)',
+    borderBottomColor: 'rgba(255,255,255,0.6)',
+    borderLeftColor: 'rgba(255,255,255,0.6)',
     alignItems: 'center', justifyContent: 'center',
-    ...shadows.card,
+    shadowColor: '#1E40AF',
+    shadowOpacity: 0.10,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
   },
 
   // ── Wallet teaser card (above the hero) ──────────────────────────────────
@@ -1212,22 +1231,35 @@ const styles = StyleSheet.create({
   tileLabel: { ...type.caption, fontWeight: '700' },
   tileSub:   { ...type.micro, opacity: 0.7 },
 
-  // Search
+  // Search — frosted glass bar matching Home / Students.
   searchWrap: {
     marginHorizontal: spacing.xl,
     marginTop: spacing.lg,
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
-    backgroundColor: palette.surface,
+    backgroundColor: 'rgba(255,255,255,0.6)',
+    borderTopWidth: 1.5,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderLeftWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.95)',
+    borderRightColor: 'rgba(255,255,255,0.6)',
+    borderBottomColor: 'rgba(255,255,255,0.6)',
+    borderLeftColor: 'rgba(255,255,255,0.6)',
     borderRadius: radius.lg,
     paddingHorizontal: spacing.lg,
     height: 48,
-    ...shadows.card,
+    shadowColor: '#1E40AF',
+    shadowOpacity: 0.10,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
   },
   searchInput: { flex: 1, ...type.body, color: palette.text, padding: 0 },
 
-  // Tabs
+  // Tabs — inactive tabs are translucent glass pills; active tab
+  // keeps the brand red so Earnings' identity color still leads.
   tabsWrap: { paddingVertical: spacing.lg },
   tab: {
     flexDirection: 'row',
@@ -1236,15 +1268,20 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.lg,
     height: 36,
     borderRadius: radius.pill,
-    backgroundColor: palette.surface,
+    backgroundColor: 'rgba(255,255,255,0.55)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.75)',
   },
-  tabFocused: { backgroundColor: palette.purple.vivid },
+  tabFocused: {
+    backgroundColor: palette.purple.vivid,
+    borderColor: palette.purple.vivid,
+  },
   tabText: { ...type.caption, color: palette.textMuted, fontWeight: '600' },
   tabTextFocused: { color: '#fff' },
   tabBadge: {
     minWidth: 22, height: 20, paddingHorizontal: 6,
     borderRadius: 10,
-    backgroundColor: palette.borderSoft,
+    backgroundColor: 'rgba(148,163,184,0.22)',
     alignItems: 'center', justifyContent: 'center',
   },
   tabBadgeFocused: { backgroundColor: 'rgba(255,255,255,0.25)' },
@@ -1262,15 +1299,30 @@ const styles = StyleSheet.create({
   listHeaderTitle: { ...type.h2, color: palette.text },
   listHeaderCount: { ...type.caption, color: palette.textMuted },
 
-  // List
+  // List — premium glass container for the payment rows. The list
+  // wraps every row in one glassy card so the individual rows
+  // read as items INSIDE a glass panel rather than each having
+  // their own drop-shadow (matches the reference).
   list: {
-    backgroundColor: palette.surface,
-    borderRadius: radius.lg,
+    backgroundColor: 'rgba(255,255,255,0.6)',
+    borderTopWidth: 1.5,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderLeftWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.95)',
+    borderRightColor: 'rgba(255,255,255,0.6)',
+    borderBottomColor: 'rgba(255,255,255,0.6)',
+    borderLeftColor: 'rgba(255,255,255,0.6)',
+    borderRadius: radius.xl,
     marginHorizontal: spacing.xl,
     paddingVertical: spacing.sm,
-    ...shadows.card,
+    shadowColor: '#1E40AF',
+    shadowOpacity: 0.11,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 4,
   },
-  rowDivider: { height: 1, backgroundColor: palette.borderSoft, marginHorizontal: spacing.lg },
+  rowDivider: { height: 1, backgroundColor: 'rgba(148,163,184,0.22)', marginHorizontal: spacing.lg },
 
   empty: {
     alignItems: 'center',

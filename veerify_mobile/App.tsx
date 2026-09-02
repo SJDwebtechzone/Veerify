@@ -5,6 +5,11 @@ import { AuthProvider } from './src/context/AuthContext';
 import { InstitutionProvider } from './src/context/InstitutionContext';
 import { ChildProvider } from './src/context/ChildContext';
 import { NotificationAlertProvider } from './src/context/NotificationAlertContext';
+// Theme (light / dark) — persisted to AsyncStorage so the saved
+// preference applies immediately on next launch without a flash of
+// the wrong theme. Provider MUST wrap AppNavigator so useTheme() is
+// reachable from every screen.
+import { ThemeProvider } from './src/theme/ThemeContext';
 import AppNavigator from './src/navigation/AppNavigator';
 import { ConfirmDialogHost } from './src/components/ConfirmDialog';
 import GlobalNotificationBell from './src/components/GlobalNotificationBell';
@@ -39,27 +44,29 @@ export default function App() {
   return (
     <ErrorBoundary>
       <SafeAreaProvider>
-        <AuthProvider>
-          <InstitutionProvider>
-            <ChildProvider>
-              {/* Polls /api/notifications while signed in. On every new
-                  arrival it vibrates, plays an optional tone, and slides
-                  an in-app banner down from the top of the screen. */}
-              <NotificationAlertProvider>
-                <AppNavigator />
-                {/* Imperative styled confirm() dialog host — must be inside
-                    SafeAreaProvider so its statusBar overlay sits right. */}
-                <ConfirmDialogHost />
-                {/* Floating notification bell that stays visible on every
-                    screen (guest + all logged-in roles). Rendered outside
-                    AppNavigator so it doesn't have to be plumbed through
-                    each screen's header. Hides itself on auth screens and
-                    on the notifications screen itself. */}
-                <GlobalNotificationBell />
-              </NotificationAlertProvider>
-            </ChildProvider>
-          </InstitutionProvider>
-        </AuthProvider>
+        <ThemeProvider>
+          <AuthProvider>
+            <InstitutionProvider>
+              <ChildProvider>
+                {/* Polls /api/notifications while signed in. On every new
+                    arrival it vibrates, plays an optional tone, and slides
+                    an in-app banner down from the top of the screen. */}
+                <NotificationAlertProvider>
+                  <AppNavigator />
+                  {/* Imperative styled confirm() dialog host — must be inside
+                      SafeAreaProvider so its statusBar overlay sits right. */}
+                  <ConfirmDialogHost />
+                  {/* Floating notification bell that stays visible on every
+                      screen (guest + all logged-in roles). Rendered outside
+                      AppNavigator so it doesn't have to be plumbed through
+                      each screen's header. Hides itself on auth screens and
+                      on the notifications screen itself. */}
+                  <GlobalNotificationBell />
+                </NotificationAlertProvider>
+              </ChildProvider>
+            </InstitutionProvider>
+          </AuthProvider>
+        </ThemeProvider>
       </SafeAreaProvider>
     </ErrorBoundary>
   );

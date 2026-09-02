@@ -90,6 +90,11 @@ export default function EnrolledCourseScreen({ route, navigation }) {
   const [videos, setVideos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  // Per-curriculum-item promotion state keyed by lesson_index.
+  // Populated from /belt-promotion-requests/mine on load so the
+  // student sees "Promoted" next to any lesson the institution has
+  // approved for them.
+  const [promoByItem, setPromoByItem] = useState({});
 
   const load = useCallback(async () => {
     if (!enrollmentId) {
@@ -114,6 +119,46 @@ export default function EnrolledCourseScreen({ route, navigation }) {
       const allVideos = v.data?.videos || [];
       // Filter to this batch only
       setVideos(allVideos.filter((video) => video.batch_id === found?.batch_id));
+
+      // Per-curriculum-item promotion state for THIS student, keyed
+      // by curriculum_item_id (which our mobile trainer client
+      // stores as the 0-based lesson_index for JSONB curricula).
+      // The endpoint is trainer-scoped by default; students hit
+      // /belt-promotion-requests/mine-as-student for their own
+      // approved rows.
+      try {
+        const pr = await apiClient
+          .get('/belt-promotion-requests/mine-as-student')
+          .catch(() => ({ data: { requests: [] } }));
+        const rows = Array.isArray(pr.data?.requests) ? pr.data.requests : [];
+        const map = {};
+        // Newest first for real-item requests.
+        const sortedDesc = rows.slice().sort(
+          (a, b) => new Date(b.created_at) - new Date(a.created_at),
+        );
+        sortedDesc.forEach((r) => {
+          if (r.curriculum_item_id != null && !map[r.curriculum_item_id]) {
+            map[r.curriculum_item_id] = r;
+          }
+        });
+        // Legacy compat — student side only ever cares about
+        // APPROVED promotions (pending / declined are internal),
+        // so we auto-assign approved null-item legacy rows to
+        // lesson indexes 0, 1, 2, ... oldest-first. Newly
+        // submitted requests always carry a real curriculum_item_id
+        // and skip this branch.
+        const legacyAsc = sortedDesc
+          .filter((r) => r.curriculum_item_id == null && r.status === 'approved')
+          .slice()
+          .reverse();
+        let cursor = 0;
+        legacyAsc.forEach((r) => {
+          while (map[cursor] != null) cursor += 1;
+          map[cursor] = r;
+          cursor += 1;
+        });
+        setPromoByItem(map);
+      } catch { /* best-effort */ }
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -268,16 +313,34 @@ export default function EnrolledCourseScreen({ route, navigation }) {
         {curriculum.length > 0 ? (
           <Section title="Curriculum" icon={ListChecks}>
             <View style={{ gap: 8 }}>
-              {curriculum.map((item, i) => (
-                <View key={i} style={styles.curriculumRow}>
-                  <View style={styles.curriculumDot}>
-                    <Text style={styles.curriculumDotText}>{i + 1}</Text>
+              {curriculum.map((item, i) => {
+                // Per-item promotion badge — the trainer client keys
+                // requests by 0-based lesson_index, so the same key
+                // is used here. Only APPROVED rows surface the
+                // "Promoted" pill (pending/declined stay internal).
+                const promo = promoByItem[i];
+                const isPromoted = promo && promo.status === 'approved';
+                return (
+                  <View key={i} style={styles.curriculumRow}>
+                    <View style={styles.curriculumDot}>
+                      <Text style={styles.curriculumDotText}>{i + 1}</Text>
+                    </View>
+                    <Text style={styles.curriculumText}>
+                      {typeof item === 'string' ? item : (item?.title || item?.name || JSON.stringify(item))}
+                    </Text>
+                    {isPromoted ? (
+                      <View style={{
+                        paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999,
+                        backgroundColor: '#DCFCE7',
+                      }}>
+                        <Text style={{ fontSize: 10, fontWeight: '800', color: '#166534' }}>
+                          Promoted
+                        </Text>
+                      </View>
+                    ) : null}
                   </View>
-                  <Text style={styles.curriculumText}>
-                    {typeof item === 'string' ? item : (item?.title || item?.name || JSON.stringify(item))}
-                  </Text>
-                </View>
-              ))}
+                );
+              })}
             </View>
           </Section>
         ) : null}
